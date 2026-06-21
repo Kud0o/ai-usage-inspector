@@ -1,0 +1,12 @@
+# dependencies (there are none, but just in case)
+node_modules/
+
+# local test scaffolding
+.testdata/
+.testhome/
+*.log
+
+# unrelated workspace scaffolding / local machine config
+.agents/
+.claude/
+skills-lock.json

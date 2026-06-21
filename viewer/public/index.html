@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Claude Usage · Observatory</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,900&family=JetBrains+Mono:wght@400;500;700&family=Archivo:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="dot"></span>
+    <h1>CLAUDE&nbsp;USAGE<em>observatory</em></h1>
+  </div>
+  <div class="topmeta">
+    <span id="meta-range" class="mono muted">—</span>
+    <button id="refresh" class="btn" title="Reload data">↻ refresh</button>
+  </div>
+</header>
+
+<section class="stats" id="stats"></section>
+
+<section class="charts" id="charts"></section>
+
+<section class="controls" id="controls">
+  <div class="ctl search">
+    <input id="f-search" type="search" placeholder="search prompts, responses, slugs…" />
+  </div>
+  <label class="ctl"><span>workspace</span><select id="f-workspace"></select></label>
+  <label class="ctl"><span>model</span><select id="f-model"></select></label>
+  <label class="ctl"><span>mode</span><select id="f-mode"></select></label>
+  <label class="ctl"><span>effort</span><select id="f-effort"></select></label>
+  <label class="ctl"><span>since</span><input id="f-since" type="date" /></label>
+  <label class="ctl"><span>min context %</span><input id="f-ctx" type="range" min="0" max="100" value="0" /><b id="f-ctx-v" class="mono">0</b></label>
+  <label class="ctl chk"><input id="f-group" type="checkbox" checked /><span>group by session</span></label>
+  <button id="f-clear" class="btn ghost">clear</button>
+</section>
+
+<section class="tablewrap">
+  <table class="grid" id="grid">
+    <thead>
+      <tr>
+        <th data-sort="ts" class="sortable">when</th>
+        <th data-sort="workspace" class="sortable">workspace</th>
+        <th data-sort="model" class="sortable">model</th>
+        <th data-sort="permissionMode" class="sortable">mode</th>
+        <th data-sort="_in" class="sortable num">in</th>
+        <th data-sort="_out" class="sortable num">out</th>
+        <th data-sort="contextFillPct" class="sortable num">context</th>
+        <th data-sort="_cost" class="sortable num">cost</th>
+        <th class="grow">prompt</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="empty" class="empty" hidden>No prompts recorded yet. Start a Claude Code session with the hook installed.</div>
+</section>
+
+<div id="drawer" class="drawer" hidden>
+  <div class="drawer-scrim" data-close></div>
+  <aside class="drawer-panel" id="drawer-panel"></aside>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

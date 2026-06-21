@@ -1,0 +1,4 @@
+# Normalize line endings: keep LF in the repo across platforms.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
