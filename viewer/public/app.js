@@ -1,7 +1,10 @@
 "use strict";
 
-const PALETTE = ["#e0785f", "#58b4cf", "#f0b429", "#9b8cd6", "#84b06a", "#d35b4a", "#8b887f"];
 const $ = (s, r = document) => r.querySelector(s);
+
+// theme tokens read live from CSS vars so charts repaint correctly on light/dark
+const cssv = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const palette = () => ["--accent", "--cyan", "--amber", "--violet", "--green", "--red", "--faint"].map(cssv);
 
 const state = {
   all: [],
@@ -11,20 +14,22 @@ const state = {
   group: true,
 };
 
-// ---------- formatting ----------
-const fmtInt = (n) => (n || 0).toLocaleString("en-US");
+// ---------- formatting (locale-aware: honors the viewer's browser locale) ----------
+const fmtInt = (n) => (n || 0).toLocaleString();
 function fmtTok(n) {
   n = n || 0;
   if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
   if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
   if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
-  return String(n);
+  return n.toLocaleString();
 }
-const fmtUsd = (n) => "$" + (n || 0).toFixed(n < 10 ? 3 : 2);
+const _usd2 = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 });
+const _usd3 = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 3, maximumFractionDigits: 3 });
+const fmtUsd = (n) => ((n = n || 0) < 10 ? _usd3 : _usd2).format(n);
+const _whenFmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 function fmtWhen(ts) {
   if (!ts) return "—";
-  const d = new Date(ts);
-  return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+  return _whenFmt.format(new Date(ts));
 }
 function fmtDur(ms) {
   const s = Math.round((ms || 0) / 1000);
@@ -142,19 +147,20 @@ function renderStats() {
   const dur = v.reduce((a, e) => a + (e.durationMs || 0), 0);
   const subs = v.reduce((a, e) => a + (e.counts ? e.counts.subagentCalls : 0), 0);
 
-  const byModel = tally(v, (e) => e.model, COST);
+  const byModel = tally(v, (e) => e.model, () => 1);
   const topModel = topKey(byModel);
   const byWs = tally(v, (e) => e.workspace, () => 1);
   const topWs = topKey(byWs);
 
+  // ordered by what matters most for hands-on work; $ is an estimate, kept last
   const cards = [
+    { label: "tokens · total", val: fmtTok(ttot), sub: `${fmtTok(tin)} in · ${fmtTok(tout)} out`, cls: "accent" },
     { label: "prompts", val: fmtInt(prompts), sub: `${subs} subagent calls`, cls: "" },
-    { label: "total cost", val: fmtUsd(cost), sub: prompts ? `${fmtUsd(cost / prompts)} / prompt` : "—", cls: "accent", bar: 100 },
-    { label: "tokens · total", val: fmtTok(ttot), sub: `${fmtTok(tin)} in · ${fmtTok(tout)} out`, cls: "amber" },
-    { label: "avg context", val: avgCtx.toFixed(1) + "<small>%</small>", sub: "of window filled", cls: "", bar: avgCtx },
+    { label: "avg context", val: avgCtx.toFixed(1) + "<small>%</small>", sub: "of window filled", cls: "amber", bar: avgCtx },
     { label: "active time", val: fmtDur(dur), sub: "summed turn duration", cls: "" },
-    { label: "top model", val: shortModel(topModel), sub: topModel ? fmtUsd(byModel[topModel]) : "—", cls: "" },
+    { label: "top model", val: shortModel(topModel), sub: topModel ? byModel[topModel] + " prompts" : "—", cls: "" },
     { label: "busiest workspace", val: esc(topWs || "—"), sub: topWs ? byWs[topWs] + " prompts" : "—", cls: "" },
+    { label: "est. cost", val: fmtUsd(cost), sub: prompts ? `${fmtUsd(cost / prompts)} / prompt` : "—", cls: "cost" },
   ];
   $("#stats").innerHTML = cards
     .map(
@@ -187,7 +193,7 @@ function renderCharts() {
   const tok = keys.map((k) => days[k].tok);
   const cost = keys.map((k) => days[k].cost);
 
-  const modelCost = tally(v, (e) => shortModel(e.model), COST);
+  const modelCount = tally(v, (e) => shortModel(e.model), () => 1);
   const modeCount = tally(v, (e) => e.permissionMode, () => 1);
 
   // context distribution (10 buckets)
@@ -197,14 +203,12 @@ function renderCharts() {
   $("#charts").innerHTML = `
     <div class="card span2">
       <h3>tokens over time <b>${fmtTok(tok.reduce((a, b) => a + b, 0))}</b></h3>
-      ${areaChart(keys, tok, "#e0785f")}
+      ${areaChart(keys, tok, cssv("--accent"))}
     </div>
-    <div class="stack">
-      <div class="card"><h3>cost / day <b>${fmtUsd(cost.reduce((a, b) => a + b, 0))}</b></h3>${barChart(keys, cost, "#f0b429", (x) => fmtUsd(x))}</div>
-    </div>
-    <div class="card"><h3>cost by model</h3>${donut(modelCost, (x) => fmtUsd(x))}</div>
     <div class="card"><h3>context fill distribution</h3>${histogram(buckets)}</div>
     <div class="card"><h3>permission mode</h3>${donut(modeCount, (x) => x + " prompts")}</div>
+    <div class="card"><h3>prompts by model</h3>${donut(modelCount, (x) => x + " prompts")}</div>
+    <div class="card"><h3>est. cost / day <b class="cost-b">${fmtUsd(cost.reduce((a, b) => a + b, 0))}</b></h3>${barChart(keys, cost, cssv("--faint"), (x) => fmtUsd(x))}</div>
   `;
 }
 
@@ -248,11 +252,12 @@ function donut(map, fmt) {
   const entries = Object.entries(map).sort((a, b) => b[1] - a[1]);
   const total = entries.reduce((a, [, v]) => a + v, 0);
   if (!total) return emptyChart();
+  const PAL = palette();
   const R = 52, C = 2 * Math.PI * R;
   let off = 0;
   const arcs = entries
     .map(([k, v], i) => {
-      const frac = v / total, len = frac * C, col = PALETTE[i % PALETTE.length];
+      const frac = v / total, len = frac * C, col = PAL[i % PAL.length];
       const seg = `<circle r="${R}" cx="70" cy="70" fill="none" stroke="${col}" stroke-width="16"
         stroke-dasharray="${len.toFixed(2)} ${(C - len).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}"
         transform="rotate(-90 70 70)"/>`;
@@ -260,29 +265,30 @@ function donut(map, fmt) {
     })
     .join("");
   const legend = entries
-    .map(([k, v], i) => `<span><i style="background:${PALETTE[i % PALETTE.length]}"></i>${esc(k)} · ${fmt(v)}</span>`)
+    .map(([k, v], i) => `<span><i style="background:${PAL[i % PAL.length]}"></i>${esc(k)} · ${fmt(v)}</span>`)
     .join("");
   return `<div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap">
     <svg viewBox="0 0 140 140" style="width:128px;height:128px;flex:0 0 auto">${arcs}
-      <text x="70" y="66" text-anchor="middle" fill="#ece9e3" font-family="Fraunces,serif" font-size="20" font-weight="600">${entries.length}</text>
-      <text x="70" y="84" text-anchor="middle" fill="#8b887f" font-family="JetBrains Mono,monospace" font-size="8" letter-spacing="1">TYPES</text>
+      <text x="70" y="66" text-anchor="middle" fill="${cssv("--text")}" font-family="var(--display)" font-size="20" font-weight="600">${entries.length}</text>
+      <text x="70" y="84" text-anchor="middle" fill="${cssv("--muted")}" font-family="var(--mono)" font-size="8" letter-spacing="1">TYPES</text>
     </svg><div class="legend" style="flex:1">${legend}</div></div>`;
 }
 
 function histogram(buckets) {
   const max = Math.max(...buckets, 1);
+  const cHot = cssv("--accent"), cWarn = cssv("--amber"), cCool = cssv("--cyan"), cLabel = cssv("--faint");
   const bars = buckets
     .map((c, i) => {
-      const h = (c / max) * 92, hot = i >= 8 ? "#e0785f" : i >= 5 ? "#f0b429" : "#58b4cf";
+      const h = (c / max) * 92, hot = i >= 8 ? cHot : i >= 5 ? cWarn : cCool;
       return `<div title="${i * 10}–${i * 10 + 10}% · ${c}" style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px">
         <div style="width:100%;height:${h}px;min-height:${c ? 2 : 0}px;background:${hot};border-radius:3px 3px 0 0"></div>
-        <span style="font-family:JetBrains Mono;font-size:8px;color:#565249">${i * 10}</span></div>`;
+        <span style="font-family:var(--mono);font-size:8px;color:${cLabel}">${i * 10}</span></div>`;
     })
     .join("");
   return `<div style="display:flex;align-items:flex-end;gap:3px;height:118px">${bars}</div>`;
 }
 
-const emptyChart = () => `<div style="height:120px;display:grid;place-items:center;color:#565249;font-family:JetBrains Mono;font-size:11px">no data in range</div>`;
+const emptyChart = () => `<div style="height:120px;display:grid;place-items:center;color:var(--faint);font-family:var(--mono);font-size:11px">no data in range</div>`;
 
 // ---------- table ----------
 function sorted() {
@@ -309,7 +315,7 @@ function rowHtml(e) {
     <td class="num">${fmtTok(T_IN(e))}</td>
     <td class="num">${fmtTok(T_OUT(e))}</td>
     <td class="num">${ctxBar(e.contextFillPct)}</td>
-    <td class="num" style="color:var(--amber)">${fmtUsd(COST(e))}</td>
+    <td class="num cost-cell">${fmtUsd(COST(e))}</td>
     <td class="prompt-cell">${esc(e.promptPreview)}</td>
   </tr>`;
 }
@@ -347,6 +353,75 @@ function markSort() {
   });
 }
 
+// ---------- markdown preview (zero-dep, XSS-safe: escape first, then format) ----------
+// Inline operates on already-escaped text, so injected tags are ours only.
+function mdInline(s) {
+  return s
+    .replace(/`([^`]+)`/g, (m, c) => `<code>${c}</code>`)
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (m, t, u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>");
+}
+const splitRow = (s) => s.trim().replace(/^\|/, "").replace(/\|$/, "").split("|");
+
+function renderMd(src) {
+  if (!src || !src.trim()) return `<p class="md-empty muted">— empty —</p>`;
+  const L = esc(src).replace(/\r\n?/g, "\n").split("\n");
+  let html = "", i = 0;
+  const isBlockStart = (s) => /^\s*(#{1,6}\s|```|>|([-*+]|\d+\.)\s)/.test(s);
+  while (i < L.length) {
+    const line = L[i];
+    const fence = line.match(/^\s*```(.*)$/);
+    if (fence) {
+      const lang = fence[1].trim(); const code = []; i++;
+      while (i < L.length && !/^\s*```\s*$/.test(L[i])) { code.push(L[i]); i++; }
+      i++;
+      html += `<pre class="md-code"${lang ? ` data-lang="${lang}"` : ""}><code>${code.join("\n")}</code></pre>`;
+      continue;
+    }
+    // GFM table: row with pipes followed by a |---|:--| separator
+    if (line.includes("|") && i + 1 < L.length && L[i + 1].includes("-") && /^[\s|:-]+$/.test(L[i + 1]) && L[i + 1].includes("|")) {
+      const head = splitRow(line);
+      const al = splitRow(L[i + 1]).map((c) => { c = c.trim(); const l = c.startsWith(":"), r = c.endsWith(":"); return l && r ? "center" : r ? "right" : l ? "left" : ""; });
+      i += 2; const rows = [];
+      while (i < L.length && L[i].includes("|") && L[i].trim() !== "") { rows.push(splitRow(L[i])); i++; }
+      const cell = (c, j, tag) => `<${tag}${al[j] ? ` style="text-align:${al[j]}"` : ""}>${mdInline((c || "").trim())}</${tag}>`;
+      html += `<table class="md-table"><thead><tr>${head.map((c, j) => cell(c, j, "th")).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${head.map((_, j) => cell(r[j], j, "td")).join("")}</tr>`).join("")}</tbody></table>`;
+      continue;
+    }
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { const lv = h[1].length; html += `<h${lv} class="md-h">${mdInline(h[2].trim())}</h${lv}>`; i++; continue; }
+    if (/^\s*([-*_])\1\1+\s*$/.test(line)) { html += `<hr class="md-hr"/>`; i++; continue; }
+    if (/^\s*>\s?/.test(line)) {
+      const buf = []; while (i < L.length && /^\s*>\s?/.test(L[i])) { buf.push(L[i].replace(/^\s*>\s?/, "")); i++; }
+      html += `<blockquote class="md-quote">${mdInline(buf.join(" ").trim())}</blockquote>`; continue;
+    }
+    if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
+      const ordered = /^\s*\d+\.\s+/.test(line); const items = [];
+      while (i < L.length && /^\s*([-*+]|\d+\.)\s+/.test(L[i])) { items.push(L[i].replace(/^\s*([-*+]|\d+\.)\s+/, "")); i++; }
+      const tag = ordered ? "ol" : "ul";
+      html += `<${tag} class="md-list">${items.map((it) => `<li>${mdInline(it.trim())}</li>`).join("")}</${tag}>`;
+      continue;
+    }
+    if (line.trim() === "") { i++; continue; }
+    const para = [];
+    while (i < L.length && L[i].trim() !== "" && !isBlockStart(L[i]) && !L[i].includes("|")) { para.push(L[i]); i++; }
+    if (para.length) html += `<p class="md-p">${mdInline(para.join("\n")).replace(/\n/g, "<br/>")}</p>`;
+    else { html += `<p class="md-p">${mdInline(line)}</p>`; i++; }
+  }
+  return html;
+}
+
+// rendered + raw view with a toggle
+function detailBlock(kind, label, chars, text) {
+  return `<div class="block ${kind}">
+    <div class="bh"><span>${label}</span><span class="bh-r"><button class="md-toggle" data-raw type="button">raw</button>${fmtInt(chars)} chars</span></div>
+    <div class="md">${renderMd(text)}</div>
+    <pre class="raw" hidden>${esc(text) || '<span class="muted">— empty —</span>'}</pre>
+  </div>`;
+}
+
 // ---------- drawer ----------
 async function openDrawer(id) {
   const drawer = $("#drawer");
@@ -357,7 +432,7 @@ async function openDrawer(id) {
   if (!e || !e.id) { $("#drawer-panel").innerHTML = `<div class="muted mono" style="padding:40px">not found</div>`; return; }
   const u = e.usage, c = e.cost, k = e.counts;
   $("#drawer-panel").innerHTML = `
-    <button class="btn ghost dclose" data-close>✕ close</button>
+    <div class="dhead"><span class="deyebrow">prompt detail</span><button class="btn ghost dclose" data-close>✕ close</button></div>
     <h2>${esc(e.workspace)} <span class="muted" style="font-family:var(--mono);font-size:13px">/ ${esc(e.slug || "")}</span></h2>
     <div class="dmeta">
       <span>${fmtWhen(e.ts)}</span><span>${esc(e.model)}</span>
@@ -376,8 +451,8 @@ async function openDrawer(id) {
       <div><div class="k">api calls</div><div class="v">${k.apiCalls} <span class="muted" style="font-size:11px">+${k.subagentCalls} sub</span></div></div>
       <div><div class="k">tools / think</div><div class="v">${k.toolCalls} / ${k.thinkingBlocks}</div></div>
     </div>
-    <div class="block"><div class="bh"><span>prompt</span><span>${fmtInt(e.promptChars)} chars</span></div><pre>${esc(e.prompt)}</pre></div>
-    <div class="block"><div class="bh"><span>response</span><span>${fmtInt(e.responseChars)} chars</span></div><pre>${esc(e.response) || '<span class="muted">— no main-thread text —</span>'}</pre></div>
+    ${detailBlock("prompt", "prompt", e.promptChars, e.prompt)}
+    ${detailBlock("response", "response", e.responseChars, e.response)}
     <div class="block"><div class="bh"><span>cost breakdown · USD</span></div><pre>input  ${fmtUsd(c.input)}
 output ${fmtUsd(c.output)}
 cache write ${fmtUsd(c.cacheWrite)}
@@ -386,6 +461,18 @@ cache read  ${fmtUsd(c.cacheRead)}
 total  ${fmtUsd(c.total)}</pre></div>`;
 }
 function closeDrawer() { $("#drawer").hidden = true; }
+
+// ---------- theme (light / dark, persisted; default = system) ----------
+function setTheme(t) {
+  document.documentElement.setAttribute("data-theme", t);
+  try { localStorage.setItem("cu-theme", t); } catch {}
+  const b = $("#theme"); if (b) b.textContent = t === "light" ? "☾" : "☀";
+  if (state.all.length) renderCharts(); // SVGs bake colors → repaint
+}
+function initTheme() {
+  let t; try { t = localStorage.getItem("cu-theme"); } catch {}
+  setTheme(t || document.documentElement.getAttribute("data-theme") || "dark");
+}
 
 // ---------- events ----------
 function bind() {
@@ -401,6 +488,10 @@ function bind() {
     apply();
   });
   $("#refresh").addEventListener("click", load);
+  $("#theme").addEventListener("click", () => {
+    const cur = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+    setTheme(cur === "light" ? "dark" : "light");
+  });
   document.querySelectorAll(".grid th.sortable").forEach((th) =>
     th.addEventListener("click", () => {
       const k = th.dataset.sort;
@@ -412,9 +503,19 @@ function bind() {
   $("#rows").addEventListener("click", (e) => {
     const tr = e.target.closest("tr.row"); if (tr) openDrawer(tr.dataset.id);
   });
-  $("#drawer").addEventListener("click", (e) => { if (e.target.dataset.close !== undefined) closeDrawer(); });
+  $("#drawer").addEventListener("click", (e) => {
+    if (e.target.dataset.close !== undefined) return closeDrawer();
+    if (e.target.dataset.raw !== undefined) {
+      const block = e.target.closest(".block"); if (!block) return;
+      const raw = block.classList.toggle("show-raw");
+      e.target.textContent = raw ? "rendered" : "raw";
+      block.querySelector(".md").hidden = raw;
+      block.querySelector(".raw").hidden = !raw;
+    }
+  });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
 }
 
 bind();
+initTheme();
 boot();

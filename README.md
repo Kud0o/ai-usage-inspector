@@ -6,7 +6,7 @@
 
 ![Node](https://img.shields.io/badge/Node-%E2%89%A518-339933?logo=node.js&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-success)
-![Hook](https://img.shields.io/badge/Claude_Code-Stop_hook-e0785f)
+![Hook](https://img.shields.io/badge/Claude_Code-Stop_hook-2f6fed)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 </div>
@@ -31,9 +31,14 @@ dashboard to slice through it.
 - **Accurate accounting** — dedupes streamed transcript lines, attributes **subagent**
   token spend to the parent prompt, and prices each message at *its own* model.
 - **Self-contained per project** — each project's `.claude-usage/` holds its data, a bundled viewer, and your saved view settings (`config.json`). Safe under concurrent sessions. Opt into a combined dashboard with one env var.
-- **Insightful dashboard** — summary cards, charts (tokens & cost over time, cost-by-model,
-  context-fill distribution, mode split), filters, and click-to-expand drill-down.
-- **Zero dependencies, zero build** — pure Node (`fs`/`http`). Nothing to `npm install`.
+- **Insightful dashboard** — summary cards, inline-SVG charts (tokens over time, context-fill
+  distribution, permission-mode and per-model splits), a filter bar, and click-to-expand drill-down.
+- **Built for any team** — professional **light / dark** themes with a one-click toggle,
+  **locale-aware** numbers and dates, and broad-script typography (IBM Plex). The drill-down
+  **renders Markdown** — tables, code blocks, and lists from your prompts and responses display
+  as formatted content (with a raw toggle), safely escaped.
+- **Zero dependencies, zero build** — pure Node (`fs`/`http`) on the server, vanilla JS on the
+  client. Nothing to `npm install`, nothing to compile.
 
 ## Quick start
 
@@ -112,10 +117,17 @@ manually if you want them gone.
 
 ## The dashboard
 
-- **Summary cards** — prompts, total cost, total tokens, avg context, active time, top model, busiest workspace.
-- **Charts** — tokens over time, cost / day, cost by model, context-fill distribution, permission-mode split (all inline SVG).
+- **Summary cards** — ordered by what matters for hands-on work: total tokens, prompts, average
+  context, active time, top model, busiest workspace, and an estimated cost (de-emphasised, since
+  most work isn't billed per API call).
+- **Charts** — tokens over time, context-fill distribution, permission-mode split, prompts by model,
+  and estimated cost / day (all inline SVG, theme-aware).
 - **Filter bar** — workspace · model · mode · effort · date · free-text search · min-context %.
-- **Table** — grouped by **workspace → session → prompt**, sortable on any column; click a row for the full prompt, response, and a raw usage/cost breakdown.
+- **Table** — grouped by **workspace → session → prompt**, sortable on any column; click a row to
+  open a detail panel with the full prompt and response **rendered as Markdown** (tables, code,
+  lists), plus a usage and cost breakdown.
+- **Theme & locale** — light/dark toggle (defaults to your OS preference, remembered across visits);
+  numbers, dates, and currency follow the viewer's browser locale.
 
 ## How it works
 
