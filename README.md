@@ -30,7 +30,7 @@ dashboard to slice through it.
   and tool/subagent/thinking counts.
 - **Accurate accounting** — dedupes streamed transcript lines, attributes **subagent**
   token spend to the parent prompt, and prices each message at *its own* model.
-- **Multi-workspace** — every workspace and session in one place; safe under concurrent writes.
+- **Per-project storage** — each project keeps its own records in `<project>/.claude-usage/`; safe under concurrent sessions. Opt into a combined dashboard with one env var.
 - **Insightful dashboard** — summary cards, charts (tokens & cost over time, cost-by-model,
   context-fill distribution, mode split), filters, and click-to-expand drill-down.
 - **Zero dependencies, zero build** — pure Node (`fs`/`http`). Nothing to `npm install`.
@@ -42,10 +42,15 @@ git clone https://github.com/Kud0o/claude-usage-tracker.git
 cd claude-usage-tracker
 
 node install.mjs --global          # register the hook for every workspace
-npm run view                       # open the dashboard → http://localhost:4317
+
+# …use Claude Code in any project…
+
+# then, from inside a project you've used:
+node ~/.claude/usage-tracker/app/viewer/server.mjs   # dashboard → http://localhost:4317
 ```
 
-Then just use Claude Code as normal — each prompt is recorded automatically.
+Each prompt is recorded automatically into that project at
+`<project>/.claude-usage/usage.ndjson`.
 
 ## Installation guide
 
@@ -75,15 +80,21 @@ The installer:
 
 ### 3. View the dashboard
 
+The viewer reads the project you launch it from — or a project path you pass:
+
 ```sh
-npm run view
-# or directly:
-node ~/.claude/usage-tracker/app/viewer/server.mjs
+cd <your project>                                            # then:
+node ~/.claude/usage-tracker/app/viewer/server.mjs           # reads ./.claude-usage
+
+# …or point it at a project explicitly:
+node ~/.claude/usage-tracker/app/viewer/server.mjs <path-to-project>
+
 # custom port:
 PORT=8080 node ~/.claude/usage-tracker/app/viewer/server.mjs
 ```
 
-Open **http://localhost:4317**.
+Open **http://localhost:4317**. Add `.claude-usage/` to your project's
+`.gitignore` so the records don't get committed.
 
 ### 4. Uninstall
 
@@ -119,17 +130,23 @@ Three details make the numbers trustworthy (all in [`src/lib/transcript.mjs`](sr
 
 ## Where the data lives
 
+By default, **inside each project**:
+
 ```
-~/.claude/usage-tracker/data/workspaces/<encoded-cwd>.ndjson
+<project>/.claude-usage/usage.ndjson
 ```
 
-**One file per workspace**, many sessions, one JSON record per prompt. Override the
-location with the `CLAUDE_USAGE_DIR` environment variable.
+One JSON record per prompt, many sessions per file — the data stays with the project and
+never touches `~/.claude`. The dashboard reads this folder for whichever project you launch
+it from (or one you pass as an argument).
 
-**Concurrency:** different workspaces write different files (never contend); two sessions
-in the *same* folder use a lock-guarded atomic write (`tmp`+rename, stale-lock stealing,
-skip-on-timeout). Each `Stop` re-derives the whole session, so a skipped write self-heals
-on the next prompt.
+**Combined dashboard (optional):** set `CLAUDE_USAGE_DIR` to a shared folder for both the
+hook and the viewer, and every project is collected there as `<encoded-cwd>.ndjson` — one
+dashboard across all your workspaces.
+
+**Concurrency:** two sessions in the *same* project use a lock-guarded atomic write
+(`tmp`+rename, stale-lock stealing, skip-on-timeout). Each `Stop` re-derives the whole
+session, so a skipped write self-heals on the next prompt.
 
 ## Notes & caveats
 

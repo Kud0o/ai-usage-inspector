@@ -16,7 +16,6 @@ import { fileURLToPath } from "node:url";
 const REPO = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
 const APP = path.join(HOME, ".claude", "usage-tracker", "app");
-const DATA = path.join(HOME, ".claude", "usage-tracker", "data", "workspaces");
 const HOOK_CMD = `node "${path.join(APP, "src", "record.mjs")}"`;
 const MARKER = "usage-tracker"; // identifies our hook for idempotency / uninstall
 
@@ -48,7 +47,6 @@ function copyApp() {
   fs.mkdirSync(APP, { recursive: true });
   fs.cpSync(path.join(REPO, "src"), path.join(APP, "src"), { recursive: true });
   fs.cpSync(path.join(REPO, "viewer"), path.join(APP, "viewer"), { recursive: true });
-  fs.mkdirSync(DATA, { recursive: true });
 }
 
 function addHook(file) {
@@ -87,9 +85,17 @@ function help() {
   node install.mjs --uninstall [--global|--local]
 
 After installing, start (or continue) any Claude Code session — each prompt is
-recorded automatically. View the dashboard with:
+recorded into that project at  <project>/.claude-usage/usage.ndjson.
 
-  node "${path.join(APP, "viewer", "server.mjs")}"     →  http://localhost:4317
+View the dashboard for a project (reads the folder you launch it from, or a
+path you pass):
+
+  cd <your project> && node "${path.join(APP, "viewer", "server.mjs")}"
+  node "${path.join(APP, "viewer", "server.mjs")}" <path-to-project>
+                                                   →  http://localhost:4317
+
+Tip: add  .claude-usage/  to the project's .gitignore. To pool every project
+into one dashboard, set CLAUDE_USAGE_DIR to a shared folder (hook + viewer).
 `);
 }
 
@@ -105,6 +111,8 @@ if (uninstall) {
   copyApp();
   console.log(`  • copied app to ${APP}`);
   addHook(settingsPath(scope));
-  console.log(`\nDone. New prompts will be recorded. Launch the viewer:\n`);
-  console.log(`  node "${path.join(APP, "viewer", "server.mjs")}"   →  http://localhost:4317\n`);
+  console.log(`\nDone. Prompts are recorded into each project at  <project>/.claude-usage/usage.ndjson`);
+  console.log(`Launch the dashboard from inside a project:\n`);
+  console.log(`  node "${path.join(APP, "viewer", "server.mjs")}"   →  http://localhost:4317`);
+  console.log(`  (tip: add  .claude-usage/  to that project's .gitignore)\n`);
 }

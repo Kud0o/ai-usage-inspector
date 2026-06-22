@@ -6,21 +6,8 @@ import path from "node:path";
 /** Home dir of the current user. */
 export const HOME = os.homedir();
 
-/**
- * Shared data dir. All workspaces write here, so concurrent Claude Code
- * sessions across projects land in one place. Override with CLAUDE_USAGE_DIR.
- */
-export function dataDir() {
-  return (
-    process.env.CLAUDE_USAGE_DIR ||
-    path.join(HOME, ".claude", "usage-tracker", "data")
-  );
-}
-
-/** Per-workspace ndjson files live here. */
-export function workspacesDir() {
-  return path.join(dataDir(), "workspaces");
-}
+// Folder created inside each tracked project to hold its records.
+export const PROJECT_DIRNAME = ".claude-usage";
 
 /**
  * Encode a cwd the way Claude Code encodes project folders:
@@ -31,9 +18,25 @@ export function encCwd(cwd) {
   return String(cwd || "").replace(/[:\\/]/g, "-").replace(/^-+|-+$/g, "");
 }
 
-/** Absolute path of the workspace ndjson file for a given cwd. */
+/**
+ * Where a workspace's records are written.
+ * Default: inside the project itself — <cwd>/.claude-usage/usage.ndjson.
+ * Set CLAUDE_USAGE_DIR to instead collect every project into one flat dir
+ * (one <encoded-cwd>.ndjson per project) for a combined dashboard.
+ */
 export function workspaceFile(cwd) {
-  return path.join(workspacesDir(), `${encCwd(cwd) || "unknown"}.ndjson`);
+  const override = process.env.CLAUDE_USAGE_DIR;
+  if (override) return path.join(override, `${encCwd(cwd) || "unknown"}.ndjson`);
+  return path.join(cwd, PROJECT_DIRNAME, "usage.ndjson");
+}
+
+/**
+ * Directory the viewer reads *.ndjson from.
+ * Default: the .claude-usage folder of `baseDir` (or the current working dir).
+ * CLAUDE_USAGE_DIR overrides it (aggregate mode).
+ */
+export function viewerDataDir(baseDir) {
+  return process.env.CLAUDE_USAGE_DIR || path.join(baseDir || process.cwd(), PROJECT_DIRNAME);
 }
 
 /** A short, human label for a workspace (last path segment of the cwd). */

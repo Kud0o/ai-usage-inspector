@@ -1,6 +1,9 @@
 # dependencies (there are none, but just in case)
 node_modules/
 
+# recorded usage data (per-project)
+.claude-usage/
+
 # local test scaffolding
 .testdata/
 .testhome/

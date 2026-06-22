@@ -8,11 +8,14 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { workspacesDir } from "../src/lib/paths.mjs";
+import { viewerDataDir } from "../src/lib/paths.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(__dirname, "public");
 const PORT = Number(process.env.PORT) || 4317;
+// Read the project you launch from, or a path passed as the first argument,
+// or CLAUDE_USAGE_DIR (aggregate mode).
+const DATA_DIR = viewerDataDir(process.argv[2] && path.resolve(process.argv[2]));
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -23,7 +26,7 @@ const MIME = {
 
 // Read + merge all workspace ndjson files. Tolerates partial/locked writes.
 function loadEvents() {
-  const dir = workspacesDir();
+  const dir = DATA_DIR;
   let files = [];
   try {
     files = fs.readdirSync(dir).filter((f) => f.endsWith(".ndjson"));
@@ -93,6 +96,7 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`\n  Claude usage viewer  ->  http://localhost:${PORT}\n`);
-  console.log(`  data: ${workspacesDir()}\n`);
+  console.log(`\n  Claude usage viewer  ->  http://localhost:${PORT}`);
+  console.log(`  reading: ${DATA_DIR}`);
+  console.log(`  (pass a project path as an argument, or set CLAUDE_USAGE_DIR to aggregate)\n`);
 });
