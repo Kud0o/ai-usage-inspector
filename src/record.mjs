@@ -18,17 +18,28 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Bump when the bundled viewer changes so existing projects refresh their copy
+// on the next prompt (after the user re-installs the app via npx). Keep in step
+// with viewer changes.
+const VIEWER_VERSION = "2";
+
 // Make each project self-contained: copy the viewer + a default config into
 // <project>/.claude-usage/ so it can be viewed in place. Skipped in aggregate
-// mode (CLAUDE_USAGE_DIR). Idempotent and best-effort.
+// mode (CLAUDE_USAGE_DIR). Idempotent and best-effort; re-copies when the
+// bundled viewer is missing or out of date.
 function ensureBundle(cwd) {
   if (process.env.CLAUDE_USAGE_DIR) return;
   try {
     const base = path.join(cwd, ".claude-usage");
     const viewerSrc = path.join(__dirname, "..", "viewer");
     const viewerDst = path.join(base, "viewer");
-    if (fs.existsSync(viewerSrc) && !fs.existsSync(path.join(viewerDst, "server.mjs"))) {
+    const verFile = path.join(viewerDst, ".version");
+    const have = fs.existsSync(verFile) ? fs.readFileSync(verFile, "utf8").trim() : null;
+    const stale = !fs.existsSync(path.join(viewerDst, "server.mjs")) || have !== VIEWER_VERSION;
+    if (fs.existsSync(viewerSrc) && stale) {
+      fs.rmSync(viewerDst, { recursive: true, force: true });
       fs.cpSync(viewerSrc, viewerDst, { recursive: true });
+      fs.writeFileSync(verFile, VIEWER_VERSION + "\n");
     }
     const cfg = path.join(base, "config.json");
     if (!fs.existsSync(cfg)) {

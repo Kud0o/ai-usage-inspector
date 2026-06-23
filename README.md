@@ -59,6 +59,10 @@ node .claude-usage/viewer/server.mjs   # dashboard for this project → http://l
 
 To remove it: `npx -y github:Kud0o/claude-usage-tracker --uninstall`.
 
+**Upgrading:** re-run the one-liner. It refreshes the shared app, and each project
+re-bundles its own viewer automatically on its next prompt (a version stamp detects
+the change), so existing projects pick up the latest dashboard.
+
 ## Installation guide
 
 ### 1. Requirements
