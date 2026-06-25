@@ -12,7 +12,13 @@ const state = {
   sort: { key: "ts", dir: -1 },
   filters: { search: "", workspace: "", model: "", mode: "", effort: "", since: "", ctx: 0 },
   group: true,
+  settings: null,                 // full global config from /api/settings
+  fields: {},                     // effective stored-field flags for this project
+  currentKey: null,
+  currentLabel: null,
 };
+// Field-group visible? Defaults to true so a missing/unreachable config shows all.
+const has = (g) => state.fields[g] !== false;
 
 // ---------- formatting (locale-aware: honors the viewer's browser locale) ----------
 const fmtInt = (n) => (n || 0).toLocaleString();
@@ -69,11 +75,11 @@ async function delEvents(ids, label) {
 }
 const dayKey = (ts) => (ts || "").slice(0, 10);
 
-// derived accessors used for sorting
-const T_IN = (e) => e.usage.input;
-const T_OUT = (e) => e.usage.output;
-const T_TOTAL = (e) => e.usage.input + e.usage.output + e.usage.cacheCreate + e.usage.cacheRead;
-const COST = (e) => e.cost.total;
+// derived accessors used for sorting (null-safe: records may omit disabled groups)
+const T_IN = (e) => (e.usage && e.usage.input) || 0;
+const T_OUT = (e) => (e.usage && e.usage.output) || 0;
+const T_TOTAL = (e) => { const u = e.usage; return u ? (u.input || 0) + (u.output || 0) + (u.cacheCreate || 0) + (u.cacheRead || 0) : 0; };
+const COST = (e) => (e.cost && e.cost.total) || 0;
 
 // ---------- config (saved per project) ----------
 async function boot() {
@@ -87,7 +93,37 @@ async function boot() {
   if (ui.filters) state.filters = { ...state.filters, ...ui.filters };
   if (ui.sort && ui.sort.key) state.sort = ui.sort;
   if (typeof ui.group === "boolean") state.group = ui.group;
+  await loadSettings();
   await load();
+}
+
+// ---------- tracking / field settings (global config) ----------
+function fieldsFromSettings(s) {
+  if (!s) return {};
+  const entry = s.currentKey && s.tracking && s.tracking.projects ? s.tracking.projects[s.currentKey] : null;
+  return { ...(s.fields || {}), ...((entry && entry.fields) || {}) };
+}
+async function loadSettings() {
+  try {
+    const s = await (await fetch("/api/settings")).json();
+    state.settings = s;
+    state.currentKey = s.currentKey || null;
+    state.currentLabel = s.currentLabel || null;
+    state.fields = fieldsFromSettings(s);
+  } catch { state.settings = null; state.fields = {}; }
+  applySettingsVisibility();
+}
+// Reflect disabled field-groups onto the chrome: hide table columns + filters.
+function applySettingsVisibility() {
+  const grid = $("#grid");
+  if (grid) {
+    grid.classList.toggle("hide-col-in", !has("tokens"));
+    grid.classList.toggle("hide-col-out", !has("tokens"));
+    grid.classList.toggle("hide-col-context", !has("context"));
+    grid.classList.toggle("hide-col-cost", !has("cost"));
+  }
+  const eff = $("#ctl-effort"); if (eff) eff.hidden = !has("meta");
+  const ctx = $("#ctl-ctx"); if (ctx) ctx.hidden = !has("context");
 }
 
 let saveTimer;
@@ -151,7 +187,7 @@ function apply() {
     if (f.since && dayKey(e.ts) < f.since) return false;
     if (f.ctx && (e.contextFillPct || 0) < f.ctx) return false;
     if (q) {
-      const hay = (e.promptPreview + " " + e.responsePreview + " " + (e.slug || "") + " " + e.workspace).toLowerCase();
+      const hay = ((e.promptPreview || "") + " " + (e.responsePreview || "") + " " + (e.slug || "") + " " + (e.workspace || "")).toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -177,22 +213,25 @@ function renderStats() {
   const avgCtx = prompts ? v.reduce((a, e) => a + (e.contextFillPct || 0), 0) / prompts : 0;
   const dur = v.reduce((a, e) => a + (e.durationMs || 0), 0);
   const subs = v.reduce((a, e) => a + (e.counts ? e.counts.subagentCalls : 0), 0);
+  const respRecs = v.filter((e) => e.firstResponseMs != null);
+  const avgResp = respRecs.length ? respRecs.reduce((a, e) => a + e.firstResponseMs, 0) / respRecs.length : 0;
 
   const byModel = tally(v, (e) => e.model, () => 1);
   const topModel = topKey(byModel);
   const byWs = tally(v, (e) => e.workspace, () => 1);
   const topWs = topKey(byWs);
 
-  // ordered by what matters most for hands-on work; $ is an estimate, kept last
-  const cards = [
-    { label: "tokens · total", val: fmtTok(ttot), sub: `${fmtTok(tin)} in · ${fmtTok(tout)} out`, cls: "accent" },
-    { label: "prompts", val: fmtInt(prompts), sub: `${subs} subagent calls`, cls: "" },
-    { label: "avg context", val: avgCtx.toFixed(1) + "<small>%</small>", sub: "of window filled", cls: "amber", bar: avgCtx },
-    { label: "active time", val: fmtDur(dur), sub: "summed turn duration", cls: "" },
-    { label: "top model", val: shortModel(topModel), sub: topModel ? byModel[topModel] + " prompts" : "—", cls: "" },
-    { label: "busiest workspace", val: esc(topWs || "—"), sub: topWs ? byWs[topWs] + " prompts" : "—", cls: "" },
-    { label: "est. cost", val: fmtUsd(cost), sub: prompts ? `${fmtUsd(cost / prompts)} / prompt` : "—", cls: "cost" },
-  ];
+  // ordered by what matters most for hands-on work; $ is an estimate, kept last.
+  // Cards for disabled field-groups are omitted.
+  const cards = [];
+  if (has("tokens")) cards.push({ label: "tokens · total", val: fmtTok(ttot), sub: `${fmtTok(tin)} in · ${fmtTok(tout)} out`, cls: "accent" });
+  cards.push({ label: "prompts", val: fmtInt(prompts), sub: `${subs} subagent calls`, cls: "" });
+  if (has("context")) cards.push({ label: "avg context", val: avgCtx.toFixed(1) + "<small>%</small>", sub: "of window filled", cls: "amber", bar: avgCtx });
+  if (has("timing")) cards.push({ label: "active time", val: fmtDur(dur), sub: "summed turn duration", cls: "" });
+  if (has("timing") && respRecs.length) cards.push({ label: "avg first response", val: fmtDur(avgResp), sub: "prompt → first reply", cls: "" });
+  cards.push({ label: "top model", val: shortModel(topModel), sub: topModel ? byModel[topModel] + " prompts" : "—", cls: "" });
+  cards.push({ label: "busiest workspace", val: esc(topWs || "—"), sub: topWs ? byWs[topWs] + " prompts" : "—", cls: "" });
+  if (has("cost")) cards.push({ label: "est. cost", val: fmtUsd(cost), sub: prompts ? `${fmtUsd(cost / prompts)} / prompt` : "—", cls: "cost" });
   $("#stats").innerHTML = cards
     .map(
       (c) => `<div class="stat ${c.cls}" style="--bar:${c.bar || 0}%">
@@ -236,17 +275,17 @@ function renderCharts() {
   const buckets = new Array(10).fill(0);
   for (const e of v) { const b = Math.min(9, Math.floor((e.contextFillPct || 0) / 10)); buckets[b]++; }
 
-  $("#charts").innerHTML = `
-    <div class="card span2">
+  const cards = [];
+  if (has("tokens")) cards.push(`<div class="card span2">
       <h3>tokens over time <b>${fmtTok(tok.reduce((a, b) => a + b, 0))}</b></h3>
       ${areaChart(keys, tok, cssv("--accent"))}
-    </div>
-    <div class="card"><h3>context fill distribution</h3>${histogram(buckets)}</div>
-    <div class="card"><h3>permission mode</h3>${donut(modeCount, (x) => x + " prompts")}</div>
-    <div class="card"><h3>prompts by model</h3>${donut(modelCount, (x) => x + " prompts")}</div>
-    ${skillsUsed ? `<div class="card"><h3>skills invoked <b>${skillsUsed}</b></h3>${donut(skillCount, (x) => x + "×")}</div>` : ""}
-    <div class="card"><h3>est. cost / day <b class="cost-b">${fmtUsd(cost.reduce((a, b) => a + b, 0))}</b></h3>${barChart(keys, cost, cssv("--faint"), (x) => fmtUsd(x))}</div>
-  `;
+    </div>`);
+  if (has("context")) cards.push(`<div class="card"><h3>context fill distribution</h3>${histogram(buckets)}</div>`);
+  cards.push(`<div class="card"><h3>permission mode</h3>${donut(modeCount, (x) => x + " prompts")}</div>`);
+  cards.push(`<div class="card"><h3>prompts by model</h3>${donut(modelCount, (x) => x + " prompts")}</div>`);
+  if (has("skills") && skillsUsed) cards.push(`<div class="card"><h3>skills invoked <b>${skillsUsed}</b></h3>${donut(skillCount, (x) => x + "×")}</div>`);
+  if (has("cost")) cards.push(`<div class="card"><h3>est. cost / day <b class="cost-b">${fmtUsd(cost.reduce((a, b) => a + b, 0))}</b></h3>${barChart(keys, cost, cssv("--faint"), (x) => fmtUsd(x))}</div>`);
+  $("#charts").innerHTML = cards.join("");
 }
 
 function axisLabels(keys) {
@@ -344,16 +383,18 @@ function ctxBar(pct) {
 }
 
 function rowHtml(e) {
+  const chip = has("skills") && e.skills && e.skills.length
+    ? `<span class="skill-chip" title="skills: ${esc(e.skills.join(", "))}">▸ ${e.skills.length}</span> ` : "";
   return `<tr class="row" data-id="${esc(e.id)}">
-    <td class="mono muted">${fmtWhen(e.ts)}</td>
-    <td class="ws">${esc(e.workspace)}</td>
-    <td class="mono">${shortModel(e.model)}</td>
-    <td><span class="tag ${esc(e.permissionMode)}">${esc(e.permissionMode)}</span></td>
-    <td class="num">${fmtTok(T_IN(e))}</td>
-    <td class="num">${fmtTok(T_OUT(e))}</td>
-    <td class="num">${ctxBar(e.contextFillPct)}</td>
-    <td class="num cost-cell">${fmtUsd(COST(e))}</td>
-    <td class="prompt-cell">${e.skills && e.skills.length ? `<span class="skill-chip" title="skills: ${esc(e.skills.join(", "))}">▸ ${e.skills.length}</span> ` : ""}${esc(e.promptPreview)}</td>
+    <td class="mono muted col-when">${fmtWhen(e.ts)}</td>
+    <td class="ws col-workspace">${esc(e.workspace)}</td>
+    <td class="mono col-model">${shortModel(e.model)}</td>
+    <td class="col-mode"><span class="tag ${esc(e.permissionMode)}">${esc(e.permissionMode)}</span></td>
+    <td class="num col-in">${fmtTok(T_IN(e))}</td>
+    <td class="num col-out">${fmtTok(T_OUT(e))}</td>
+    <td class="num col-context">${ctxBar(e.contextFillPct)}</td>
+    <td class="num cost-cell col-cost">${fmtUsd(COST(e))}</td>
+    <td class="prompt-cell col-prompt">${chip}${esc(e.promptPreview)}</td>
   </tr>`;
 }
 
@@ -373,9 +414,10 @@ function renderTable() {
   for (const [sid, items] of groups) {
     const head = items[0];
     const cost = items.reduce((a, e) => a + COST(e), 0);
-    html += `<tr class="group"><td colspan="9">
+    const costPart = has("cost") ? `${fmtUsd(cost)} · ` : "";
+    html += `<tr class="group"><td colspan="99">
       <b>${esc(head.workspace)}</b> · ${esc(head.slug || sid.slice(0, 8))}
-      <span class="gstats">${items.length} prompts · ${fmtUsd(cost)} · session ${esc(sid.slice(0, 8))}</span>
+      <span class="gstats">${items.length} prompts · ${costPart}session ${esc(sid.slice(0, 8))}</span>
     </td></tr>`;
     html += items.map(rowHtml).join("");
   }
@@ -467,38 +509,142 @@ async function openDrawer(id) {
   let e;
   try { e = await (await fetch("/api/event/" + encodeURIComponent(id))).json(); } catch { e = null; }
   if (!e || !e.id) { $("#drawer-panel").innerHTML = `<div class="muted mono" style="padding:40px">not found</div>`; return; }
-  const u = e.usage, c = e.cost, k = e.counts;
-  $("#drawer-panel").innerHTML = `
-    <div class="dhead"><span class="deyebrow">prompt detail</span><span class="dhead-actions"><button class="btn danger ddel" data-del="${esc(e.id)}">delete</button><button class="btn ghost dclose" data-close>✕ close</button></span></div>
-    <h2>${esc(e.workspace)} <span class="muted" style="font-family:var(--mono);font-size:13px">/ ${esc(e.slug || "")}</span></h2>
-    <div class="dmeta">
-      <span>${fmtWhen(e.ts)}</span><span>${esc(e.model)}</span>
-      <span class="tag ${esc(e.permissionMode)}">${esc(e.permissionMode)}</span>
-      ${e.effortLevel ? `<span>effort: ${esc(e.effortLevel)}</span>` : ""}
-      <span>${fmtDur(e.durationMs)}</span><span>${esc(e.gitBranch || "")}</span>
-      <span>v${esc(e.cliVersion || "")}</span><span>${esc(e.serviceTier || "")}/${esc(e.speed || "")}</span>
-    </div>
-    ${e.skills && e.skills.length ? `<div class="dskills"><span class="dskills-k">skills</span>${e.skills.map((s) => `<span class="skill-tag">${esc(s)}</span>`).join("")}</div>` : ""}
-    <div class="dgrid">
-      <div><div class="k">cost</div><div class="v accent">${fmtUsd(c.total)}</div></div>
-      <div><div class="k">context</div><div class="v">${(e.contextFillPct||0).toFixed(1)}% <span class="muted" style="font-size:11px">${fmtTok(e.contextTokens)}/${fmtTok(e.contextMax)}</span></div></div>
-      <div><div class="k">input</div><div class="v">${fmtInt(u.input)}</div></div>
-      <div><div class="k">output</div><div class="v">${fmtInt(u.output)}</div></div>
-      <div><div class="k">cache write</div><div class="v">${fmtInt(u.cacheCreate)}</div></div>
-      <div><div class="k">cache read</div><div class="v">${fmtInt(u.cacheRead)}</div></div>
-      <div><div class="k">api calls</div><div class="v">${k.apiCalls} <span class="muted" style="font-size:11px">+${k.subagentCalls} sub</span></div></div>
-      <div><div class="k">tools / think</div><div class="v">${k.toolCalls} / ${k.thinkingBlocks}</div></div>
-    </div>
-    ${detailBlock("prompt", "prompt", e.promptChars, e.prompt)}
-    ${detailBlock("response", "response", e.responseChars, e.response)}
-    <div class="block"><div class="bh"><span>cost breakdown · USD</span></div><pre>input  ${fmtUsd(c.input)}
+  const u = e.usage || {}, c = e.cost || {}, k = e.counts || {};
+  // meta spans (omit when the `meta`/`timing` group is stripped)
+  const meta = [`<span>${fmtWhen(e.ts)}</span>`, `<span>${esc(e.model)}</span>`,
+    `<span class="tag ${esc(e.permissionMode)}">${esc(e.permissionMode)}</span>`];
+  if (e.effortLevel) meta.push(`<span>effort: ${esc(e.effortLevel)}</span>`);
+  if (e.durationMs != null) meta.push(`<span>${fmtDur(e.durationMs)}</span>`);
+  if (e.firstResponseMs != null) meta.push(`<span>1st reply ${fmtDur(e.firstResponseMs)}</span>`);
+  if (e.gitBranch) meta.push(`<span>${esc(e.gitBranch)}</span>`);
+  if (e.cliVersion) meta.push(`<span>v${esc(e.cliVersion)}</span>`);
+  if (e.serviceTier || e.speed) meta.push(`<span>${esc(e.serviceTier || "")}/${esc(e.speed || "")}</span>`);
+  // dgrid cells, each gated on its field group + presence
+  const cells = [];
+  if (has("cost") && e.cost) cells.push(`<div><div class="k">cost</div><div class="v accent">${fmtUsd(c.total)}</div></div>`);
+  if (has("context") && e.contextFillPct != null) cells.push(`<div><div class="k">context</div><div class="v">${(e.contextFillPct||0).toFixed(1)}% <span class="muted" style="font-size:11px">${fmtTok(e.contextTokens)}/${fmtTok(e.contextMax)}</span></div></div>`);
+  if (has("timing") && e.firstResponseMs != null) cells.push(`<div><div class="k">first response</div><div class="v">${fmtDur(e.firstResponseMs)}</div></div>`);
+  if (has("tokens") && e.usage) cells.push(
+    `<div><div class="k">input</div><div class="v">${fmtInt(u.input)}</div></div>`,
+    `<div><div class="k">output</div><div class="v">${fmtInt(u.output)}</div></div>`,
+    `<div><div class="k">cache write</div><div class="v">${fmtInt(u.cacheCreate)}</div></div>`,
+    `<div><div class="k">cache read</div><div class="v">${fmtInt(u.cacheRead)}</div></div>`);
+  if (has("counts") && e.counts) cells.push(
+    `<div><div class="k">api calls</div><div class="v">${k.apiCalls} <span class="muted" style="font-size:11px">+${k.subagentCalls} sub</span></div></div>`,
+    `<div><div class="k">tools / think</div><div class="v">${k.toolCalls} / ${k.thinkingBlocks}</div></div>`);
+  const costBreakdown = has("cost") && e.cost
+    ? `<div class="block"><div class="bh"><span>cost breakdown · USD</span></div><pre>input  ${fmtUsd(c.input)}
 output ${fmtUsd(c.output)}
 cache write ${fmtUsd(c.cacheWrite)}
 cache read  ${fmtUsd(c.cacheRead)}
 ──────────────
-total  ${fmtUsd(c.total)}</pre></div>`;
+total  ${fmtUsd(c.total)}</pre></div>` : "";
+  $("#drawer-panel").innerHTML = `
+    <div class="dhead"><span class="deyebrow">prompt detail</span><span class="dhead-actions"><button class="btn danger ddel" data-del="${esc(e.id)}">delete</button><button class="btn ghost dclose" data-close>✕ close</button></span></div>
+    <h2>${esc(e.workspace)} <span class="muted" style="font-family:var(--mono);font-size:13px">/ ${esc(e.slug || "")}</span></h2>
+    <div class="dmeta">${meta.join("")}</div>
+    ${has("skills") && e.skills && e.skills.length ? `<div class="dskills"><span class="dskills-k">skills</span>${e.skills.map((s) => `<span class="skill-tag">${esc(s)}</span>`).join("")}</div>` : ""}
+    ${cells.length ? `<div class="dgrid">${cells.join("")}</div>` : ""}
+    ${textBlock("prompt", "prompt", e.promptChars, e.prompt)}
+    ${textBlock("response", "response", e.responseChars, e.response)}
+    ${costBreakdown}`;
+}
+// Render a prompt/response block, or a stub when the text group is disabled.
+function textBlock(kind, label, chars, text) {
+  if (text != null) return detailBlock(kind, label, chars, text);
+  return `<div class="block ${kind}"><div class="bh"><span>${label}</span><span>${fmtInt(chars)} chars</span></div>
+    <div class="md md-empty muted">— text not stored (the “text” field group is off for this project) —</div></div>`;
 }
 function closeDrawer() { $("#drawer").hidden = true; }
+
+// ---------- settings panel (tracking + stored fields) ----------
+const FIELD_META = [
+  ["text", "prompt & response text", "the full prompt/response (largest + most sensitive)"],
+  ["tokens", "token usage", "input / output / cache token counts"],
+  ["cost", "estimated cost", "per-prompt USD estimate"],
+  ["context", "context fill", "context window occupancy %"],
+  ["timing", "timing", "duration + first-response latency"],
+  ["skills", "skills", "skills invoked per prompt"],
+  ["counts", "tool counts", "api / subagent / tool / thinking counts"],
+  ["meta", "metadata", "git branch, cli version, slug, tier, effort"],
+];
+function settingsProjects() {
+  const s = state.settings || {};
+  const projs = (s.tracking && s.tracking.projects) || {};
+  const rows = Object.entries(projs).map(([key, v]) => ({ key, ...v }));
+  if (state.currentKey && !projs[state.currentKey]) {
+    rows.unshift({ key: state.currentKey, label: state.currentLabel, enabled: false, missing: true });
+  }
+  return rows;
+}
+function renderSettings() {
+  const s = state.settings;
+  const panel = $("#settings-panel");
+  if (!s) { panel.innerHTML = `<div class="muted mono" style="padding:40px">settings unavailable</div>`; return; }
+  const projs = settingsProjects();
+  const projRows = projs.map((p) => {
+    const on = p.enabled !== false;
+    const cur = p.key === state.currentKey;
+    const tags = `${cur ? '<span class="tag" style="color:var(--accent);border-color:var(--accent)">current</span>' : ""}${p.grandfathered ? '<span class="tag">auto</span>' : ""}`;
+    return `<div class="set-row${cur ? " cur" : ""}">
+      <label class="set-toggle"><input type="checkbox" data-proj-toggle="${esc(p.key)}" ${on ? "checked" : ""} />
+        <span class="set-name">${esc(p.label || p.key)} ${tags}</span></label>
+      <span class="set-key mono">${esc(p.key)}</span>
+    </div>`;
+  }).join("") || `<div class="muted mono" style="padding:8px 0">no projects yet — enable one as you use it.</div>`;
+
+  const proj = state.currentKey && s.tracking.projects[state.currentKey];
+  const ovr = (proj && proj.fields) || {};
+  const fieldRows = FIELD_META.map(([g, name, desc]) => {
+    const gv = s.fields[g] !== false;
+    const o = ovr[g];
+    const sel = o === true ? "on" : o === false ? "off" : "inherit";
+    const override = state.currentKey ? `<select class="set-sel" data-proj-field="${g}">
+        <option value="inherit"${sel === "inherit" ? " selected" : ""}>inherit</option>
+        <option value="on"${sel === "on" ? " selected" : ""}>on</option>
+        <option value="off"${sel === "off" ? " selected" : ""}>off</option></select>` : "";
+    return `<div class="set-row">
+      <label class="set-toggle"><input type="checkbox" data-global-field="${g}" ${gv ? "checked" : ""} />
+        <span class="set-name">${esc(name)}<small>${esc(desc)}</small></span></label>
+      ${override}
+    </div>`;
+  }).join("");
+
+  panel.innerHTML = `
+    <div class="dhead"><span class="deyebrow">settings</span><button class="btn ghost" data-settings-close>✕ close</button></div>
+    <section class="set-sec">
+      <h3 class="set-h">tracked projects</h3>
+      <p class="set-note">Opt-in: only enabled projects are recorded. Changes apply from the next prompt. Existing data stays.</p>
+      ${projRows}
+    </section>
+    <section class="set-sec">
+      <h3 class="set-h">stored fields — global default${state.currentKey ? " · this project" : ""}</h3>
+      <p class="set-note">Disabled groups are stripped before writing (smaller files, more privacy). Already-stored data is not changed.</p>
+      ${fieldRows}
+    </section>
+    <p class="set-foot mono">~/.claude/usage-tracker/config.json</p>`;
+}
+function openSettings() {
+  $("#settings-drawer").hidden = false;
+  renderSettings();
+  loadSettings().then(() => renderSettings()); // refresh from disk
+}
+function closeSettings() { $("#settings-drawer").hidden = true; }
+async function postSettings(patch) {
+  try {
+    const s = await (await fetch("/api/settings", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch),
+    })).json();
+    state.settings = s;
+    state.currentKey = s.currentKey || null;
+    state.currentLabel = s.currentLabel || null;
+    state.fields = fieldsFromSettings(s);
+    renderSettings();
+    applySettingsVisibility();
+    apply();
+    toast(s.ok === false ? "busy — retry" : "settings saved");
+  } catch { toast("save failed"); }
+}
 
 // ---------- theme (light / dark, persisted; default = system) ----------
 function setTheme(t) {
@@ -531,6 +677,22 @@ function bind() {
     const cur = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
     setTheme(cur === "light" ? "dark" : "light");
   });
+  $("#settings").addEventListener("click", openSettings);
+  $("#settings-drawer").addEventListener("click", (e) => {
+    if (e.target.dataset.settingsClose !== undefined) closeSettings();
+  });
+  $("#settings-drawer").addEventListener("change", (e) => {
+    const t = e.target;
+    if (t.dataset.projToggle !== undefined) {
+      const p = settingsProjects().find((x) => x.key === t.dataset.projToggle);
+      postSettings({ project: t.dataset.projToggle, enabled: t.checked, label: p && p.label });
+    } else if (t.dataset.globalField !== undefined) {
+      postSettings({ fields: { [t.dataset.globalField]: t.checked } });
+    } else if (t.dataset.projField !== undefined && state.currentKey) {
+      const v = t.value === "on" ? true : t.value === "off" ? false : null;
+      postSettings({ project: state.currentKey, fields: { [t.dataset.projField]: v } });
+    }
+  });
   document.querySelectorAll(".grid th.sortable").forEach((th) =>
     th.addEventListener("click", () => {
       const k = th.dataset.sort;
@@ -558,7 +720,7 @@ function bind() {
       block.querySelector(".raw").hidden = !raw;
     }
   });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeDrawer(); closeSettings(); } });
 }
 
 bind();

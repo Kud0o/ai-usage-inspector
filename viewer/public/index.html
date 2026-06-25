@@ -21,6 +21,7 @@
   </div>
   <div class="topmeta">
     <span id="meta-range" class="mono muted">—</span>
+    <button id="settings" class="btn icon" title="Tracking &amp; data settings" aria-label="Settings">⚙</button>
     <button id="theme" class="btn icon" title="Toggle light / dark" aria-label="Toggle theme">◐</button>
     <button id="refresh" class="btn" title="Reload data">↻ refresh</button>
   </div>
@@ -37,9 +38,9 @@
   <label class="ctl"><span>workspace</span><select id="f-workspace"></select></label>
   <label class="ctl"><span>model</span><select id="f-model"></select></label>
   <label class="ctl"><span>mode</span><select id="f-mode"></select></label>
-  <label class="ctl"><span>effort</span><select id="f-effort"></select></label>
+  <label class="ctl" id="ctl-effort"><span>effort</span><select id="f-effort"></select></label>
   <label class="ctl"><span>since</span><input id="f-since" type="date" /></label>
-  <label class="ctl"><span>min context %</span><input id="f-ctx" type="range" min="0" max="100" value="0" /><b id="f-ctx-v" class="mono">0</b></label>
+  <label class="ctl" id="ctl-ctx"><span>min context %</span><input id="f-ctx" type="range" min="0" max="100" value="0" /><b id="f-ctx-v" class="mono">0</b></label>
   <label class="ctl chk"><input id="f-group" type="checkbox" checked /><span>group by session</span></label>
   <button id="f-clear" class="btn ghost">clear</button>
   <button id="f-del" class="btn danger" title="Permanently delete the prompts currently shown">delete shown</button>
@@ -51,15 +52,15 @@
   <table class="grid" id="grid">
     <thead>
       <tr>
-        <th data-sort="ts" class="sortable">when</th>
-        <th data-sort="workspace" class="sortable">workspace</th>
-        <th data-sort="model" class="sortable">model</th>
-        <th data-sort="permissionMode" class="sortable">mode</th>
-        <th data-sort="_in" class="sortable num">in</th>
-        <th data-sort="_out" class="sortable num">out</th>
-        <th data-sort="contextFillPct" class="sortable num">context</th>
-        <th data-sort="_cost" class="sortable num">cost</th>
-        <th class="grow">prompt</th>
+        <th data-sort="ts" class="sortable col-when">when</th>
+        <th data-sort="workspace" class="sortable col-workspace">workspace</th>
+        <th data-sort="model" class="sortable col-model">model</th>
+        <th data-sort="permissionMode" class="sortable col-mode">mode</th>
+        <th data-sort="_in" class="sortable num col-in">in</th>
+        <th data-sort="_out" class="sortable num col-out">out</th>
+        <th data-sort="contextFillPct" class="sortable num col-context">context</th>
+        <th data-sort="_cost" class="sortable num col-cost">cost</th>
+        <th class="grow col-prompt">prompt</th>
       </tr>
     </thead>
     <tbody id="rows"></tbody>
@@ -70,6 +71,11 @@
 <div id="drawer" class="drawer" hidden>
   <div class="drawer-scrim" data-close></div>
   <aside class="drawer-panel" id="drawer-panel"></aside>
+</div>
+
+<div id="settings-drawer" class="drawer" hidden>
+  <div class="drawer-scrim" data-settings-close></div>
+  <aside class="drawer-panel" id="settings-panel"></aside>
 </div>
 
 <script src="/app.js"></script>

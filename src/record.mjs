@@ -15,13 +15,21 @@ import {
   settingsCandidates,
   deriveTranscriptPath,
 } from "./lib/paths.mjs";
+import {
+  loadConfig,
+  mutateConfig,
+  isTracked,
+  effectiveFields,
+  applyFieldSelection,
+  encCwd,
+} from "./lib/config.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Bump when the bundled viewer changes so existing projects refresh their copy
 // on the next prompt (after the user re-installs the app via npx). Keep in step
 // with viewer changes.
-const VIEWER_VERSION = "4";
+const VIEWER_VERSION = "5";
 
 // Make each project self-contained: copy the viewer + a default config into
 // <project>/.claude-usage/ so it can be viewed in place. Skipped in aggregate
@@ -84,6 +92,23 @@ async function main() {
   if (!transcript && sessionId) transcript = deriveTranscriptPath(cwd, sessionId);
   if (!transcript) return;
 
+  // Opt-in gate: only record projects the user enabled. Projects that already
+  // have recorded data are grandfathered in (lazily added on first sight) so an
+  // upgrade never silently drops existing tracking.
+  const cfg = loadConfig();
+  const { tracked, grandfather } = isTracked(cfg, cwd, fs.existsSync(workspaceFile(cwd)));
+  if (!tracked) return;
+  if (grandfather) {
+    try {
+      await mutateConfig((c) => {
+        const k = encCwd(cwd);
+        if (!c.tracking.projects[k]) {
+          c.tracking.projects[k] = { enabled: true, label: workspaceLabel(cwd), grandfathered: true };
+        }
+      });
+    } catch {}
+  }
+
   const effortLevel = readEffort(cwd);
   const turns = buildTurns(transcript, { effortLevel });
   if (!turns.length) return;
@@ -94,7 +119,11 @@ async function main() {
 
   const sid = sessionId || (turns[0] && turns[0].sessionId);
   if (!sid) return;
-  await upsertSession(workspaceFile(cwd), sid, turns);
+
+  // Strip field groups the user disabled (global default + per-project override).
+  const fields = effectiveFields(cfg, cwd);
+  const slim = turns.map((t) => applyFieldSelection(t, fields));
+  await upsertSession(workspaceFile(cwd), sid, slim);
   ensureBundle(cwd);
 }
 

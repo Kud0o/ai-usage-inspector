@@ -76,6 +76,7 @@ function collectAssistants(entries) {
         bestOut: (e.message.usage && e.message.usage.output_tokens) || -1,
         stopReason: e.message.stop_reason || null,
         ts: e.timestamp,
+        firstTs: e.timestamp, // timestamp of the first streamed line — never overwritten
         serviceTier: e.message.usage && e.message.usage.service_tier,
         speed: e.message.usage && e.message.usage.speed,
       };
@@ -260,6 +261,10 @@ function finalizeTurn(t, subByPrompt, opts) {
   const endTs = (last && last.ts) || startTs;
   const durationMs =
     startTs && endTs ? Math.max(0, Date.parse(endTs) - Date.parse(startTs)) : 0;
+  // Latency to the first assistant message (transcript-granularity TTFT).
+  const firstAsstTs = main[0] && (main[0].firstTs || main[0].ts);
+  const firstResponseMs =
+    startTs && firstAsstTs ? Math.max(0, Date.parse(firstAsstTs) - Date.parse(startTs)) : 0;
 
   return {
     id: e.uuid || `${e.sessionId}:${e.promptId || startTs}`,
@@ -272,6 +277,7 @@ function finalizeTurn(t, subByPrompt, opts) {
     ts: startTs,
     endTs,
     durationMs,
+    firstResponseMs,
     prompt,
     promptChars: prompt.length,
     response,
@@ -299,7 +305,7 @@ function finalizeTurn(t, subByPrompt, opts) {
       cacheRead: round4(cost.cacheRead),
       total: round4(cost.total),
     },
-    schema: 1,
+    schema: 2,
   };
 }
 

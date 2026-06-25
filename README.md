@@ -27,7 +27,11 @@ dashboard to slice through it.
 
 - **Per-prompt records** — prompt & response text, input/output/cache tokens, model,
   permission **mode**, configured **effort**, context-fill %, USD **cost**, duration,
-  invoked **skills**, and tool/subagent/thinking counts.
+  **first-response latency**, invoked **skills**, and tool/subagent/thinking counts.
+- **You choose what's tracked** — recording is **opt-in per project** (an allowlist;
+  projects with existing data are grandfathered in), and you pick which **field groups**
+  are stored — globally or per project. Disabled groups are stripped before writing
+  (smaller files, more privacy). Manage it all from the dashboard's ⚙ settings or a config file.
 - **Accurate accounting** — dedupes streamed transcript lines, attributes **subagent**
   token spend to the parent prompt, and prices each message at *its own* model.
 - **Self-contained per project** — each project's `.claude-usage/` holds its data, a bundled viewer, and your saved view settings (`config.json`). Safe under concurrent sessions. Opt into a combined dashboard with one env var.
@@ -146,6 +150,44 @@ manually if you want them gone.
   (scope it by workspace, model, date, or search first), and each detail panel can delete that one
   prompt. Both ask for confirmation and report the space freed; deletions are permanent.
 
+## Configuration
+
+A single global file controls **which projects are tracked** and **which fields are stored**:
+
+```
+~/.claude/usage-tracker/config.json
+```
+
+```jsonc
+{
+  "tracking": {
+    "mode": "allowlist",          // only enabled projects are recorded
+    "grandfatherExisting": true,  // projects with existing data keep recording
+    "projects": {
+      "<encoded-cwd>": { "enabled": true, "label": "MyApp", "fields": { "text": false } }
+    }
+  },
+  "fields": {                     // global defaults; per-project "fields" override these
+    "text": true, "tokens": true, "cost": true, "context": true,
+    "timing": true, "skills": true, "counts": true, "meta": true
+  }
+}
+```
+
+- **Opt-in tracking.** A *new* project records nothing until you enable it. Projects that
+  already have recorded data are grandfathered in on their next prompt, so upgrading never
+  drops existing tracking.
+- **Field groups** — `text` (prompt/response), `tokens`, `cost`, `context`, `timing`
+  (duration + first-response latency), `skills`, `counts`, `meta` (git branch, cli version,
+  slug, tier, effort). A disabled group is **stripped before writing**; already-stored data
+  is left as-is. `text` off keeps the character counts but drops the text itself.
+- **Two ways to manage it:** the dashboard's **⚙ settings** panel (toggle projects, set global
+  and per-project field groups) or by editing the file directly — the viewer reads it fresh on
+  each request.
+
+The viewer **adapts** to your choices: cards, charts, table columns, drawer rows and filters
+for a disabled (or simply absent) field group don't render.
+
 ## How it works
 
 Claude Code already writes a full JSONL transcript per session. The `Stop` hook fires
@@ -191,16 +233,21 @@ session, so a skipped write self-heals on the next prompt.
 - **Pricing** is cached in [`src/lib/pricing.mjs`](src/lib/pricing.mjs); update it if rates change.
 - **context fill %** = the last request's `input + cache_read + cache_creation` over the
   model's context window.
+- **first-response latency** is the gap from the prompt to the first streamed line of the
+  first assistant message — a transcript-granularity approximation of time-to-first-token.
+- **Disabling a field group affects new records only** — it does not scrub text or fields
+  already written. Use *delete shown* to remove old records you don't want.
 
 ## Project layout
 
 ```
-src/record.mjs          the Stop hook (entry point)
+src/record.mjs          the Stop hook (entry point; opt-in gate + field stripping)
 src/lib/transcript.mjs  parse JSONL → per-prompt turns (+ subagent attribution)
+src/lib/config.mjs      global tracking/field config (self-contained; copied into the bundle)
 src/lib/pricing.mjs     model → context window + USD pricing
 src/lib/store.mjs       lock-guarded atomic per-workspace upsert
 src/lib/paths.mjs       data dir / settings / cwd-encoding helpers
-viewer/server.mjs       zero-dep HTTP API (list · detail · config · delete) + static host
+viewer/server.mjs       zero-dep HTTP API (list · detail · config · settings · delete) + static host
 viewer/public/          the dashboard SPA
 install.mjs             installer (--global | --local | --update | --uninstall)
 ```

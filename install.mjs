@@ -65,6 +65,22 @@ function copyApp() {
   fs.mkdirSync(APP, { recursive: true });
   fs.cpSync(path.join(REPO, "src"), path.join(APP, "src"), { recursive: true });
   fs.cpSync(path.join(REPO, "viewer"), path.join(APP, "viewer"), { recursive: true });
+  // The per-project bundle ships viewer/ only (no src/). Copy the self-contained
+  // global-config module next to the viewer so the bundled server can import it.
+  fs.cpSync(path.join(REPO, "src", "lib", "config.mjs"), path.join(APP, "viewer", "config.mjs"));
+}
+
+// Create the global config (~/.claude/usage-tracker/config.json) with defaults
+// the first time only — never overwrite the user's project/field choices.
+function seedGlobalConfig() {
+  const file = path.join(HOME, ".claude", "usage-tracker", "config.json");
+  if (fs.existsSync(file)) return file;
+  const fields = {};
+  for (const g of ["text", "tokens", "cost", "context", "timing", "skills", "counts", "meta"]) fields[g] = true;
+  const cfg = { schema: 1, tracking: { mode: "allowlist", grandfatherExisting: true, projects: {} }, fields };
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
+  return file;
 }
 
 function addHook(file) {
@@ -124,6 +140,8 @@ if (args.has("--help") || args.has("-h")) {
   copyApp();
   ok(`updated app to v${VERSION}  ${gray(APP)}`);
   addHook(settingsPath(scope)); // ensure the hook exists; no-op if already there
+  const gc = seedGlobalConfig();
+  skip(`config  ${gray(gc)}`);
   console.log();
   console.log(`  ${green("✓")} ${bold("Up to date.")} ${dim("Open projects refresh their viewer on the next prompt.")}`);
   console.log();
@@ -142,8 +160,11 @@ if (args.has("--help") || args.has("-h")) {
   copyApp();
   ok(`copied app v${VERSION}  ${gray(APP)}`);
   addHook(settingsPath(scope));
+  const gc = seedGlobalConfig();
+  ok(`global config  ${gray(gc)}`);
   console.log();
-  console.log(`  ${green("✓")} ${bold("Tracking is live.")} ${dim("Your next prompts are the first recorded.")}`);
+  console.log(`  ${green("✓")} ${bold("Tracking is opt-in.")} ${dim("Projects with existing data keep recording.")}`);
+  console.log(dim(`  Enable a new project from the dashboard ⚙ settings, or edit the config file above.`));
   console.log();
   console.log(`  ${bold("View a project")}  ${dim("(after its first prompt)")}`);
   console.log(`    ${cmd("cd <your project>")}`);

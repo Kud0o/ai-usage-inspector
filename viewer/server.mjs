@@ -19,6 +19,20 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(__dirname, "public");
 
+// Global tracking/field config module. In a bundled project it sits beside this
+// file (viewer/config.mjs, placed there by the installer); when running from the
+// repo it lives at ../src/lib/config.mjs. Try the bundle path, fall back to repo.
+let CFG;
+try {
+  CFG = await import("./config.mjs");
+} catch {
+  CFG = await import("../src/lib/config.mjs");
+}
+
+// The project this viewer represents (null in aggregate mode — many projects).
+const CURRENT_KEY = process.env.CLAUDE_USAGE_DIR ? null : CFG.encCwd(path.dirname(resolveDataDir()));
+const CURRENT_LABEL = process.env.CLAUDE_USAGE_DIR ? null : path.basename(path.dirname(resolveDataDir()));
+
 function resolveDataDir() {
   if (process.env.CLAUDE_USAGE_DIR) return process.env.CLAUDE_USAGE_DIR;
   // Bundled inside a project: <project>/.claude-usage/viewer/server.mjs
@@ -194,6 +208,34 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, JSON.stringify(saveConfig(patch)));
       }
       return send(res, 200, JSON.stringify(loadConfig()));
+    }
+    if (route === "/api/settings") {
+      if (req.method === "POST") {
+        let body = {};
+        try {
+          body = JSON.parse(await readBody(req)) || {};
+        } catch {}
+        const ok = await CFG.mutateConfig((c) => {
+          if (typeof body.project === "string") {
+            const e = c.tracking.projects[body.project] || (c.tracking.projects[body.project] = { enabled: true });
+            if (typeof body.enabled === "boolean") e.enabled = body.enabled;
+            if (body.label && !e.label) e.label = body.label;
+            if (body.fields && typeof body.fields === "object") {
+              e.fields = e.fields || {};
+              for (const [g, v] of Object.entries(body.fields)) {
+                if (v === null) delete e.fields[g]; // "inherit" → drop override
+                else e.fields[g] = !!v;
+              }
+              if (!Object.keys(e.fields).length) delete e.fields;
+            }
+          } else if (body.fields && typeof body.fields === "object") {
+            c.fields = c.fields || {};
+            for (const [g, v] of Object.entries(body.fields)) c.fields[g] = !!v;
+          }
+        });
+        return send(res, 200, JSON.stringify({ ok: ok !== null, ...CFG.loadConfig(), currentKey: CURRENT_KEY, currentLabel: CURRENT_LABEL }));
+      }
+      return send(res, 200, JSON.stringify({ ...CFG.loadConfig(), currentKey: CURRENT_KEY, currentLabel: CURRENT_LABEL }));
     }
     // static
     let rel = (route === "/" ? "/index.html" : route).replace(/\.\.+/g, "");
