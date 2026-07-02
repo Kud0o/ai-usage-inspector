@@ -1,5 +1,7 @@
-// Path + filesystem-layout helpers for the usage tracker.
+// Path + filesystem-layout helpers — provider-neutral.
 // Zero dependencies — node:os / node:path only.
+// (Provider-specific paths — e.g. where Claude or Codex store transcripts and
+// settings — live in each src/providers/<id>/index.mjs.)
 import os from "node:os";
 import path from "node:path";
 
@@ -7,25 +9,27 @@ import path from "node:path";
 export const HOME = os.homedir();
 
 // Folder created inside each tracked project to hold its records.
-export const PROJECT_DIRNAME = ".claude-usage";
+export const PROJECT_DIRNAME = ".ai-usage";
 
 /**
- * Encode a cwd the way Claude Code encodes project folders:
- * ":" and path separators become "-". e.g. "K:\Projects\Tracker" -> "K--Projects-Tracker"
+ * Encode a cwd into a flat, filesystem-safe token used for aggregate-mode
+ * filenames: ":" and path separators become "-".
+ * e.g. "K:\Projects\Tracker" -> "K--Projects-Tracker".
+ * (Matches Claude Code's own project-folder encoding, which the Claude provider
+ * also relies on to locate transcripts.)
  */
 export function encCwd(cwd) {
-  // Each separator char maps to one "-" (Claude's own scheme): K:\Projects -> K--Projects
   return String(cwd || "").replace(/[:\\/]/g, "-").replace(/^-+|-+$/g, "");
 }
 
 /**
  * Where a workspace's records are written.
- * Default: inside the project itself — <cwd>/.claude-usage/usage.ndjson.
- * Set CLAUDE_USAGE_DIR to instead collect every project into one flat dir
+ * Default: inside the project itself — <cwd>/.ai-usage/usage.ndjson.
+ * Set AI_USAGE_DIR to instead collect every project into one flat dir
  * (one <encoded-cwd>.ndjson per project) for a combined dashboard.
  */
 export function workspaceFile(cwd) {
-  const override = process.env.CLAUDE_USAGE_DIR;
+  const override = process.env.AI_USAGE_DIR;
   if (override) return path.join(override, `${encCwd(cwd) || "unknown"}.ndjson`);
   return path.join(cwd, PROJECT_DIRNAME, "usage.ndjson");
 }
@@ -34,27 +38,6 @@ export function workspaceFile(cwd) {
 export function workspaceLabel(cwd) {
   const parts = String(cwd || "").split(/[\\/]+/).filter(Boolean);
   return parts[parts.length - 1] || cwd || "unknown";
-}
-
-/** Claude Code's global + project settings files (read for effortLevel). */
-export function settingsCandidates(cwd) {
-  const list = [
-    path.join(HOME, ".claude", "settings.json"),
-    path.join(HOME, ".claude", "settings.local.json"),
-  ];
-  if (cwd) {
-    list.push(path.join(cwd, ".claude", "settings.json"));
-    list.push(path.join(cwd, ".claude", "settings.local.json"));
-  }
-  return list;
-}
-
-/**
- * Derive the transcript path from cwd + sessionId when the hook payload
- * doesn't supply transcript_path.
- */
-export function deriveTranscriptPath(cwd, sessionId) {
-  return path.join(HOME, ".claude", "projects", encCwd(cwd), `${sessionId}.jsonl`);
 }
 
 /**

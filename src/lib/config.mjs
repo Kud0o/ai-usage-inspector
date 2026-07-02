@@ -1,10 +1,10 @@
 // Tracking + stored-field config.
 //
-// Model: each project owns its config in <project>/.claude-usage/config.json
+// Model: each project owns its config in <project>/.ai-usage/config.json
 // (the same file the viewer uses for title/port/ui). On a project's first sight
-// it is SEEDED from the global defaults template at ~/.claude/usage-tracker/
+// it is SEEDED from the global defaults template at ~/.ai-usage-inspector/
 // config.json, then it is authoritative for that project. Aggregate mode
-// (CLAUDE_USAGE_DIR) has no per-project folder, so the global defaults govern.
+// (AI_USAGE_DIR) has no per-project folder, so the global defaults govern.
 //
 // IMPORTANT: this file must stay SELF-CONTAINED — node builtins only, inline
 // `encCwd`. install.mjs copies it next to the viewer (app/viewer/config.mjs) so
@@ -17,7 +17,7 @@ import path from "node:path";
 export const FIELD_GROUPS = ["text", "tokens", "cost", "context", "timing", "skills", "counts", "meta"];
 
 export function globalConfigPath() {
-  return path.join(os.homedir(), ".claude", "usage-tracker", "config.json");
+  return path.join(os.homedir(), ".ai-usage-inspector", "config.json");
 }
 
 // Keep identical to paths.mjs `encCwd` (duplicated to stay bundle-importable).
@@ -54,10 +54,10 @@ export function defaultGlobalConfig() {
   return { schema: 2, enabledDefault: true, fields: defaultFields() };
 }
 
-// <cwd>/.claude-usage/config.json — or null in aggregate mode (no per-project folder).
+// <cwd>/.ai-usage/config.json — or null in aggregate mode (no per-project folder).
 export function projectConfigPath(cwd) {
-  if (process.env.CLAUDE_USAGE_DIR) return null;
-  return path.join(cwd, ".claude-usage", "config.json");
+  if (process.env.AI_USAGE_DIR) return null;
+  return path.join(cwd, ".ai-usage", "config.json");
 }
 
 export function isEnabled(cfg) {

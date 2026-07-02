@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 // Self-contained, zero-dependency viewer. Reads ONE project's records + config
-// from a `.claude-usage` folder and serves the dashboard.
+// from a `.ai-usage` folder and serves the dashboard.
 //
 // It figures out which folder to read, in priority order:
-//   1. $CLAUDE_USAGE_DIR                       (explicit / aggregate mode)
+//   1. $AI_USAGE_DIR                           (explicit / aggregate mode)
 //   2. its own sibling folder, when this file was copied into a project at
-//      <project>/.claude-usage/viewer/server.mjs   → reads <project>/.claude-usage
-//   3. <argv path>/.claude-usage  or  <cwd>/.claude-usage
+//      <project>/.ai-usage/viewer/server.mjs   → reads <project>/.ai-usage
+//   3. <argv path>/.ai-usage  or  <cwd>/.ai-usage
 //
-//   node server.mjs                 # reads ./.claude-usage
+//   node server.mjs                 # reads ./.ai-usage
 //   node server.mjs /path/to/proj   # reads that project
-//   PORT=8080 node server.mjs
+//   node server.mjs --port 8080     # or PORT=8080 / config.json "port"
+//
+// Port priority: --port flag > $PORT > config.json "port" > first free port
+// starting at 4317 (auto-picked so it never fails to start).
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -18,6 +21,23 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(__dirname, "public");
+
+function parseArgs(argv) {
+  let port = null;
+  let projectPath = null;
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--port" || a === "-p") {
+      port = Number(argv[++i]);
+    } else if (a.startsWith("--port=")) {
+      port = Number(a.slice("--port=".length));
+    } else if (!a.startsWith("-")) {
+      projectPath = a;
+    }
+  }
+  return { port, projectPath };
+}
+const ARGS = parseArgs(process.argv);
 
 // Field/defaults config module. In a bundled project it sits beside this file
 // (viewer/config.mjs, placed there by the installer); when running from the repo
@@ -29,17 +49,28 @@ try {
   CFG = await import("../src/lib/config.mjs");
 }
 
+// Same bundle-or-repo dance for the pricing refresher. On a fresh install the
+// module may not be bundled yet; degrade silently if so.
+let PRICING = null;
+try {
+  PRICING = await import("./remote-pricing.mjs");
+} catch {
+  try {
+    PRICING = await import("../src/providers/claude/remote-pricing.mjs");
+  } catch {}
+}
+
 function resolveDataDir() {
-  if (process.env.CLAUDE_USAGE_DIR) return process.env.CLAUDE_USAGE_DIR;
-  // Bundled inside a project: <project>/.claude-usage/viewer/server.mjs
+  if (process.env.AI_USAGE_DIR) return process.env.AI_USAGE_DIR;
+  // Bundled inside a project: <project>/.ai-usage/viewer/server.mjs
   if (
     path.basename(__dirname) === "viewer" &&
-    path.basename(path.dirname(__dirname)) === ".claude-usage"
+    path.basename(path.dirname(__dirname)) === ".ai-usage"
   ) {
     return path.dirname(__dirname);
   }
-  const base = process.argv[2] ? path.resolve(process.argv[2]) : process.cwd();
-  return path.join(base, ".claude-usage");
+  const base = ARGS.projectPath ? path.resolve(ARGS.projectPath) : process.cwd();
+  return path.join(base, ".ai-usage");
 }
 
 const DATA_DIR = resolveDataDir();
@@ -82,7 +113,7 @@ function saveConfig(patch) {
   return next;
 }
 
-const PORT = Number(process.env.PORT) || loadConfig().port || 4317;
+const requestedPort = ARGS.port || Number(process.env.PORT) || loadConfig().port;
 
 // ---- data ----
 function loadEvents() {
@@ -226,8 +257,54 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`\n  Claude usage viewer  ->  http://localhost:${PORT}`);
+// When no port was explicitly requested, retry on the next port instead of
+// failing — the real listen() (not a separate probe) decides what's free,
+// since pre-checking with a throwaway socket is unreliable on Windows.
+let port = requestedPort || 4317;
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    if (!requestedPort) {
+      port++;
+      server.listen(port);
+      return;
+    }
+    console.error(`\n  Port ${port} is already in use. Pick another with --port <n>.\n`);
+    process.exit(1);
+  }
+  throw err;
+});
+
+server.listen(port, () => {
+  console.log(`\n  AI Usage Inspector  ->  http://localhost:${port}`);
   console.log(`  project: ${loadConfig().title}`);
   console.log(`  reading: ${DATA_DIR}\n`);
+  refreshPricing();
 });
+
+// Refresh the shared Claude pricing cache from Claude's public docs (the only
+// provider with a machine-readable price source; OpenAI/Codex rates are the
+// built-in table). No pricing API or version stamp to diff against, so we
+// re-fetch on every viewer start (a manual, occasional launch) and content-diff
+// the result — the cache and the log only move when a rate actually changed.
+// Skipped when this project isn't tracking cost. Non-blocking, best-effort,
+// offline-safe.
+function refreshPricing() {
+  if (!PRICING) return;
+  if (!loadConfig().fields.cost) return;
+  PRICING.refreshPricing({ ttlMs: 0 })
+    .then((r) => {
+      if (r.status === "updated") {
+        const what = (r.changes || [])
+          .map((c) =>
+            c.type === "changed"
+              ? `${c.id} ${c.from.input}/${c.from.output}→${c.to.input}/${c.to.output}`
+              : `${c.id} ${c.type}`,
+          )
+          .join(", ");
+        console.log(`  pricing: updated Claude rates from docs — ${what}`);
+      } else if (r.status === "offline") {
+        console.log(`  pricing: offline — using cached/built-in rates`);
+      }
+    })
+    .catch(() => {});
+}

@@ -2,6 +2,7 @@
 node_modules/
 
 # recorded usage data (per-project)
+.ai-usage/
 .claude-usage/
 
 # local test scaffolding

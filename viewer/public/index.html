@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Claude Usage · Dashboard</title>
+<title>AI Usage Inspector · Dashboard</title>
 <script>try{var t=localStorage.getItem("cu-theme")||(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches?"light":"dark");document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","dark");}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -16,7 +16,7 @@
 <header class="topbar">
   <div class="brand">
     <span class="dot"></span>
-    <h1>CLAUDE&nbsp;USAGE<em>dashboard</em></h1>
+    <h1>AI&nbsp;USAGE<em>inspector</em></h1>
     <span id="proj" class="proj"></span>
   </div>
   <div class="topmeta">
@@ -35,6 +35,7 @@
   <div class="ctl search">
     <input id="f-search" type="search" placeholder="search prompts, responses, slugs…" />
   </div>
+  <label class="ctl"><span>provider</span><select id="f-provider"></select></label>
   <label class="ctl"><span>workspace</span><select id="f-workspace"></select></label>
   <label class="ctl"><span>model</span><select id="f-model"></select></label>
   <label class="ctl"><span>mode</span><select id="f-mode"></select></label>
@@ -53,6 +54,7 @@
     <thead>
       <tr>
         <th data-sort="ts" class="sortable col-when">when</th>
+        <th data-sort="provider" class="sortable col-provider">provider</th>
         <th data-sort="workspace" class="sortable col-workspace">workspace</th>
         <th data-sort="model" class="sortable col-model">model</th>
         <th data-sort="permissionMode" class="sortable col-mode">mode</th>
@@ -65,7 +67,7 @@
     </thead>
     <tbody id="rows"></tbody>
   </table>
-  <div id="empty" class="empty" hidden>No prompts recorded yet. Start a Claude Code session with the hook installed.</div>
+  <div id="empty" class="empty" hidden>No prompts recorded yet. Start a Claude Code or OpenAI Codex session with the hook installed.</div>
 </section>
 
 <div id="drawer" class="drawer" hidden>

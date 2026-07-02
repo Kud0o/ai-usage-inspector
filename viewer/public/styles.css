@@ -246,6 +246,10 @@ svg { display: block; width: 100%; overflow: visible; }
 .tag.plan { color: var(--violet); border-color: rgba(155,140,214,0.4); }
 .tag.acceptEdits { color: var(--green); border-color: rgba(132,176,106,0.4); }
 .tag.bypassPermissions { color: var(--red); border-color: rgba(211,91,74,0.4); }
+/* provider badges */
+.tag.prov-claude { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.tag.prov-codex { color: var(--green); border-color: rgba(132,176,106,0.4); }
+.col-provider { white-space: nowrap; }
 
 /* context mini-bar */
 .ctxbar { display: inline-flex; align-items: center; gap: 7px; justify-content: flex-end; }

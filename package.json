@@ -1,17 +1,19 @@
 {
-  "name": "claude-usage-tracker",
-  "version": "1.0.0",
-  "description": "Zero-dependency Claude Code hook that records every prompt (tokens, model, mode, effort, context %, cost) and shows it in a local dashboard.",
+  "name": "ai-usage-inspector",
+  "version": "2.0.0",
+  "description": "Zero-dependency hook that records every AI coding-agent prompt (tokens, model, mode, cost, context %) from Claude Code and OpenAI Codex, and shows it in a local dashboard.",
   "type": "module",
   "license": "MIT",
   "engines": {
     "node": ">=18"
   },
   "bin": {
-    "claude-usage-tracker": "install.mjs"
+    "ai-usage-inspector": "install.mjs"
   },
   "scripts": {
     "install-hook": "node install.mjs",
+    "install-claude": "node install.mjs --claude",
+    "install-codex": "node install.mjs --codex",
     "install-local": "node install.mjs --local",
     "uninstall": "node install.mjs --uninstall",
     "view": "node viewer/server.mjs"
@@ -19,6 +21,8 @@
   "keywords": [
     "claude",
     "claude-code",
+    "openai",
+    "codex",
     "hook",
     "usage",
     "tokens",

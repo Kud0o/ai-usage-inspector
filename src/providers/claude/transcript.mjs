@@ -12,7 +12,7 @@
 
 import fs from "node:fs";
 import { costOf, contextMax, zeroCost, addCost } from "./pricing.mjs";
-import { subagentsDir } from "./paths.mjs";
+import { subagentsDir } from "../../lib/paths.mjs";
 
 function readJsonl(file) {
   let text;
@@ -103,6 +103,7 @@ function emptyTokens() {
   return {
     input: 0,
     output: 0,
+    reasoning: 0, // OpenAI reasoning tokens; always 0 for Claude
     cacheCreate: 0,
     cacheRead: 0,
     cacheCreate1h: 0,
@@ -268,6 +269,7 @@ function finalizeTurn(t, subByPrompt, opts) {
 
   return {
     id: e.uuid || `${e.sessionId}:${e.promptId || startTs}`,
+    provider: "claude",
     sessionId: e.sessionId,
     cwd: e.cwd,
     slug: e.slug || null,

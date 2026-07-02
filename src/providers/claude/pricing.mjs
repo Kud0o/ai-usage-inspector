@@ -1,8 +1,12 @@
 // Model -> context window + USD pricing, and a per-usage cost calculator.
-// Prices are USD per 1,000,000 tokens (source: Claude API skill, cached 2026-06).
+// Prices are USD per 1,000,000 tokens. The table below is the built-in
+// fallback (cached 2026-06); current rates fetched from Claude's pricing docs
+// override it when available (see remote-pricing.mjs / applyRemoteRates).
 // Cache writes: 5m = 1.25x input, 1h = 2x input. Cache reads = 0.1x input.
+import { M, zeroCost, addCost } from "../../lib/pricing-core.mjs";
+import { readCachedRates } from "./remote-pricing.mjs";
 
-const M = 1_000_000;
+export { zeroCost, addCost };
 
 // Per-MTok rates. cw5m/cw1h/cr are derived from input where omitted.
 function model(input, output, ctx) {
@@ -31,6 +35,32 @@ const TABLE = {
 
 const FALLBACK = model(5, 25, 200_000);
 
+// Rates fetched from the pricing docs, keyed like TABLE. Carry only input/output
+// (the docs don't list context windows), so the context max falls back to the
+// built-in entry. Applied at import from the on-disk cache; the viewer refreshes
+// that cache, so newly recorded turns price at current rates.
+let OVERRIDES = {};
+
+/**
+ * Merge fetched { id: { input, output } } rates over the built-in table.
+ * Sanity-checked: a non-numeric or negative rate is ignored, never poisoning
+ * a model's pricing.
+ */
+export function applyRemoteRates(rates) {
+  if (!rates) return;
+  for (const [id, r] of Object.entries(rates)) {
+    if (!r || !(r.input >= 0) || !(r.output >= 0)) continue;
+    const ctx = (TABLE[id] && TABLE[id].contextMax) || FALLBACK.contextMax;
+    OVERRIDES[id] = model(r.input, r.output, ctx);
+  }
+}
+
+// Seed overrides from whatever the viewer last cached. Best-effort; the hook
+// stays fully offline (no fetch here, just a local file read).
+try {
+  applyRemoteRates(readCachedRates());
+} catch {}
+
 /** Strip a trailing -YYYYMMDD date snapshot from a model id. */
 export function normalize(modelId) {
   return String(modelId || "").replace(/-\d{8}$/, "");
@@ -38,7 +68,8 @@ export function normalize(modelId) {
 
 /** Look up the pricing/context record for a model id (never throws). */
 export function modelInfo(modelId) {
-  return TABLE[normalize(modelId)] || FALLBACK;
+  const id = normalize(modelId);
+  return OVERRIDES[id] || TABLE[id] || FALLBACK;
 }
 
 /** Context window (tokens) for a model id. */
@@ -71,19 +102,5 @@ export function costOf(modelId, usage) {
     cacheRead,
     cacheWrite,
     total: input + output + cacheRead + cacheWrite,
-  };
-}
-
-export function zeroCost() {
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-}
-
-export function addCost(a, b) {
-  return {
-    input: a.input + b.input,
-    output: a.output + b.output,
-    cacheRead: a.cacheRead + b.cacheRead,
-    cacheWrite: a.cacheWrite + b.cacheWrite,
-    total: a.total + b.total,
   };
 }

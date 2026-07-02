@@ -10,7 +10,7 @@ const state = {
   all: [],
   view: [],
   sort: { key: "ts", dir: -1 },
-  filters: { search: "", workspace: "", model: "", mode: "", effort: "", since: "", ctx: 0 },
+  filters: { search: "", provider: "", workspace: "", model: "", mode: "", effort: "", since: "", ctx: 0 },
   group: true,
   fields: {},                     // this project's stored-field flags
   enabled: true,                  // is this project tracked
@@ -88,7 +88,7 @@ async function loadConfig() {
   let cfg = {};
   try { cfg = await (await fetch("/api/config")).json(); } catch {}
   if (cfg.title) {
-    document.title = cfg.title + " · Claude Usage";
+    document.title = cfg.title + " · AI Usage Inspector";
     const t = $("#proj"); if (t) t.textContent = cfg.title;
   }
   const ui = cfg.ui || {};
@@ -142,6 +142,7 @@ function persist() {
 function reflect() {
   const f = state.filters;
   $("#f-search").value = f.search || "";
+  $("#f-provider").value = f.provider || "";
   $("#f-workspace").value = f.workspace || "";
   $("#f-model").value = f.model || "";
   $("#f-mode").value = f.mode || "";
@@ -169,6 +170,7 @@ function fillSelect(id, values, label) {
   el.innerHTML = `<option value="">all ${label}</option>` + values.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
 }
 function buildFilterOptions() {
+  fillSelect("#f-provider", uniq("provider"), "providers");
   fillSelect("#f-workspace", uniq("workspace"), "workspaces");
   fillSelect("#f-model", uniq("model"), "models");
   fillSelect("#f-mode", uniq("permissionMode"), "modes");
@@ -180,6 +182,7 @@ function apply() {
   const f = state.filters;
   const q = f.search.toLowerCase();
   state.view = state.all.filter((e) => {
+    if (f.provider && (e.provider || "claude") !== f.provider) return false;
     if (f.workspace && e.workspace !== f.workspace) return false;
     if (f.model && e.model !== f.model) return false;
     if (f.mode && e.permissionMode !== f.mode) return false;
@@ -385,8 +388,10 @@ function ctxBar(pct) {
 function rowHtml(e) {
   const chip = has("skills") && e.skills && e.skills.length
     ? `<span class="skill-chip" title="skills: ${esc(e.skills.join(", "))}">▸ ${e.skills.length}</span> ` : "";
+  const prov = e.provider || "claude";
   return `<tr class="row" data-id="${esc(e.id)}">
     <td class="mono muted col-when">${fmtWhen(e.ts)}</td>
+    <td class="col-provider"><span class="tag prov-${esc(prov)}">${esc(prov)}</span></td>
     <td class="ws col-workspace">${esc(e.workspace)}</td>
     <td class="mono col-model">${shortModel(e.model)}</td>
     <td class="col-mode"><span class="tag ${esc(e.permissionMode)}">${esc(e.permissionMode)}</span></td>
@@ -590,7 +595,7 @@ function renderSettings() {
       <p class="set-note">Disabled groups are stripped before writing (smaller files, more privacy). Already-stored data is not changed; changes apply from the next prompt.</p>
       ${fieldRows}
     </section>
-    <p class="set-foot mono">.claude-usage/config.json</p>`;
+    <p class="set-foot mono">.ai-usage/config.json</p>`;
 }
 function openSettings() {
   $("#settings-drawer").hidden = false;
@@ -614,12 +619,12 @@ function initTheme() {
 // ---------- events ----------
 function bind() {
   $("#f-search").addEventListener("input", (e) => { state.filters.search = e.target.value; apply(); });
-  const map = { "#f-workspace": "workspace", "#f-model": "model", "#f-mode": "mode", "#f-effort": "effort", "#f-since": "since" };
+  const map = { "#f-provider": "provider", "#f-workspace": "workspace", "#f-model": "model", "#f-mode": "mode", "#f-effort": "effort", "#f-since": "since" };
   for (const [sel, key] of Object.entries(map)) $(sel).addEventListener("change", (e) => { state.filters[key] = e.target.value; apply(); });
   $("#f-ctx").addEventListener("input", (e) => { state.filters.ctx = +e.target.value; $("#f-ctx-v").textContent = e.target.value; apply(); });
   $("#f-group").addEventListener("change", (e) => { state.group = e.target.checked; renderTable(); persist(); });
   $("#f-clear").addEventListener("click", () => {
-    state.filters = { search: "", workspace: "", model: "", mode: "", effort: "", since: "", ctx: 0 };
+    state.filters = { search: "", provider: "", workspace: "", model: "", mode: "", effort: "", since: "", ctx: 0 };
     document.querySelectorAll(".ctl select").forEach((s) => (s.value = ""));
     $("#f-search").value = ""; $("#f-since").value = ""; $("#f-ctx").value = 0; $("#f-ctx-v").textContent = "0";
     apply();
