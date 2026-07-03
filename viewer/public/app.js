@@ -529,11 +529,16 @@ async function openDrawer(id) {
   if (has("cost") && e.cost) cells.push(`<div><div class="k">cost</div><div class="v accent">${fmtUsd(c.total)}</div></div>`);
   if (has("context") && e.contextFillPct != null) cells.push(`<div><div class="k">context</div><div class="v">${(e.contextFillPct||0).toFixed(1)}% <span class="muted" style="font-size:11px">${fmtTok(e.contextTokens)}/${fmtTok(e.contextMax)}</span></div></div>`);
   if (has("timing") && e.firstResponseMs != null) cells.push(`<div><div class="k">first response</div><div class="v">${fmtDur(e.firstResponseMs)}</div></div>`);
-  if (has("tokens") && e.usage) cells.push(
-    `<div><div class="k">input</div><div class="v">${fmtInt(u.input)}</div></div>`,
-    `<div><div class="k">output</div><div class="v">${fmtInt(u.output)}</div></div>`,
-    `<div><div class="k">cache write</div><div class="v">${fmtInt(u.cacheCreate)}</div></div>`,
-    `<div><div class="k">cache read</div><div class="v">${fmtInt(u.cacheRead)}</div></div>`);
+  if (has("tokens") && e.usage) {
+    cells.push(
+      `<div><div class="k">input</div><div class="v">${fmtInt(u.input)}</div></div>`,
+      `<div><div class="k">output</div><div class="v">${fmtInt(u.output)}</div></div>`,
+      `<div><div class="k">cache write</div><div class="v">${fmtInt(u.cacheCreate)}</div></div>`,
+      `<div><div class="k">cache read</div><div class="v">${fmtInt(u.cacheRead)}</div></div>`);
+    // OpenAI reasoning tokens (subset of output); Claude records have 0 here.
+    if (u.reasoning > 0) cells.push(
+      `<div><div class="k">reasoning</div><div class="v">${fmtInt(u.reasoning)} <span class="muted" style="font-size:11px">of output</span></div></div>`);
+  }
   if (has("counts") && e.counts) cells.push(
     `<div><div class="k">api calls</div><div class="v">${k.apiCalls} <span class="muted" style="font-size:11px">+${k.subagentCalls} sub</span></div></div>`,
     `<div><div class="k">tools / think</div><div class="v">${k.toolCalls} / ${k.thinkingBlocks}</div></div>`);

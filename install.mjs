@@ -16,6 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { getProvider, listProviders, detectInstalled } from "./src/providers/index.mjs";
 
@@ -78,6 +79,10 @@ function copyApp() {
   fs.cpSync(
     path.join(REPO, "src", "providers", "claude", "remote-pricing.mjs"),
     path.join(APP, "viewer", "remote-pricing.mjs"),
+  );
+  fs.cpSync(
+    path.join(REPO, "src", "providers", "codex", "remote-pricing.mjs"),
+    path.join(APP, "viewer", "remote-pricing-codex.mjs"),
   );
 }
 
@@ -151,6 +156,10 @@ function help() {
   console.log(`    ${cmd("node install.mjs --local")}      ${dim("Claude Code: this project only")}`);
   console.log(`    ${cmd("node install.mjs --update")}     ${dim("refresh app to the latest version")}`);
   console.log(`    ${cmd("node install.mjs --uninstall")}  ${dim("remove the hooks")}`);
+  console.log(`    ${cmd("node install.mjs --sync")}       ${dim("also import existing session history")}`);
+  console.log();
+  console.log(`  ${bold("Backfill history")}  ${dim("(hooks only record from install time forward)")}`);
+  console.log(`    ${cmd(`node "${path.join("~", ".ai-usage-inspector", "app", "src", "sync.mjs")}"`)}   ${dim("[--provider claude|codex] [--days N]")}`);
   console.log();
   console.log(`  ${bold("View a project")}  ${dim("(after its first prompt)")}`);
   console.log(`    ${cmd("node .ai-usage/viewer/server.mjs")}   ${dim("→ http://localhost:4317 (first free port; --port to pin)")}`);
@@ -191,6 +200,17 @@ if (args.has("--help") || args.has("-h")) {
   for (const p of providers) installProvider(p);
   const gc = seedGlobalConfig();
   ok(`global defaults  ${gray(gc)}`);
+  if (args.has("--sync")) {
+    console.log();
+    console.log(`  ${bold("Importing existing history")}${dim(" …")}`);
+    for (const p of providers) {
+      const r = spawnSync(process.execPath, [path.join(APP, "src", "sync.mjs"), "--provider", p.id], {
+        encoding: "utf8",
+      });
+      process.stdout.write(r.stdout || "");
+      if (r.status !== 0) skip(`${p.displayName}: sync failed`);
+    }
+  }
   if (scope === "local") {
     const pc = seedProjectConfig(process.cwd());
     ok(`project config  ${gray(pc)}`);

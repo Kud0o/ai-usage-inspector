@@ -82,6 +82,42 @@ export function buildTurns(transcriptPath, opts = {}) {
   return buildClaudeTurns(transcriptPath, opts);
 }
 
+/**
+ * All session transcripts on disk (~/.claude/projects/<enc-cwd>/<session>.jsonl),
+ * for backfill/sync. cwd is recovered from each transcript's own entries (turn
+ * records carry it), so opts stays empty. `sinceMs` skips files not modified
+ * since then. Subagent files live one level deeper and are loaded by the
+ * parser itself — only top-level session files are returned.
+ */
+export function discoverTranscripts({ sinceMs = 0 } = {}) {
+  const root = path.join(HOME, ".claude", "projects");
+  const out = [];
+  let projects = [];
+  try {
+    projects = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const p of projects) {
+    if (!p.isDirectory()) continue;
+    const dir = path.join(root, p.name);
+    let files = [];
+    try {
+      files = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      if (!f.isFile() || !f.name.endsWith(".jsonl")) continue;
+      const fp = path.join(dir, f.name);
+      try {
+        if (fs.statSync(fp).mtimeMs >= sinceMs) out.push({ transcriptPath: fp, opts: {} });
+      } catch {}
+    }
+  }
+  return out;
+}
+
 // ---- install-time (hook in ~/.claude/settings.json) ----
 
 function settingsPath(scope, cwd) {

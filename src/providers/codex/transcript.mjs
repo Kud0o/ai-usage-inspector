@@ -62,6 +62,11 @@ function isTokenCount(c) {
 function isSessionMeta(c) {
   return c.top === "session_meta" || (c.body && c.body.cwd && c.body.id && !c.role);
 }
+// Per-turn context record — carries the model (and cwd/effort) in effect for
+// the turn that follows. Lets us track mid-session model switches.
+function isTurnContext(c) {
+  return c.top === "turn_context" || c.sub === "turn_context";
+}
 
 // Join the text out of a Responses-API content array (input_text/output_text/text).
 function contentText(content) {
@@ -103,13 +108,16 @@ export function buildTurns(rolloutPath, opts = {}) {
   for (const c of recs) if (isSessionMeta(c)) { meta = c.body; break; }
   const sessionId = opts.sessionId || meta.id || meta.session_id || null;
   const cwd = opts.cwd || meta.cwd || null;
-  const model = opts.model || meta.model || (meta.turn_context && meta.turn_context.model) || "unknown";
+  const sessionModel =
+    opts.model || meta.model || (meta.turn_context && meta.turn_context.model) || "unknown";
   const cliVersion = meta.cli_version || meta.version || null;
 
   // Segment into turns at each user message; attach the token-count deltas and
-  // assistant text that follow it.
+  // assistant text that follow it. `currentModel` follows turn_context records,
+  // so mid-session model switches are captured per turn.
   const turns = [];
   let cur = null;
+  let currentModel = sessionModel;
   let runningTotal = { input: 0, cached: 0, output: 0, reasoning: 0 };
 
   const openTurn = (c) => {
@@ -119,6 +127,7 @@ export function buildTurns(rolloutPath, opts = {}) {
       firstAsstTs: null,
       prompt: contentText(c.body.content),
       response: "",
+      model: currentModel,
       startTotal: { ...runningTotal },
       lastCtxInput: 0,
       ctxWindow: 0,
@@ -130,6 +139,13 @@ export function buildTurns(rolloutPath, opts = {}) {
   };
 
   for (const c of recs) {
+    if (isTurnContext(c)) {
+      if (c.body.model) currentModel = c.body.model;
+      // A turn_context arriving inside an open turn (before its first request
+      // completes) re-scopes that turn's model.
+      if (cur && cur.apiCalls === 0 && c.body.model) cur.model = c.body.model;
+      continue;
+    }
     if (isUserMessage(c)) {
       openTurn(c);
       continue;
@@ -163,13 +179,22 @@ export function buildTurns(rolloutPath, opts = {}) {
   }
 
   return turns
-    .map((t, i) => finalizeTurn(t, { sessionId, cwd, model, cliVersion, index: i }))
+    .map((t, i) =>
+      finalizeTurn(t, {
+        sessionId,
+        cwd,
+        cliVersion,
+        index: i,
+        permissionMode: opts.permissionMode || null,
+      }),
+    )
     .filter(Boolean);
 }
 
 function finalizeTurn(t, ctx) {
   // Turn usage = delta of the cumulative total across the turn.
   const d = sub(t.endTotal, t.startTotal);
+  const model = t.model || "unknown";
 
   const tokens = {
     input: Math.max(0, d.input - d.cached), // billable (non-cached) input
@@ -182,10 +207,10 @@ function finalizeTurn(t, ctx) {
     webSearch: 0,
     webFetch: 0,
   };
-  const cost = costOf(ctx.model, { input: tokens.input, cached: d.cached, output: d.output });
+  const cost = costOf(model, { input: tokens.input, cached: d.cached, output: d.output });
 
   const ctxTokens = t.lastCtxInput || d.input;
-  const ctxMax = t.ctxWindow || contextMax(ctx.model);
+  const ctxMax = t.ctxWindow || contextMax(model);
   const startTs = t.ts;
   const endTs = t.endTs || startTs;
   const durationMs =
@@ -210,10 +235,10 @@ function finalizeTurn(t, ctx) {
     promptChars: t.prompt.length,
     response: t.response,
     responseChars: t.response.length,
-    model: ctx.model,
+    model,
     serviceTier: null,
     speed: null,
-    permissionMode: "default",
+    permissionMode: ctx.permissionMode || "default",
     effortLevel: null,
     skills: [],
     usage: tokens,

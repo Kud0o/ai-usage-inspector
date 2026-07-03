@@ -49,16 +49,23 @@ try {
   CFG = await import("../src/lib/config.mjs");
 }
 
-// Same bundle-or-repo dance for the pricing refresher. On a fresh install the
-// module may not be bundled yet; degrade silently if so.
-let PRICING = null;
-try {
-  PRICING = await import("./remote-pricing.mjs");
-} catch {
+// Same bundle-or-repo dance for the per-provider pricing refreshers. On a fresh
+// install a module may not be bundled yet; degrade silently if so.
+async function loadPricing(bundle, repo) {
   try {
-    PRICING = await import("../src/providers/claude/remote-pricing.mjs");
-  } catch {}
+    return await import(bundle);
+  } catch {
+    try {
+      return await import(repo);
+    } catch {
+      return null;
+    }
+  }
 }
+const PRICING = [
+  { label: "claude", mod: await loadPricing("./remote-pricing.mjs", "../src/providers/claude/remote-pricing.mjs") },
+  { label: "openai", mod: await loadPricing("./remote-pricing-codex.mjs", "../src/providers/codex/remote-pricing.mjs") },
+].filter((p) => p.mod);
 
 function resolveDataDir() {
   if (process.env.AI_USAGE_DIR) return process.env.AI_USAGE_DIR;
@@ -281,30 +288,32 @@ server.listen(port, () => {
   refreshPricing();
 });
 
-// Refresh the shared Claude pricing cache from Claude's public docs (the only
-// provider with a machine-readable price source; OpenAI/Codex rates are the
-// built-in table). No pricing API or version stamp to diff against, so we
-// re-fetch on every viewer start (a manual, occasional launch) and content-diff
-// the result — the cache and the log only move when a rate actually changed.
-// Skipped when this project isn't tracking cost. Non-blocking, best-effort,
-// offline-safe.
+// Refresh the shared pricing caches — Claude rates from Anthropic's public
+// docs, OpenAI rates from models.dev. No pricing API or version stamp to diff
+// against, so we re-fetch on every viewer start (a manual, occasional launch)
+// and content-diff the result — a cache and its log line only move when a rate
+// actually changed. Skipped when this project isn't tracking cost.
+// Non-blocking, best-effort, offline-safe.
 function refreshPricing() {
-  if (!PRICING) return;
+  if (!PRICING.length) return;
   if (!loadConfig().fields.cost) return;
-  PRICING.refreshPricing({ ttlMs: 0 })
-    .then((r) => {
-      if (r.status === "updated") {
-        const what = (r.changes || [])
-          .map((c) =>
+  for (const { label, mod } of PRICING) {
+    mod
+      .refreshPricing({ ttlMs: 0 })
+      .then((r) => {
+        if (r.status === "updated") {
+          const changes = r.changes || [];
+          const shown = changes.slice(0, 8).map((c) =>
             c.type === "changed"
               ? `${c.id} ${c.from.input}/${c.from.output}→${c.to.input}/${c.to.output}`
               : `${c.id} ${c.type}`,
-          )
-          .join(", ");
-        console.log(`  pricing: updated Claude rates from docs — ${what}`);
-      } else if (r.status === "offline") {
-        console.log(`  pricing: offline — using cached/built-in rates`);
-      }
-    })
-    .catch(() => {});
+          );
+          const more = changes.length > 8 ? ` (+${changes.length - 8} more)` : "";
+          console.log(`  pricing: updated ${label} rates — ${shown.join(", ")}${more}`);
+        } else if (r.status === "offline") {
+          console.log(`  pricing: ${label} offline — using cached/built-in rates`);
+        }
+      })
+      .catch(() => {});
+  }
 }

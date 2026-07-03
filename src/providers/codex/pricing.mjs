@@ -8,6 +8,7 @@
 // There is no 5m/1h cache-write tier — so the shared cost object carries
 // cacheWrite: 0 and cacheRead = cached-input cost.
 import { M, zeroCost } from "../../lib/pricing-core.mjs";
+import { readCachedRates } from "./remote-pricing.mjs";
 
 export { zeroCost };
 
@@ -31,6 +32,29 @@ const TABLE = {
 // Unknown Codex models default to the codex-tier rate.
 const FALLBACK = model(1.75, 0.175, 14, 400_000);
 
+// Rates fetched from models.dev (see remote-pricing.mjs), keyed like TABLE.
+// Applied at import from the on-disk cache the viewer refreshes — so newly
+// recorded turns price at current rates, hook stays offline.
+let OVERRIDES = {};
+
+/** Merge fetched { id: { input, cachedInput, output, contextMax? } } over TABLE. */
+export function applyRemoteRates(rates) {
+  if (!rates) return;
+  for (const [id, r] of Object.entries(rates)) {
+    if (!r || !(r.input >= 0) || !(r.output >= 0)) continue;
+    const cached = r.cachedInput >= 0 ? r.cachedInput : r.input * 0.1;
+    const ctx =
+      r.contextMax > 0
+        ? r.contextMax
+        : (TABLE[id] && TABLE[id].contextMax) || FALLBACK.contextMax;
+    OVERRIDES[id] = model(r.input, cached, r.output, ctx);
+  }
+}
+
+try {
+  applyRemoteRates(readCachedRates());
+} catch {}
+
 /** Strip a trailing dated snapshot from an OpenAI slug (e.g. -2026-03-01 / -20260301). */
 export function normalize(modelId) {
   return String(modelId || "")
@@ -39,7 +63,8 @@ export function normalize(modelId) {
 }
 
 export function modelInfo(modelId) {
-  return TABLE[normalize(modelId)] || FALLBACK;
+  const id = normalize(modelId);
+  return OVERRIDES[id] || TABLE[id] || FALLBACK;
 }
 
 export function contextMax(modelId) {

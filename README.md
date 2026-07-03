@@ -117,6 +117,22 @@ uninstall). Existing settings are preserved.
 > Installing also enables tracking for your **current** session, so your next
 > prompts are the first ones recorded.
 
+### 2b. Backfill existing history (optional)
+
+Hooks only record from install time forward. To import the session history both
+agents already have on disk (Claude Code under `~/.claude/projects/…`, Codex
+under `~/.codex/sessions/…`):
+
+```sh
+node install.mjs --sync                                  # at install time
+node ~/.ai-usage-inspector/app/src/sync.mjs              # any time later
+node ~/.ai-usage-inspector/app/src/sync.mjs --provider codex --days 30
+```
+
+Sync is idempotent (records upsert per session — re-running never duplicates)
+and respects each project's tracking config: projects with tracking disabled
+are skipped, exactly like the hook path.
+
 ### 3. View the dashboard
 
 After a project's first prompt, it has its own viewer inside `.ai-usage/`.
@@ -210,12 +226,19 @@ for a disabled (or simply absent) field group don't render.
 ### Model pricing
 
 Per-model token rates ship built-in, but the viewer keeps them current: when the
-project tracks **cost**, each viewer start fetches Claude's public [pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
-and caches the rates at `~/.ai-usage-inspector/pricing-claude.json`. There's no
-pricing API or version to check, so it re-fetches every run and **content-diffs**
-the result — the cache and the startup log only move when a rate actually changed
-(it prints exactly which models moved). It's fully best-effort: offline, or when
-cost isn't tracked, the built-in table is used and no fetch happens.
+project tracks **cost**, each viewer start refreshes both providers' rates —
+
+- **Claude** from Anthropic's public [pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
+  → cached at `~/.ai-usage-inspector/pricing-claude.json`
+- **OpenAI** from [models.dev](https://models.dev) (open, machine-readable model/pricing
+  dataset; OpenAI publishes no machine-readable pricing themselves)
+  → cached at `~/.ai-usage-inspector/pricing-codex.json`
+
+There's no pricing API or version to check, so it re-fetches every run and
+**content-diffs** the result — a cache and its startup-log line only move when a
+rate actually changed (it prints exactly which models moved). It's fully
+best-effort: offline, or when cost isn't tracked, the built-in tables are used
+and no fetch happens.
 
 Costs are computed and stored **when each prompt is recorded**, so the refreshed
 rates apply to turns recorded after the viewer last updated the cache (the `Stop`

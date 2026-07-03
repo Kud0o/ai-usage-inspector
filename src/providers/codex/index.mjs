@@ -8,6 +8,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { HOME } from "../../lib/paths.mjs";
 import { buildTurns as buildCodexTurns } from "./transcript.mjs";
+import { applyRemoteRates } from "./pricing.mjs";
+import { refreshPricing as refreshRemote } from "./remote-pricing.mjs";
 
 export const id = "codex";
 export const displayName = "OpenAI Codex";
@@ -43,8 +45,40 @@ export function normalizePayload(raw) {
       model: payload.model || null,
       sessionId: payload.session_id || payload.sessionId || null,
       cwd: payload.cwd || null,
+      permissionMode: payload.permission_mode || payload.permissionMode || null,
     },
   };
+}
+
+/**
+ * All rollout files on disk (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl),
+ * for backfill/sync. Each entry: { transcriptPath, opts } — cwd/session come
+ * from the rollout's own session_meta, so opts stays empty. `sinceMs` skips
+ * files not modified since then.
+ */
+export function discoverTranscripts({ sinceMs = 0 } = {}) {
+  const root = path.join(HOME, ".codex", "sessions");
+  const out = [];
+  const walk = (dir, depth) => {
+    let ents;
+    try {
+      ents = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of ents) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (depth < 4) walk(p, depth + 1); // sessions/YYYY/MM/DD
+      } else if (e.isFile() && e.name.startsWith("rollout-") && e.name.endsWith(".jsonl")) {
+        try {
+          if (fs.statSync(p).mtimeMs >= sinceMs) out.push({ transcriptPath: p, opts: {} });
+        } catch {}
+      }
+    }
+  };
+  walk(root, 0);
+  return out;
 }
 
 export function buildTurns(transcriptPath, opts = {}) {
@@ -101,7 +135,10 @@ function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// OpenAI has no machine-readable pricing source; rates are the built-in table.
+// Dynamic OpenAI pricing via models.dev (open JSON dataset); built-in table
+// is the fallback. See remote-pricing.mjs.
 export async function refreshPricing() {
-  return { status: "no-source" };
+  const r = await refreshRemote();
+  if (r && r.rates) applyRemoteRates(r.rates);
+  return r;
 }
