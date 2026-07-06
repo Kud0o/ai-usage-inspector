@@ -246,10 +246,17 @@ svg { display: block; width: 100%; overflow: visible; }
 .tag.plan { color: var(--violet); border-color: rgba(155,140,214,0.4); }
 .tag.acceptEdits { color: var(--green); border-color: rgba(132,176,106,0.4); }
 .tag.bypassPermissions { color: var(--red); border-color: rgba(211,91,74,0.4); }
-/* provider badges */
-.tag.prov-claude { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
-.tag.prov-codex { color: var(--green); border-color: rgba(132,176,106,0.4); }
+/* provider colors — one hue per provider, shared by badges + charts */
+:root { --prov-claude: var(--accent); --prov-codex: var(--green); --prov-cursor: var(--violet); }
+.tag.prov-claude { color: var(--prov-claude); border-color: color-mix(in srgb, var(--prov-claude) 40%, transparent); }
+.tag.prov-codex  { color: var(--prov-codex);  border-color: color-mix(in srgb, var(--prov-codex) 40%, transparent); }
+.tag.prov-cursor { color: var(--prov-cursor); border-color: color-mix(in srgb, var(--prov-cursor) 40%, transparent); }
 .col-provider { white-space: nowrap; }
+/* monthly-budget card accents */
+.stat.warn .val { color: var(--amber); }
+.stat.danger .val { color: var(--red); }
+/* estimated-cost marker in the detail drawer */
+.est-flag { color: var(--amber); font-family: var(--mono); font-size: 11px; }
 
 /* context mini-bar */
 .ctxbar { display: inline-flex; align-items: center; gap: 7px; justify-content: flex-end; }

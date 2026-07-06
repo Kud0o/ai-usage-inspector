@@ -14,6 +14,7 @@ const state = {
   group: true,
   fields: {},                     // this project's stored-field flags
   enabled: true,                  // is this project tracked
+  budgetMonthly: null,            // optional USD monthly budget (ui.budgetMonthly)
 };
 // Field-group visible? Defaults to true so a missing/unreachable config shows all.
 const has = (g) => state.fields[g] !== false;
@@ -73,11 +74,51 @@ async function delEvents(ids, label) {
 }
 const dayKey = (ts) => (ts || "").slice(0, 10);
 
+// ---------- export (client-side; exports the currently filtered records) ----------
+function download(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a");
+  a.href = url; a.download = name; document.body.appendChild(a); a.click();
+  a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function csvCell(v) {
+  const s = v == null ? "" : String(v);
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+function exportRecords(kind) {
+  const rows = state.view;
+  if (!rows.length) { toast("nothing to export"); return; }
+  const stamp = new Date().toISOString().slice(0, 10);
+  if (kind === "json") {
+    download(`ai-usage-${stamp}.json`, JSON.stringify(rows, null, 2), "application/json");
+  } else {
+    const cols = ["ts", "provider", "workspace", "sessionId", "model", "permissionMode", "promptChars", "responseChars", "input", "output", "reasoning", "cacheRead", "cacheWrite", "costTotal", "estimated", "durationMs", "contextFillPct"];
+    const line = (e) => [
+      e.ts, PROV(e), e.workspace, e.sessionId, e.model, e.permissionMode,
+      e.promptChars, e.responseChars,
+      T_IN(e), T_OUT(e), (e.usage && e.usage.reasoning) || 0, (e.usage && e.usage.cacheRead) || 0, (e.usage && e.usage.cacheCreate) || 0,
+      COST(e), (e.cost && e.cost.estimated) ? 1 : 0, e.durationMs || 0, e.contextFillPct || 0,
+    ].map(csvCell).join(",");
+    const csv = [cols.join(","), ...rows.map(line)].join("\r\n");
+    download(`ai-usage-${stamp}.csv`, csv, "text/csv");
+  }
+  toast(`exported ${rows.length} record(s)`);
+}
+
 // derived accessors used for sorting (null-safe: records may omit disabled groups)
 const T_IN = (e) => (e.usage && e.usage.input) || 0;
 const T_OUT = (e) => (e.usage && e.usage.output) || 0;
 const T_TOTAL = (e) => { const u = e.usage; return u ? (u.input || 0) + (u.output || 0) + (u.cacheCreate || 0) + (u.cacheRead || 0) : 0; };
 const COST = (e) => (e.cost && e.cost.total) || 0;
+const PROV = (e) => e.provider || "claude";
+// Provider → its brand color (shared with badges via CSS vars).
+const provColor = (p) => cssv(`--prov-${p}`) || cssv("--faint");
+// Distinct providers present in a set, in a stable order.
+function provsIn(arr) {
+  const order = ["claude", "codex", "cursor"];
+  const seen = new Set(arr.map(PROV));
+  return order.filter((p) => seen.has(p)).concat([...seen].filter((p) => !order.includes(p)));
+}
 
 // ---------- config (per project: title/ui + tracking + stored fields) ----------
 async function boot() {
@@ -95,6 +136,7 @@ async function loadConfig() {
   if (ui.filters) state.filters = { ...state.filters, ...ui.filters };
   if (ui.sort && ui.sort.key) state.sort = ui.sort;
   if (typeof ui.group === "boolean") state.group = ui.group;
+  state.budgetMonthly = typeof ui.budgetMonthly === "number" && ui.budgetMonthly > 0 ? ui.budgetMonthly : null;
   state.fields = cfg.fields || {};
   state.enabled = !cfg.tracking || cfg.tracking.enabled !== false;
   applySettingsVisibility();
@@ -235,6 +277,27 @@ function renderStats() {
   cards.push({ label: "top model", val: shortModel(topModel), sub: topModel ? byModel[topModel] + " prompts" : "—", cls: "" });
   cards.push({ label: "busiest workspace", val: esc(topWs || "—"), sub: topWs ? byWs[topWs] + " prompts" : "—", cls: "" });
   if (has("cost")) cards.push({ label: "est. cost", val: fmtUsd(cost), sub: prompts ? `${fmtUsd(cost / prompts)} / prompt` : "—", cls: "cost" });
+  // This month's spend (computed across ALL records, independent of filters) +
+  // optional monthly budget with warn/danger accents.
+  if (has("cost")) {
+    const now = new Date(), ym = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
+    const monthCost = state.all.reduce((a, e) => (dayKey(e.ts).slice(0, 7) === ym ? a + COST(e) : a), 0);
+    const b = state.budgetMonthly;
+    let cls = "cost", sub = "spent this month · all projects’ filters off";
+    if (b) {
+      const pct = monthCost / b;
+      cls = pct >= 1 ? "danger" : pct >= 0.8 ? "warn" : "cost";
+      sub = `${fmtUsd(monthCost)} of ${fmtUsd(b)} budget · ${Math.round(pct * 100)}%`;
+    }
+    cards.push({ label: "this month", val: fmtUsd(monthCost), sub: b ? sub : sub, cls });
+  }
+  // Cost by provider — only meaningful when the filtered view spans >1 provider.
+  const provs = provsIn(v);
+  if (has("cost") && provs.length > 1) {
+    const byProv = provs.map((p) => [p, v.reduce((a, e) => (PROV(e) === p ? a + COST(e) : a), 0)]).sort((a, b) => b[1] - a[1]);
+    const sub = byProv.map(([p, c]) => `${p} ${fmtUsd(c)}`).join(" · ");
+    cards.push({ label: "cost · by provider", val: fmtUsd(cost), sub, cls: "cost" });
+  }
   $("#stats").innerHTML = cards
     .map(
       (c) => `<div class="stat ${c.cls}" style="--bar:${c.bar || 0}%">
@@ -288,6 +351,14 @@ function renderCharts() {
   cards.push(`<div class="card"><h3>prompts by model</h3>${donut(modelCount, (x) => x + " prompts")}</div>`);
   if (has("skills") && skillsUsed) cards.push(`<div class="card"><h3>skills invoked <b>${skillsUsed}</b></h3>${donut(skillCount, (x) => x + "×")}</div>`);
   if (has("cost")) cards.push(`<div class="card"><h3>est. cost / day <b class="cost-b">${fmtUsd(cost.reduce((a, b) => a + b, 0))}</b></h3>${barChart(keys, cost, cssv("--faint"), (x) => fmtUsd(x))}</div>`);
+  // Per-provider breakdowns — only when the view spans more than one provider.
+  const provs = provsIn(v);
+  if (provs.length > 1) {
+    const tokByProv = {}, costByProv = {};
+    for (const e of v) { const p = PROV(e); tokByProv[p] = (tokByProv[p] || 0) + T_TOTAL(e); costByProv[p] = (costByProv[p] || 0) + COST(e); }
+    if (has("tokens")) cards.push(`<div class="card"><h3>tokens by provider</h3>${provDonut(tokByProv, (x) => fmtTok(x))}</div>`);
+    if (has("cost")) cards.push(`<div class="card"><h3>cost by provider</h3>${provDonut(costByProv, (x) => fmtUsd(x))}</div>`);
+  }
   $("#charts").innerHTML = cards.join("");
 }
 
@@ -350,6 +421,28 @@ function donut(map, fmt) {
     <svg viewBox="0 0 140 140" style="width:128px;height:128px;flex:0 0 auto">${arcs}
       <text x="70" y="66" text-anchor="middle" fill="${cssv("--text")}" font-family="var(--display)" font-size="20" font-weight="600">${entries.length}</text>
       <text x="70" y="84" text-anchor="middle" fill="${cssv("--muted")}" font-family="var(--mono)" font-size="8" letter-spacing="1">TYPES</text>
+    </svg><div class="legend" style="flex:1">${legend}</div></div>`;
+}
+
+// Donut keyed by provider, so each slice uses that provider's brand color.
+function provDonut(map, fmt) {
+  const entries = Object.entries(map).sort((a, b) => b[1] - a[1]);
+  const total = entries.reduce((a, [, v]) => a + v, 0);
+  if (!total) return emptyChart();
+  const R = 52, C = 2 * Math.PI * R;
+  let off = 0;
+  const arcs = entries.map(([k, v]) => {
+    const len = (v / total) * C, col = provColor(k);
+    const seg = `<circle r="${R}" cx="70" cy="70" fill="none" stroke="${col}" stroke-width="16"
+      stroke-dasharray="${len.toFixed(2)} ${(C - len).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}"
+      transform="rotate(-90 70 70)"/>`;
+    off += len; return seg;
+  }).join("");
+  const legend = entries.map(([k, v]) => `<span><i style="background:${provColor(k)}"></i>${esc(k)} · ${fmt(v)}</span>`).join("");
+  return `<div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap">
+    <svg viewBox="0 0 140 140" style="width:128px;height:128px;flex:0 0 auto">${arcs}
+      <text x="70" y="66" text-anchor="middle" fill="${cssv("--text")}" font-family="var(--display)" font-size="20" font-weight="600">${entries.length}</text>
+      <text x="70" y="84" text-anchor="middle" fill="${cssv("--muted")}" font-family="var(--mono)" font-size="8" letter-spacing="1">AGENTS</text>
     </svg><div class="legend" style="flex:1">${legend}</div></div>`;
 }
 
@@ -542,8 +635,9 @@ async function openDrawer(id) {
   if (has("counts") && e.counts) cells.push(
     `<div><div class="k">api calls</div><div class="v">${k.apiCalls} <span class="muted" style="font-size:11px">+${k.subagentCalls} sub</span></div></div>`,
     `<div><div class="k">tools / think</div><div class="v">${k.toolCalls} / ${k.thinkingBlocks}</div></div>`);
+  const estFlag = e.cost && e.cost.estimated ? ` <span class="est-flag" title="Cursor doesn't store exact token counts locally; tokens estimated from text length">≈ estimated</span>` : "";
   const costBreakdown = has("cost") && e.cost
-    ? `<div class="block"><div class="bh"><span>cost breakdown · USD</span></div><pre>input  ${fmtUsd(c.input)}
+    ? `<div class="block"><div class="bh"><span>cost breakdown · USD${estFlag}</span></div><pre>input  ${fmtUsd(c.input)}
 output ${fmtUsd(c.output)}
 cache write ${fmtUsd(c.cacheWrite)}
 cache read  ${fmtUsd(c.cacheRead)}
@@ -596,6 +690,17 @@ function renderSettings() {
       </div>
     </section>
     <section class="set-sec">
+      <h3 class="set-h">monthly budget</h3>
+      <p class="set-note">Optional USD cap. The “this month” card turns amber at 80% and red at 100%. Leave empty to disable.</p>
+      <div class="set-row">
+        <label class="set-toggle" style="cursor:auto">
+          <span class="set-name" style="margin-left:0">budget (USD)<small>this project’s dashboard only</small></span>
+          <input type="number" min="0" step="1" data-budget placeholder="off" value="${state.budgetMonthly != null ? state.budgetMonthly : ""}"
+            style="width:90px;margin-left:auto;font-family:var(--mono)" />
+        </label>
+      </div>
+    </section>
+    <section class="set-sec">
       <h3 class="set-h">stored fields</h3>
       <p class="set-note">Disabled groups are stripped before writing (smaller files, more privacy). Already-stored data is not changed; changes apply from the next prompt.</p>
       ${fieldRows}
@@ -634,6 +739,8 @@ function bind() {
     $("#f-search").value = ""; $("#f-since").value = ""; $("#f-ctx").value = 0; $("#f-ctx-v").textContent = "0";
     apply();
   });
+  $("#f-csv").addEventListener("click", () => exportRecords("csv"));
+  $("#f-json").addEventListener("click", () => exportRecords("json"));
   $("#f-del").addEventListener("click", () => delEvents(state.view.map((e) => e.id), "prompt(s) shown"));
   $("#refresh").addEventListener("click", load);
   $("#theme").addEventListener("click", () => {
@@ -650,6 +757,13 @@ function bind() {
       saveConfigPatch({ tracking: { enabled: t.checked } });
     } else if (t.dataset.field !== undefined) {
       saveConfigPatch({ fields: { [t.dataset.field]: t.checked } });
+    } else if (t.dataset.budget !== undefined) {
+      const n = parseFloat(t.value);
+      const budgetMonthly = Number.isFinite(n) && n > 0 ? n : null;
+      state.budgetMonthly = budgetMonthly;
+      fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ui: { budgetMonthly } }) }).catch(() => {});
+      renderStats();
+      toast("budget saved");
     }
   });
   document.querySelectorAll(".grid th.sortable").forEach((th) =>

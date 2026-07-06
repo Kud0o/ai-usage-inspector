@@ -3,8 +3,9 @@
 // config, viewer) is provider-neutral.
 import * as claude from "./claude/index.mjs";
 import * as codex from "./codex/index.mjs";
+import * as cursor from "./cursor/index.mjs";
 
-const PROVIDERS = { [claude.id]: claude, [codex.id]: codex };
+const PROVIDERS = { [claude.id]: claude, [codex.id]: codex, [cursor.id]: cursor };
 
 export function getProvider(id) {
   return PROVIDERS[id] || null;

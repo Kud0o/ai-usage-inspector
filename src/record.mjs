@@ -10,7 +10,7 @@
 // try/catch, nothing is written to stdout, and the process always exits 0.
 import fs from "node:fs";
 import { getProvider } from "./providers/index.mjs";
-import { ingest } from "./lib/ingest.mjs";
+import { ingest, ingestTranscript } from "./lib/ingest.mjs";
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(name);
@@ -31,7 +31,22 @@ function readStdin() {
 async function main() {
   const provider = getProvider(arg("--provider", "claude"));
   if (!provider) return;
-  await ingest(provider, readStdin());
+  const raw = readStdin();
+
+  // Some providers' hook payloads carry no transcript reference (Cursor's stop
+  // hook) — they return a rescan directive instead, and we ingest everything
+  // updated inside the window.
+  const norm = provider.normalizePayload(raw);
+  if (norm && norm.rescan && typeof provider.discoverTranscripts === "function") {
+    const found = await provider.discoverTranscripts({ sinceMs: norm.sinceMs || 0 });
+    for (const t of found) {
+      try {
+        await ingestTranscript(provider, t);
+      } catch {}
+    }
+    return;
+  }
+  await ingest(provider, raw);
 }
 
 main()

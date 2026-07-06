@@ -16,7 +16,9 @@
 // starting at 4317 (auto-picked so it never fails to start).
 import http from "node:http";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -65,6 +67,7 @@ async function loadPricing(bundle, repo) {
 const PRICING = [
   { label: "claude", mod: await loadPricing("./remote-pricing.mjs", "../src/providers/claude/remote-pricing.mjs") },
   { label: "openai", mod: await loadPricing("./remote-pricing-codex.mjs", "../src/providers/codex/remote-pricing.mjs") },
+  { label: "cursor", mod: await loadPricing("./remote-pricing-cursor.mjs", "../src/providers/cursor/remote-pricing.mjs") },
 ].filter((p) => p.mod);
 
 function resolveDataDir() {
@@ -286,7 +289,27 @@ server.listen(port, () => {
   console.log(`  project: ${loadConfig().title}`);
   console.log(`  reading: ${DATA_DIR}\n`);
   refreshPricing();
+  autoSync();
 });
+
+// Pull the last few days of sessions from every provider in the background so
+// the dashboard is fresh even when a hook missed turns (or was never
+// installed). Uses the globally installed app; silently skipped in repo-mode
+// dev where it isn't installed. /api/events reads from disk per request, so a
+// browser refresh picks up whatever the sync imported.
+function autoSync() {
+  try {
+    const syncJs = path.join(os.homedir(), ".ai-usage-inspector", "app", "src", "sync.mjs");
+    if (!fs.existsSync(syncJs)) return;
+    const child = spawn(process.execPath, [syncJs, "--days", "7"], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env },
+    });
+    child.unref();
+    console.log(`  sync: refreshing last 7 days in the background (reload page for new data)\n`);
+  } catch {}
+}
 
 // Refresh the shared pricing caches — Claude rates from Anthropic's public
 // docs, OpenAI rates from models.dev. No pricing API or version stamp to diff

@@ -2,12 +2,13 @@
 
 # AI Usage Inspector
 
-**Record every AI coding-agent prompt — tokens, model, mode, context %, and cost — from Claude Code and OpenAI Codex, then explore it in one local dashboard.**
+**Record every AI coding-agent prompt — tokens, model, mode, context %, and cost — from Claude Code, OpenAI Codex, and Cursor, then explore it in one local dashboard.**
 
 ![Node](https://img.shields.io/badge/Node-%E2%89%A518-339933?logo=node.js&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-success)
 ![Claude Code](https://img.shields.io/badge/Claude_Code-Stop_hook-2f6fed)
 ![OpenAI Codex](https://img.shields.io/badge/OpenAI_Codex-Stop_hook-10a37f)
+![Cursor](https://img.shields.io/badge/Cursor-SQLite_scan-000000)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 </div>
@@ -28,8 +29,11 @@ added.
 
 ## Features
 
-- **Multi-provider** — tracks **Claude Code** and **OpenAI Codex** side by side, each priced
-  and parsed by its own provider module; filter and compare by provider in the dashboard.
+- **Multi-provider** — tracks **Claude Code**, **OpenAI Codex**, and **Cursor** side by side,
+  each priced and parsed by its own provider module; filter, chart, and compare by provider in
+  the dashboard (per-provider cost/token breakdowns render automatically when >1 is present).
+- **Export & budget** — one-click **CSV/JSON** export of the filtered view, a **this-month**
+  cost card, and an optional monthly **budget** that colors the card amber at 80% / red at 100%.
 - **Per-prompt records** — prompt & response text, input/output/cache/reasoning tokens, model,
   permission **mode**, configured **effort**, context-fill %, USD **cost**, duration,
   **first-response latency**, invoked **skills**, and tool/subagent/thinking counts.
@@ -106,22 +110,31 @@ Or target one agent, or install from a clone:
 node install.mjs              # every detected agent, all workspaces
 node install.mjs --claude     # Claude Code only
 node install.mjs --codex      # OpenAI Codex only
+node install.mjs --cursor     # Cursor only (needs Node >= 22.5 for node:sqlite)
 node install.mjs --local      # Claude Code: this project only → ./.claude/settings.local.json
+node install.mjs --dashboard  # sync everything, then open one dashboard across all projects
 ```
 
 The installer copies the app to `~/.ai-usage-inspector/app/` and registers each
-agent's `Stop` hook in its own config — Claude Code's `~/.claude/settings.json`
-and Codex's `~/.codex/config.toml` (a fenced block that's cleanly removed on
-uninstall). Existing settings are preserved.
+agent's `Stop` hook in its own config — Claude Code's `~/.claude/settings.json`,
+Codex's `~/.codex/config.toml`, and Cursor's `~/.cursor/hooks.json` (each a fenced
+or marked entry that's cleanly removed on uninstall). Existing settings are preserved.
+
+> **Cursor** is read differently from the other two: its stop hook carries no token
+> data, so the provider reads Cursor's local SQLite stores (`state.vscdb`) directly.
+> That needs **Node ≥ 22.5** (built-in `node:sqlite`). Cursor also doesn't reliably
+> store per-message token counts locally — when they're missing the provider
+> **estimates** from text length (~4 chars/token) and flags the cost as approximate
+> (**≈**) in the dashboard.
 
 > Installing also enables tracking for your **current** session, so your next
 > prompts are the first ones recorded.
 
 ### 2b. Backfill existing history (optional)
 
-Hooks only record from install time forward. To import the session history both
-agents already have on disk (Claude Code under `~/.claude/projects/…`, Codex
-under `~/.codex/sessions/…`):
+Hooks only record from install time forward. To import the session history the
+agents already have on disk (Claude Code under `~/.claude/projects/…`, Codex under
+`~/.codex/sessions/…`, Cursor in its `state.vscdb`):
 
 ```sh
 node install.mjs --sync                                  # at install time
@@ -226,13 +239,18 @@ for a disabled (or simply absent) field group don't render.
 ### Model pricing
 
 Per-model token rates ship built-in, but the viewer keeps them current: when the
-project tracks **cost**, each viewer start refreshes both providers' rates —
+project tracks **cost**, each viewer start refreshes every provider's rates —
 
 - **Claude** from Anthropic's public [pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
   → cached at `~/.ai-usage-inspector/pricing-claude.json`
 - **OpenAI** from [models.dev](https://models.dev) (open, machine-readable model/pricing
   dataset; OpenAI publishes no machine-readable pricing themselves)
   → cached at `~/.ai-usage-inspector/pricing-codex.json`
+- **Cursor** from Cursor's public [models & pricing](https://cursor.com/docs/models-and-pricing) docs
+  → cached at `~/.ai-usage-inspector/pricing-cursor.json`
+
+The viewer also **auto-syncs the last 7 days** on start (all installed providers, in the
+background) — so opening the dashboard catches turns a hook missed. Reload the page to see them.
 
 There's no pricing API or version to check, so it re-fetches every run and
 **content-diffs** the result — a cache and its startup-log line only move when a

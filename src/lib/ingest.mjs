@@ -12,7 +12,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Bump when the bundled viewer changes so existing projects refresh their copy
 // on the next prompt (after the user re-installs the app via npx).
-export const VIEWER_VERSION = "9";
+export const VIEWER_VERSION = "10";
 
 // Make each project self-contained: copy the viewer + a default config into
 // <project>/.ai-usage/ so it can be viewed in place. Skipped in aggregate mode
@@ -68,7 +68,8 @@ export async function ingest(provider, raw) {
   const cfg = await ensureProjectConfig(cwd);
   if (!isEnabled(cfg)) return 0;
 
-  const turns = provider.buildTurns(transcriptPath, opts || {});
+  // await: some providers' parsers are async (cursor reads SQLite).
+  const turns = await provider.buildTurns(transcriptPath, opts || {});
   if (!turns.length) return 0;
   return storeTurns(turns, cwd, cfg, sessionId);
 }
@@ -81,7 +82,7 @@ export async function ingest(provider, raw) {
  */
 export async function ingestTranscript(provider, { transcriptPath, cwd, sessionId, opts } = {}) {
   if (!transcriptPath) return 0;
-  const turns = provider.buildTurns(transcriptPath, opts || {});
+  const turns = await provider.buildTurns(transcriptPath, opts || {});
   if (!turns.length) return 0;
 
   const effCwd = cwd || turns[0].cwd;

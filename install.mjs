@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { getProvider, listProviders, detectInstalled } from "./src/providers/index.mjs";
 
@@ -52,6 +52,7 @@ function selectedProviders(defaultAll) {
   const picked = [];
   if (args.has("--claude")) picked.push(getProvider("claude"));
   if (args.has("--codex")) picked.push(getProvider("codex"));
+  if (args.has("--cursor")) picked.push(getProvider("cursor"));
   if (picked.length) return picked;
   if (args.has("--all") || defaultAll) return listProviders();
   const detected = detectInstalled();
@@ -83,6 +84,10 @@ function copyApp() {
   fs.cpSync(
     path.join(REPO, "src", "providers", "codex", "remote-pricing.mjs"),
     path.join(APP, "viewer", "remote-pricing-codex.mjs"),
+  );
+  fs.cpSync(
+    path.join(REPO, "src", "providers", "cursor", "remote-pricing.mjs"),
+    path.join(APP, "viewer", "remote-pricing-cursor.mjs"),
   );
 }
 
@@ -153,6 +158,8 @@ function help() {
   console.log(`    ${cmd("node install.mjs")}              ${dim("install for every detected agent")}`);
   console.log(`    ${cmd("node install.mjs --claude")}     ${dim("Claude Code only")}`);
   console.log(`    ${cmd("node install.mjs --codex")}      ${dim("OpenAI Codex only")}`);
+  console.log(`    ${cmd("node install.mjs --cursor")}     ${dim("Cursor only (needs Node >= 22.5)")}`);
+  console.log(`    ${cmd("node install.mjs --dashboard")}  ${dim("sync everything + open one dashboard across all projects")}`);
   console.log(`    ${cmd("node install.mjs --local")}      ${dim("Claude Code: this project only")}`);
   console.log(`    ${cmd("node install.mjs --update")}     ${dim("refresh app to the latest version")}`);
   console.log(`    ${cmd("node install.mjs --uninstall")}  ${dim("remove the hooks")}`);
@@ -172,6 +179,31 @@ function help() {
 
 if (args.has("--help") || args.has("-h")) {
   help();
+} else if (args.has("--dashboard")) {
+  // One dashboard across every project: sync all providers into the shared
+  // aggregate dir (existing AI_USAGE_DIR pooling), then serve the viewer on it.
+  banner("dashboard · all projects");
+  console.log();
+  if (!fs.existsSync(path.join(APP, "src", "sync.mjs"))) {
+    copyApp();
+    ok(`copied app v${VERSION}  ${gray(APP)}`);
+  }
+  const AGG = path.join(HOME, ".ai-usage-inspector", "aggregate");
+  fs.mkdirSync(AGG, { recursive: true });
+  const env = { ...process.env, AI_USAGE_DIR: AGG };
+  console.log(`  ${bold("Syncing all providers")}${dim(" …")}`);
+  const r = spawnSync(process.execPath, [path.join(APP, "src", "sync.mjs")], {
+    env,
+    encoding: "utf8",
+  });
+  process.stdout.write(r.stdout || "");
+  console.log();
+  console.log(`  ${bold("Opening dashboard")} ${dim(`(data: ${AGG})`)}`);
+  const child = spawn(process.execPath, [path.join(APP, "viewer", "server.mjs")], {
+    env,
+    stdio: "inherit",
+  });
+  child.on("exit", (code) => process.exit(code || 0));
 } else if (update) {
   banner("update");
   console.log();

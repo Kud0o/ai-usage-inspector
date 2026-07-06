@@ -39,7 +39,7 @@ async function main() {
       console.log(`  ${p.id}: no sync support`);
       continue;
     }
-    const found = p.discoverTranscripts({ sinceMs });
+    const found = await p.discoverTranscripts({ sinceMs });
     let files = 0;
     let turns = 0;
     for (const t of found) {
