@@ -11,6 +11,8 @@
 //   node server.mjs                 # reads ./.ai-usage
 //   node server.mjs /path/to/proj   # reads that project
 //   node server.mjs --port 8080     # or PORT=8080 / config.json "port"
+//   node server.mjs --no-sync       # do not run background history sync
+//   node server.mjs --no-pricing-refresh
 //
 // Port priority: --port flag > $PORT > config.json "port" > first free port
 // starting at 4317 (auto-picked so it never fails to start).
@@ -27,19 +29,51 @@ const PUBLIC = path.join(__dirname, "public");
 function parseArgs(argv) {
   let port = null;
   let projectPath = null;
+  let help = false;
+  let noSync = false;
+  let noPricingRefresh = false;
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--port" || a === "-p") {
+    if (a === "--help" || a === "-h") {
+      help = true;
+    } else if (a === "--no-sync") {
+      noSync = true;
+    } else if (a === "--no-pricing-refresh") {
+      noPricingRefresh = true;
+    } else if (a === "--port" || a === "-p") {
       port = Number(argv[++i]);
     } else if (a.startsWith("--port=")) {
       port = Number(a.slice("--port=".length));
     } else if (!a.startsWith("-")) {
       projectPath = a;
+    } else {
+      throw new Error(`unknown option: ${a}`);
     }
   }
-  return { port, projectPath };
+  return { port, projectPath, help, noSync, noPricingRefresh };
 }
-const ARGS = parseArgs(process.argv);
+function help() {
+  console.log(`
+  AI Usage Inspector viewer
+
+  Usage
+    node viewer/server.mjs [project] [--port N]
+    node viewer/server.mjs --no-sync --no-pricing-refresh
+
+  Serves the .ai-usage dashboard for one project, or AI_USAGE_DIR when set.
+`);
+}
+let ARGS;
+try {
+  ARGS = parseArgs(process.argv);
+} catch (err) {
+  console.error(err && err.message);
+  process.exit(1);
+}
+if (ARGS.help) {
+  help();
+  process.exit(0);
+}
 
 // Field/defaults config module. In a bundled project it sits beside this file
 // (viewer/config.mjs, placed there by the installer); when running from the repo
@@ -288,8 +322,8 @@ server.listen(port, () => {
   console.log(`\n  AI Usage Inspector  ->  http://localhost:${port}`);
   console.log(`  project: ${loadConfig().title}`);
   console.log(`  reading: ${DATA_DIR}\n`);
-  refreshPricing();
-  autoSync();
+  if (!ARGS.noPricingRefresh) refreshPricing();
+  if (!ARGS.noSync) autoSync();
 });
 
 // Pull the last few days of sessions from every provider in the background so

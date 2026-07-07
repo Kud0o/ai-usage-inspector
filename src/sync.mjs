@@ -21,7 +21,53 @@ function arg(name, fallback) {
   return hit ? hit.slice(pref.length) : fallback;
 }
 
+function help() {
+  console.log(`
+  AI Usage Inspector sync
+
+  Usage
+    node src/sync.mjs
+    node src/sync.mjs --provider claude|codex|cursor
+    node src/sync.mjs --days 30
+
+  Imports existing provider history into per-project .ai-usage records.
+`);
+}
+
+function validateArgs() {
+  const argv = process.argv.slice(2);
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--help" || a === "-h") continue;
+    if (a === "--provider" || a === "--days") {
+      if (!argv[i + 1] || argv[i + 1].startsWith("-")) {
+        throw new Error(`${a} requires a value`);
+      }
+      i++;
+      continue;
+    }
+    if (a.startsWith("--provider=") || a.startsWith("--days=")) continue;
+    throw new Error(`unknown option: ${a}`);
+  }
+
+  const wanted = arg("--provider", null);
+  if (wanted && !getProvider(wanted)) throw new Error(`unknown provider: ${wanted}`);
+
+  const rawDays = arg("--days", null);
+  if (rawDays != null) {
+    const days = Number(rawDays);
+    if (!Number.isFinite(days) || days < 0) throw new Error("--days must be a non-negative number");
+  }
+}
+
 async function main() {
+  if (process.argv.includes("--help") || process.argv.includes("-h")) {
+    help();
+    return;
+  }
+
+  validateArgs();
+
   const wanted = arg("--provider", null);
   const days = Number(arg("--days", 0)) || 0;
   const sinceMs = days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : 0;

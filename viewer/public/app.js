@@ -212,7 +212,7 @@ function fillSelect(id, values, label) {
   el.innerHTML = `<option value="">all ${label}</option>` + values.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
 }
 function buildFilterOptions() {
-  fillSelect("#f-provider", uniq("provider"), "providers");
+  fillSelect("#f-provider", [...new Set(state.all.map(PROV))].sort(), "providers");
   fillSelect("#f-workspace", uniq("workspace"), "workspaces");
   fillSelect("#f-model", uniq("model"), "models");
   fillSelect("#f-mode", uniq("permissionMode"), "modes");
@@ -283,7 +283,7 @@ function renderStats() {
     const now = new Date(), ym = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
     const monthCost = state.all.reduce((a, e) => (dayKey(e.ts).slice(0, 7) === ym ? a + COST(e) : a), 0);
     const b = state.budgetMonthly;
-    let cls = "cost", sub = "spent this month · all projects’ filters off";
+    let cls = "cost", sub = "spent this month across all records";
     if (b) {
       const pct = monthCost / b;
       cls = pct >= 1 ? "danger" : pct >= 0.8 ? "warn" : "cost";
@@ -465,7 +465,7 @@ const emptyChart = () => `<div style="height:120px;display:grid;place-items:cent
 // ---------- table ----------
 function sorted() {
   const { key, dir } = state.sort;
-  const accessor = { _in: T_IN, _out: T_OUT, _cost: COST }[key] || ((e) => e[key]);
+  const accessor = { _in: T_IN, _out: T_OUT, _cost: COST, provider: PROV }[key] || ((e) => e[key]);
   return [...state.view].sort((a, b) => {
     let x = accessor(a), y = accessor(b);
     if (typeof x === "string") return x.localeCompare(y) * dir;
@@ -717,12 +717,12 @@ function closeSettings() { $("#settings-drawer").hidden = true; }
 // ---------- theme (light / dark, persisted; default = system) ----------
 function setTheme(t) {
   document.documentElement.setAttribute("data-theme", t);
-  try { localStorage.setItem("cu-theme", t); } catch {}
+  try { localStorage.setItem("aiui-theme", t); localStorage.setItem("cu-theme", t); } catch {}
   const b = $("#theme"); if (b) b.textContent = t === "light" ? "☾" : "☀";
   if (state.all.length) renderCharts(); // SVGs bake colors → repaint
 }
 function initTheme() {
-  let t; try { t = localStorage.getItem("cu-theme"); } catch {}
+  let t; try { t = localStorage.getItem("aiui-theme") || localStorage.getItem("cu-theme"); } catch {}
   setTheme(t || document.documentElement.getAttribute("data-theme") || "dark");
 }
 

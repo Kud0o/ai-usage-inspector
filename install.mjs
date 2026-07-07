@@ -50,6 +50,37 @@ const update = args.has("--update");
 const scope = explicitScope || "global"; // bare invocation installs globally
 const VERSION = readJson(path.join(REPO, "package.json")).version || "0";
 
+const KNOWN_FLAGS = new Set([
+  "--help",
+  "-h",
+  "--claude",
+  "--codex",
+  "--cursor",
+  "--all",
+  "--local",
+  "--global",
+  "--sync",
+  "--dashboard",
+  "--update",
+  "--uninstall",
+]);
+
+function validateArgs() {
+  const unknown = process.argv.slice(2).filter((a) => a.startsWith("-") && !KNOWN_FLAGS.has(a));
+  if (unknown.length) {
+    fail(`unknown option${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}`);
+    console.log();
+    help();
+    process.exit(1);
+  }
+  if (args.has("--local") && (args.has("--codex") || args.has("--cursor") || args.has("--all"))) {
+    fail("--local is only supported for Claude Code project settings");
+    console.log();
+    help();
+    process.exit(1);
+  }
+}
+
 // Which providers to act on: explicit flags > --all > auto-detect. For
 // uninstall, default to every provider so nothing is stranded.
 function selectedProviders(defaultAll) {
@@ -58,6 +89,7 @@ function selectedProviders(defaultAll) {
   if (args.has("--codex")) picked.push(getProvider("codex"));
   if (args.has("--cursor")) picked.push(getProvider("cursor"));
   if (picked.length) return picked;
+  if (scope === "local") return [getProvider("claude")];
   if (args.has("--all") || defaultAll) return listProviders();
   const detected = detectInstalled();
   return detected.length ? detected : [getProvider("claude")];
@@ -172,7 +204,7 @@ function help() {
   console.log(`    ${cmd("node install.mjs --sync")}       ${dim("also import existing session history")}`);
   console.log();
   console.log(`  ${bold("Backfill history")}  ${dim("(hooks only record from install time forward)")}`);
-  console.log(`    ${cmd(`node "${path.join("~", ".ai-usage-inspector", "app", "src", "sync.mjs")}"`)}   ${dim("[--provider claude|codex] [--days N]")}`);
+  console.log(`    ${cmd(`node "${path.join("~", ".ai-usage-inspector", "app", "src", "sync.mjs")}"`)}   ${dim("[--provider claude|codex|cursor] [--days N]")}`);
   console.log();
   console.log(`  ${bold("View a project")}  ${dim("(after its first prompt)")}`);
   console.log(`    ${cmd("node .ai-usage/viewer/server.mjs")}   ${dim("→ http://localhost:4317 (first free port; --port to pin)")}`);
@@ -182,6 +214,8 @@ function help() {
   console.log(dim(`  Set AI_USAGE_DIR to pool every project into one shared dashboard.`));
   console.log();
 }
+
+validateArgs();
 
 if (args.has("--help") || args.has("-h")) {
   help();
