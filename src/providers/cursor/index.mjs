@@ -26,6 +26,13 @@ export const displayName = "Cursor";
 const HOOKS_FILE = path.join(os.homedir(), ".cursor", "hooks.json");
 const MARKER = "ai-usage-inspector";
 
+// Cursor's data lives in SQLite, read via node:sqlite (Node >= 22.5.0). The rest
+// of the tool runs on Node >= 18; this is the one provider that needs newer Node.
+export function nodeSupported() {
+  const [maj, min] = String(process.versions.node).split(".").map(Number);
+  return maj > 22 || (maj === 22 && min >= 5);
+}
+
 /** Cursor is "present" when its data dir exists. */
 export function detect() {
   try {
@@ -97,6 +104,10 @@ function hookCmd(appPath) {
 }
 
 export function install({ appPath }) {
+  // Refuse loudly on old Node rather than installing a hook that reads nothing.
+  if (!nodeSupported()) {
+    return { file: HOOKS_FILE, action: "unsupported-node", node: process.versions.node };
+  }
   const s = readJson(HOOKS_FILE);
   if (typeof s.version !== "number") s.version = 1;
   s.hooks = s.hooks && typeof s.hooks === "object" ? s.hooks : {};

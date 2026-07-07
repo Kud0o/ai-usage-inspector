@@ -31,6 +31,7 @@ const sgr = (code) => (s) => (COLOR ? `\x1b[${code}m${s}\x1b[0m` : `${s}`);
 const bold = sgr(1), dim = sgr(2), green = sgr("32;1"), red = sgr("31;1"), cyan = sgr(36), gray = sgr(90);
 const ok = (msg) => console.log(`  ${green("✓")} ${msg}`);
 const skip = (msg) => console.log(`  ${gray("•")} ${dim(msg)}`);
+const fail = (msg) => console.log(`  ${red("✗")} ${msg}`);
 const cmd = (s) => cyan(s);
 const rule = () => console.log(gray("  ────────────────────────────────────────────"));
 function banner(subtitle) {
@@ -133,7 +134,9 @@ function seedProjectConfig(cwd) {
 function installProvider(p) {
   try {
     const r = p.install({ appPath: APP, scope, cwd: process.cwd() });
-    if (r.action === "exists") skip(`${p.displayName}: hook already registered  ${gray(r.file)}`);
+    if (r.action === "unsupported-node") {
+      fail(`${p.displayName}: needs Node >= 22.5 for node:sqlite (you have ${r.node}) — hook NOT installed`);
+    } else if (r.action === "exists") skip(`${p.displayName}: hook already registered  ${gray(r.file)}`);
     else ok(`${p.displayName}: registered hook  ${gray(r.file)}`);
   } catch (e) {
     skip(`${p.displayName}: could not register hook (${e.message})`);

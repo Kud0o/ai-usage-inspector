@@ -39,6 +39,10 @@ async function main() {
       console.log(`  ${p.id}: no sync support`);
       continue;
     }
+    if (typeof p.nodeSupported === "function" && !p.nodeSupported()) {
+      console.log(`  ${p.id}: needs Node >= 22.5 for node:sqlite (you have ${process.versions.node}) — skipped`);
+      continue;
+    }
     const found = await p.discoverTranscripts({ sinceMs });
     let files = 0;
     let turns = 0;
