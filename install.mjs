@@ -5,8 +5,11 @@
 //   node install.mjs                register hooks for every detected agent
 //   node install.mjs --claude       Claude Code only
 //   node install.mjs --codex        OpenAI Codex only
-//   node install.mjs --all          both, whether detected or not
+//   node install.mjs --cursor       Cursor only (needs Node >= 22.5)
+//   node install.mjs --all          all providers, whether detected or not
 //   node install.mjs --local        Claude Code: this project only (settings.local.json)
+//   node install.mjs --sync         also import existing session history
+//   node install.mjs --dashboard    sync everything + open one dashboard across all projects
 //   node install.mjs --update        refresh the app to the latest version
 //   node install.mjs --uninstall     remove the hooks (add a provider flag to pick)
 //

@@ -16,7 +16,7 @@ import {
   globalDbPath,
   listWorkspaces,
   listComposerIds,
-  readComposer,
+  readComposerMeta,
   available,
 } from "./store.mjs";
 
@@ -69,7 +69,7 @@ export async function discoverTranscripts({ sinceMs = 0 } = {}) {
     const ids = await listComposerIds(ws.dbPath);
     for (const composerId of ids) {
       if (sinceMs > 0) {
-        const { composer } = await readComposer(gdb, composerId);
+        const composer = await readComposerMeta(gdb, composerId);
         const upd = composer && (composer.lastUpdatedAt || composer.createdAt);
         if (!(Number(upd) >= sinceMs)) continue;
       }

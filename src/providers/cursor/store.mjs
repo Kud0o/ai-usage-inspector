@@ -156,6 +156,29 @@ export async function listComposerIds(workspaceDbPath) {
 }
 
 /**
+ * Composer meta ONLY (composerData:<id>) from the GLOBAL db — no bubbles.
+ * Cheap timestamp/model probe for the discover/rescan filter, which would
+ * otherwise pay to load every bubble of every conversation just to read
+ * lastUpdatedAt. Returns the parsed composer JSON, or null.
+ */
+export async function readComposerMeta(globalDb, composerId) {
+  const db = await openRO(globalDb);
+  if (!db) return null;
+  try {
+    const meta = db
+      .prepare("SELECT value FROM cursorDiskKV WHERE key = ?")
+      .get(`composerData:${composerId}`);
+    return meta ? parseJson(meta.value) : null;
+  } catch {
+    return null;
+  } finally {
+    try {
+      db.close();
+    } catch {}
+  }
+}
+
+/**
  * { composer, bubbles } for one composer from the GLOBAL db.
  * bubbles = [{ bubbleId, ...bubbleJson }] in rowid (insertion) order.
  */
