@@ -92,9 +92,9 @@ function exportRecords(kind) {
   if (kind === "json") {
     download(`ai-usage-${stamp}.json`, JSON.stringify(rows, null, 2), "application/json");
   } else {
-    const cols = ["ts", "provider", "workspace", "sessionId", "model", "permissionMode", "promptChars", "responseChars", "input", "output", "reasoning", "cacheRead", "cacheWrite", "costTotal", "estimated", "durationMs", "contextFillPct"];
+    const cols = ["ts", "provider", "platform", "workspace", "sessionId", "model", "permissionMode", "promptChars", "responseChars", "input", "output", "reasoning", "cacheRead", "cacheWrite", "costTotal", "estimated", "durationMs", "contextFillPct"];
     const line = (e) => [
-      e.ts, PROV(e), e.workspace, e.sessionId, e.model, e.permissionMode,
+      e.ts, PROV(e), e.entrypoint || "", e.workspace, e.sessionId, e.model, e.permissionMode,
       e.promptChars, e.responseChars,
       T_IN(e), T_OUT(e), (e.usage && e.usage.reasoning) || 0, (e.usage && e.usage.cacheRead) || 0, (e.usage && e.usage.cacheCreate) || 0,
       COST(e), (e.cost && e.cost.estimated) ? 1 : 0, e.durationMs || 0, e.contextFillPct || 0,
