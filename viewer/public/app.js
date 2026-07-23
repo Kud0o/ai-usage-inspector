@@ -10,7 +10,7 @@ const state = {
   all: [],
   view: [],
   sort: { key: "ts", dir: -1 },
-  filters: { search: "", provider: "", workspace: "", model: "", mode: "", effort: "", since: "", ctx: 0 },
+  filters: { search: "", provider: "", platform: "", workspace: "", model: "", mode: "", effort: "", since: "", ctx: 0 },
   group: true,
   fields: {},                     // this project's stored-field flags
   enabled: true,                  // is this project tracked
@@ -165,6 +165,7 @@ function applySettingsVisibility() {
     grid.classList.toggle("hide-col-cost", !has("cost"));
   }
   const eff = $("#ctl-effort"); if (eff) eff.hidden = !has("meta");
+  const plat = $("#ctl-platform"); if (plat) plat.hidden = !has("meta");
   const ctx = $("#ctl-ctx"); if (ctx) ctx.hidden = !has("context");
 }
 
@@ -185,6 +186,7 @@ function reflect() {
   const f = state.filters;
   $("#f-search").value = f.search || "";
   $("#f-provider").value = f.provider || "";
+  $("#f-platform").value = f.platform || "";
   $("#f-workspace").value = f.workspace || "";
   $("#f-model").value = f.model || "";
   $("#f-mode").value = f.mode || "";
@@ -213,6 +215,7 @@ function fillSelect(id, values, label) {
 }
 function buildFilterOptions() {
   fillSelect("#f-provider", [...new Set(state.all.map(PROV))].sort(), "providers");
+  fillSelect("#f-platform", uniq("entrypoint"), "platforms");
   fillSelect("#f-workspace", uniq("workspace"), "workspaces");
   fillSelect("#f-model", uniq("model"), "models");
   fillSelect("#f-mode", uniq("permissionMode"), "modes");
@@ -225,6 +228,7 @@ function apply() {
   const q = f.search.toLowerCase();
   state.view = state.all.filter((e) => {
     if (f.provider && (e.provider || "claude") !== f.provider) return false;
+    if (f.platform && e.entrypoint !== f.platform) return false;
     if (f.workspace && e.workspace !== f.workspace) return false;
     if (f.model && e.model !== f.model) return false;
     if (f.mode && e.permissionMode !== f.mode) return false;
@@ -615,6 +619,7 @@ async function openDrawer(id) {
   if (e.durationMs != null) meta.push(`<span>${fmtDur(e.durationMs)}</span>`);
   if (e.firstResponseMs != null) meta.push(`<span>1st reply ${fmtDur(e.firstResponseMs)}</span>`);
   if (e.gitBranch) meta.push(`<span>${esc(e.gitBranch)}</span>`);
+  if (e.entrypoint) meta.push(`<span title="platform the prompt was sent from">⌂ ${esc(e.entrypoint)}</span>`);
   if (e.cliVersion) meta.push(`<span>v${esc(e.cliVersion)}</span>`);
   if (e.serviceTier || e.speed) meta.push(`<span>${esc(e.serviceTier || "")}/${esc(e.speed || "")}</span>`);
   // dgrid cells, each gated on its field group + presence
@@ -729,12 +734,12 @@ function initTheme() {
 // ---------- events ----------
 function bind() {
   $("#f-search").addEventListener("input", (e) => { state.filters.search = e.target.value; apply(); });
-  const map = { "#f-provider": "provider", "#f-workspace": "workspace", "#f-model": "model", "#f-mode": "mode", "#f-effort": "effort", "#f-since": "since" };
+  const map = { "#f-provider": "provider", "#f-platform": "platform", "#f-workspace": "workspace", "#f-model": "model", "#f-mode": "mode", "#f-effort": "effort", "#f-since": "since" };
   for (const [sel, key] of Object.entries(map)) $(sel).addEventListener("change", (e) => { state.filters[key] = e.target.value; apply(); });
   $("#f-ctx").addEventListener("input", (e) => { state.filters.ctx = +e.target.value; $("#f-ctx-v").textContent = e.target.value; apply(); });
   $("#f-group").addEventListener("change", (e) => { state.group = e.target.checked; renderTable(); persist(); });
   $("#f-clear").addEventListener("click", () => {
-    state.filters = { search: "", provider: "", workspace: "", model: "", mode: "", effort: "", since: "", ctx: 0 };
+    state.filters = { search: "", provider: "", platform: "", workspace: "", model: "", mode: "", effort: "", since: "", ctx: 0 };
     document.querySelectorAll(".ctl select").forEach((s) => (s.value = ""));
     $("#f-search").value = ""; $("#f-since").value = ""; $("#f-ctx").value = 0; $("#f-ctx-v").textContent = "0";
     apply();
