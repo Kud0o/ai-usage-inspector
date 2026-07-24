@@ -1,7 +1,7 @@
 {
   "name": "ai-usage-inspector",
-  "version": "2.0.0",
-  "description": "Zero-dependency tool that records every AI coding-agent prompt (tokens, model, mode, cost, context %) from Claude Code, OpenAI Codex, and Cursor, and shows it in a local dashboard.",
+  "version": "2.1.0",
+  "description": "Zero-dependency tool that records every AI coding-agent prompt (tokens, model, mode, cost, context %) from Claude Code, OpenAI Codex, Cursor, and OpenCode, and shows it in a local dashboard.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -11,6 +11,7 @@
     "ai-usage-inspector": "install.mjs"
   },
   "scripts": {
+    "test": "node --test --test-isolation=none",
     "install-hook": "node install.mjs",
     "install-claude": "node install.mjs --claude",
     "install-codex": "node install.mjs --codex",
@@ -26,6 +27,7 @@
     "openai",
     "codex",
     "cursor",
+    "opencode",
     "hook",
     "usage",
     "tokens",

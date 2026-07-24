@@ -12,27 +12,15 @@
 //
 // Reads use node:sqlite (Node >= 22.5) in readOnly mode. The module degrades
 // gracefully: on older Node (no node:sqlite) or a locked/absent DB every
-// function returns empty results instead of throwing.
+// function returns empty results instead of throwing. The generic SQLite
+// plumbing lives in ../../lib/sqlite.mjs and is shared with other scan-based
+// providers.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { available, openRO, toText, parseJson } from "../../lib/sqlite.mjs";
 
-let sqliteMod = null; // null = untried, false = unavailable, module = loaded
-async function sqlite() {
-  if (sqliteMod === null) {
-    try {
-      sqliteMod = await import("node:sqlite");
-    } catch {
-      sqliteMod = false;
-    }
-  }
-  return sqliteMod || null;
-}
-
-/** true when node:sqlite exists (Node >= 22.5). */
-export async function available() {
-  return !!(await sqlite());
-}
+export { available };
 
 /** Cursor's per-OS data directory. */
 export function cursorDataDir() {
@@ -51,37 +39,6 @@ export function cursorDataDir() {
 
 export function globalDbPath() {
   return path.join(cursorDataDir(), "User", "globalStorage", "state.vscdb");
-}
-
-async function openRO(file) {
-  const mod = await sqlite();
-  if (!mod) return null;
-  try {
-    if (!fs.existsSync(file)) return null;
-    return new mod.DatabaseSync(file, { readOnly: true });
-  } catch {
-    return null; // locked / corrupt / permission — caller degrades
-  }
-}
-
-function toText(v) {
-  if (typeof v === "string") return v;
-  if (v && (v instanceof Uint8Array || Buffer.isBuffer(v))) {
-    try {
-      return Buffer.from(v).toString("utf8");
-    } catch {
-      return "";
-    }
-  }
-  return "";
-}
-
-function parseJson(v) {
-  try {
-    return JSON.parse(toText(v));
-  } catch {
-    return null;
-  }
 }
 
 /** "file:///k%3A/Projects/Foo" -> "k:/Projects/Foo" (Windows drive handled). */

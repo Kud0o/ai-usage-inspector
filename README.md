@@ -2,13 +2,14 @@
 
 # AI Usage Inspector
 
-**Record every AI coding-agent prompt - tokens, model, mode, context %, and cost - from Claude Code, OpenAI Codex, and Cursor, then explore it in one local dashboard.**
+**Record every AI coding-agent prompt - tokens, model, mode, context %, and cost - from Claude Code, OpenAI Codex, Cursor, and OpenCode, then explore it in one local dashboard.**
 
 ![Node](https://img.shields.io/badge/Node-%3E%3D18-339933?logo=node.js&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-success)
 ![Claude Code](https://img.shields.io/badge/Claude_Code-Stop_hook-2f6fed)
 ![OpenAI Codex](https://img.shields.io/badge/OpenAI_Codex-Stop_hook-10a37f)
 ![Cursor](https://img.shields.io/badge/Cursor-SQLite_scan-000000)
+![OpenCode](https://img.shields.io/badge/OpenCode-SQLite_scan-00b4d8)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 </div>
@@ -16,26 +17,26 @@
 ---
 
 A tiny **zero-dependency** inspector for AI coding-agent usage. It records turns from
-**Claude Code**, **OpenAI Codex**, and **Cursor**, normalizes them into one local record
-schema, and gives every project its own self-contained dashboard.
+**Claude Code**, **OpenAI Codex**, **Cursor**, and **OpenCode**, normalizes them into one
+local record schema, and gives every project its own self-contained dashboard.
 
 The key idea: providers handle agent-specific details, while storage, privacy controls,
 pricing, and the dashboard stay shared. You can inspect one project in place, or point
 `AI_USAGE_DIR` at a shared folder for a combined dashboard across all workspaces.
 
 ```text
-Claude Code Stop hook \
-OpenAI Codex Stop hook +--> provider parser --> .ai-usage/usage.ndjson --> dashboard
-Cursor hook / SQLite  /
+Claude Code Stop hook   \
+OpenAI Codex Stop hook   +--> provider parser --> .ai-usage/usage.ndjson --> dashboard
+Cursor / OpenCode SQLite /
 ```
 
 ## Features
 
-- **Multi-provider tracking** - Claude Code, OpenAI Codex, and Cursor side by side, with provider filters, badges, charts, and cost/token splits.
+- **Multi-provider tracking** - Claude Code, OpenAI Codex, Cursor, and OpenCode side by side, with provider filters, badges, charts, and cost/token splits.
 - **Per-prompt records** - prompt and response text, input/output/cache/reasoning tokens, model, permission mode, effort, context fill %, USD cost, duration, first-response latency, skills, and tool/subagent/thinking counts when the provider exposes them.
 - **Project-owned privacy controls** - each project owns `.ai-usage/config.json`; turn recording can be enabled/disabled, and field groups can be stripped before writing.
 - **Export and budget** - export the filtered view as CSV/JSON, and set an optional monthly USD budget in the settings drawer.
-- **Accurate provider accounting** - Claude streamed message dedupe and subagent attribution; Codex cumulative-token deltas; Cursor SQLite scan with estimated usage when exact local token counts are unavailable.
+- **Accurate provider accounting** - Claude streamed message dedupe and subagent attribution; Codex cumulative-token deltas; Cursor SQLite scan with estimated usage when exact local token counts are unavailable; OpenCode SQLite scan with exact tokens and cost read straight from its own database.
 - **Self-contained projects** - each `.ai-usage/` folder holds `usage.ndjson`, `config.json`, and a bundled viewer copy.
 - **Zero dependencies, zero build** - pure Node built-ins on the server and vanilla browser JS on the client.
 
@@ -74,8 +75,8 @@ projects pick up the latest dashboard. Cloned repo? `git pull && node install.mj
 ### 1. Requirements
 
 - **Node.js >= 18** for Claude Code and OpenAI Codex tracking.
-- **Node.js >= 22.5** for Cursor tracking, because Cursor reads local SQLite via built-in `node:sqlite`.
-- At least one supported agent: **Claude Code**, **OpenAI Codex**, or **Cursor**.
+- **Node.js >= 22.5** for Cursor and OpenCode tracking, because both are read from local SQLite via built-in `node:sqlite`.
+- At least one supported agent: **Claude Code**, **OpenAI Codex**, **Cursor**, or **OpenCode**.
 
 Check Node: `node --version`.
 
@@ -84,8 +85,14 @@ Check Node: `node --version`.
 | Provider | Source of truth | Hook/config target | Notes |
 |---|---|---|---|
 | Claude Code | `~/.claude/projects/.../*.jsonl` | `~/.claude/settings.json` or project `.claude/settings.local.json` | Exact usage, streamed-message dedupe, subagent attribution, skills, effort from settings |
-| OpenAI Codex | `~/.codex/sessions/.../rollout-*.jsonl` | `~/.codex/config.toml` | Uses cumulative token deltas per turn; OpenAI pricing refreshes from models.dev |
+| OpenAI Codex | `~/.codex/sessions/.../rollout-*.jsonl` | `~/.codex/hooks.json` | Uses cumulative token deltas per turn; OpenAI pricing refreshes from models.dev |
 | Cursor | Cursor `state.vscdb` SQLite stores | `~/.cursor/hooks.json` | Scan-based; needs Node >= 22.5; may estimate tokens/cost when Cursor omits exact usage |
+| OpenCode | `~/.local/share/opencode/opencode.db` SQLite | `~/.config/opencode/plugins/` (`session.idle`) | Scan-based; needs Node >= 22.5; exact tokens **and cost read from OpenCode's own DB** (no pricing scrape) |
+
+> **Antigravity** (Google's agentic IDE) is detected but **not supported**: it is a cloud
+> credits product that keeps usage server-side and encrypts its local conversation bodies,
+> so there is no local token/cost data to record. The installer notes this when Antigravity
+> is present; revisit if Google ships a usage API or local export.
 
 ### 2. Install the hooks
 
@@ -102,6 +109,7 @@ node install.mjs              # every detected agent, all workspaces
 node install.mjs --claude     # Claude Code only
 node install.mjs --codex      # OpenAI Codex only
 node install.mjs --cursor     # Cursor only (needs Node >= 22.5 for node:sqlite)
+node install.mjs --opencode   # OpenCode only (needs Node >= 22.5 for node:sqlite)
 node install.mjs --local      # Claude Code: this project only -> ./.claude/settings.local.json
 node install.mjs --sync       # install, then import existing history
 node install.mjs --dashboard  # sync everything, then open one dashboard across all projects
@@ -109,8 +117,13 @@ node install.mjs --dashboard  # sync everything, then open one dashboard across 
 
 The installer copies the app to `~/.ai-usage-inspector/app/` and registers each
 agent's hook in its own config: Claude Code's `~/.claude/settings.json`, Codex's
-`~/.codex/config.toml`, and Cursor's `~/.cursor/hooks.json`. Entries are fenced or
-marked so uninstall removes only AI Usage Inspector's hook. Existing settings are preserved.
+`~/.codex/hooks.json`, Cursor's `~/.cursor/hooks.json`, and an OpenCode `session.idle`
+plugin at `~/.config/opencode/plugins/ai-usage-inspector.js`. Entries are marked so
+uninstall removes only AI Usage Inspector's hook. Existing settings are preserved.
+
+After installing Codex tracking, open `/hooks` in Codex and trust the AI Usage
+Inspector Stop hook. Codex intentionally skips new or changed command hooks until
+their exact definition is reviewed and trusted.
 Unknown installer flags fail before any files are written.
 
 > **Cursor** is read differently from the other two: its stop hook carries no token
@@ -127,7 +140,7 @@ Unknown installer flags fail before any files are written.
 
 Hooks only record from install time forward. To import the session history the
 agents already have on disk (Claude Code under `~/.claude/projects/...`, Codex under
-`~/.codex/sessions/...`, Cursor in its `state.vscdb`):
+`~/.codex/sessions/...`, Cursor in its `state.vscdb`, OpenCode in `opencode.db`):
 
 ```sh
 node install.mjs --sync                                  # at install time
@@ -236,6 +249,8 @@ project tracks **cost**, each viewer start refreshes every provider's rates -
   -> cached at `~/.ai-usage-inspector/pricing-codex.json`
 - **Cursor** from Cursor's public [models & pricing](https://cursor.com/docs/models-and-pricing) docs
   -> cached at `~/.ai-usage-inspector/pricing-cursor.json`
+- **OpenCode** needs no pricing source - OpenCode computes and stores cost per message in its
+  own database, so the provider reads cost directly and skips any pricing scrape.
 
 The viewer also **auto-syncs the last 7 days** on start (all installed providers, in the
 background) - so opening the dashboard catches turns a hook missed. Reload the page to see them.
@@ -271,8 +286,8 @@ Backfill path:
 src/sync.mjs -> provider.discoverTranscripts() -> ingestTranscript() -> .ai-usage/usage.ndjson
 ```
 
-Every provider emits the same turn-record shape, so the viewer can mix Claude, Codex, and
-Cursor rows in one table without provider-specific UI branches.
+Every provider emits the same turn-record shape, so the viewer can mix Claude, Codex,
+Cursor, and OpenCode rows in one table without provider-specific UI branches.
 
 For Claude Code, three transcript details make the numbers trustworthy (in
 [`src/providers/claude/transcript.mjs`](src/providers/claude/transcript.mjs)):
@@ -292,6 +307,13 @@ For Cursor, the stop hook is only a trigger.
 [`src/providers/cursor/`](src/providers/cursor/) scans Cursor's local SQLite stores, maps
 composer conversations back to workspaces, and estimates usage when Cursor has no exact token
 counts locally.
+
+For OpenCode, a `session.idle` plugin is the trigger.
+[`src/providers/opencode/`](src/providers/opencode/) scans `opencode.db`, segments each
+session's messages into per-prompt turns, and reads exact tokens and cost straight from the
+DB (falling back to OpenCode's authoritative per-session rollups when per-message rows are
+absent). The generic SQLite plumbing is shared with Cursor in
+[`src/lib/sqlite.mjs`](src/lib/sqlite.mjs).
 
 ## Where the data lives
 
@@ -318,8 +340,9 @@ session, so a skipped write self-heals on the next prompt.
 
 ## Notes & caveats
 
-- **Cursor tracking** needs Node >= 22.5. Claude Code and OpenAI Codex tracking support Node >= 18.
-- **Cursor usage can be approximate** when Cursor's local stores do not include exact token counts. Approximate rows are marked in the dashboard.
+- **Cursor and OpenCode tracking** need Node >= 22.5 (built-in `node:sqlite`). Claude Code and OpenAI Codex tracking support Node >= 18.
+- **Cursor usage can be approximate** when Cursor's local stores do not include exact token counts. Approximate rows are marked in the dashboard. **OpenCode** stores exact tokens and cost, so its rows are not estimated.
+- **Antigravity** is detected but not supported: usage is server-side and local conversation bodies are encrypted, so there is nothing to record.
 - **effort** is Claude-specific; it is read best-effort from `settings.json` at capture time. Other providers leave it blank unless they expose it.
 - **Pricing** ships with built-in fallback tables and refreshes best-effort from provider sources when the viewer starts. The hook path never performs network work.
 - **context fill %** uses each provider's latest request/input size over the known model context window. Unknown windows fall back to provider defaults.
@@ -336,14 +359,16 @@ src/lib/store.mjs                  lock-guarded atomic per-workspace upsert
 src/lib/config.mjs                 global tracking/field config (copied into the bundle)
 src/lib/paths.mjs                  data dir / cwd-encoding helpers (provider-neutral)
 src/lib/pricing-core.mjs           shared cost object + math
+src/lib/sqlite.mjs                 shared node:sqlite helpers for scan-based providers (Cursor, OpenCode)
 src/providers/index.mjs            provider registry + install-detection
 src/providers/claude/              Claude Code: transcript parser, pricing docs scrape, hook
-src/providers/codex/               OpenAI Codex: rollout parser, models.dev pricing refresh, config.toml hook
+src/providers/codex/               OpenAI Codex: rollout parser, models.dev pricing refresh, hooks.json hook
 src/providers/cursor/              Cursor: SQLite reader, token estimation, pricing docs scrape, hooks.json hook
+src/providers/opencode/            OpenCode: SQLite reader (tokens + cost from opencode.db), session.idle plugin
 src/sync.mjs                       backfill/sync existing provider history
 viewer/server.mjs                  zero-dep HTTP API + static host (--no-sync / --no-pricing-refresh for smoke/dev)
 viewer/public/                     the dashboard SPA
-install.mjs                        installer (--claude | --codex | --cursor | --local | --dashboard | --sync | --update | --uninstall)
+install.mjs                        installer (--claude | --codex | --cursor | --opencode | --local | --dashboard | --sync | --update | --uninstall)
 ```
 
 ## License

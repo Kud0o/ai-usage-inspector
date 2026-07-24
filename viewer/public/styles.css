@@ -247,10 +247,11 @@ svg { display: block; width: 100%; overflow: visible; }
 .tag.acceptEdits { color: var(--green); border-color: rgba(132,176,106,0.4); }
 .tag.bypassPermissions { color: var(--red); border-color: rgba(211,91,74,0.4); }
 /* provider colors — one hue per provider, shared by badges + charts */
-:root { --prov-claude: var(--accent); --prov-codex: var(--green); --prov-cursor: var(--violet); }
+:root { --prov-claude: var(--accent); --prov-codex: var(--green); --prov-cursor: var(--violet); --prov-opencode: var(--cyan); }
 .tag.prov-claude { color: var(--prov-claude); border-color: color-mix(in srgb, var(--prov-claude) 40%, transparent); }
 .tag.prov-codex  { color: var(--prov-codex);  border-color: color-mix(in srgb, var(--prov-codex) 40%, transparent); }
 .tag.prov-cursor { color: var(--prov-cursor); border-color: color-mix(in srgb, var(--prov-cursor) 40%, transparent); }
+.tag.prov-opencode { color: var(--prov-opencode); border-color: color-mix(in srgb, var(--prov-opencode) 40%, transparent); }
 .col-provider { white-space: nowrap; }
 /* monthly-budget card accents */
 .stat.warn .val { color: var(--amber); }

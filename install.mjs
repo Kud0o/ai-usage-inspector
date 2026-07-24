@@ -6,6 +6,7 @@
 //   node install.mjs --claude       Claude Code only
 //   node install.mjs --codex        OpenAI Codex only
 //   node install.mjs --cursor       Cursor only (needs Node >= 22.5)
+//   node install.mjs --opencode     OpenCode only (needs Node >= 22.5)
 //   node install.mjs --all          all providers, whether detected or not
 //   node install.mjs --local        Claude Code: this project only (settings.local.json)
 //   node install.mjs --sync         also import existing session history
@@ -88,6 +89,7 @@ function selectedProviders(defaultAll) {
   if (args.has("--claude")) picked.push(getProvider("claude"));
   if (args.has("--codex")) picked.push(getProvider("codex"));
   if (args.has("--cursor")) picked.push(getProvider("cursor"));
+  if (args.has("--opencode")) picked.push(getProvider("opencode"));
   if (picked.length) return picked;
   if (scope === "local") return [getProvider("claude")];
   if (args.has("--all") || defaultAll) return listProviders();
@@ -173,6 +175,10 @@ function installProvider(p) {
       fail(`${p.displayName}: needs Node >= 22.5 for node:sqlite (you have ${r.node}) — hook NOT installed`);
     } else if (r.action === "exists") skip(`${p.displayName}: hook already registered  ${gray(r.file)}`);
     else ok(`${p.displayName}: registered hook  ${gray(r.file)}`);
+    if (r.migrated) ok(`${p.displayName}: safely migrated legacy config.toml hook`);
+    if (r.trustRequired) {
+      skip(`${p.displayName}: open /hooks in Codex and trust the AI Usage Inspector Stop hook`);
+    }
   } catch (e) {
     skip(`${p.displayName}: could not register hook (${e.message})`);
   }
@@ -188,6 +194,18 @@ function uninstallProvider(p) {
   }
 }
 
+// Antigravity (Google's agentic IDE) is recognized but NOT supported: it keeps
+// usage server-side (credits model) and encrypts local conversation bodies, so
+// there is no local token/cost data to record. Surface this once, if present.
+function noteAntigravityIfPresent() {
+  try {
+    const dir = path.join(HOME, ".gemini", "antigravity");
+    if (fs.existsSync(dir)) {
+      skip("Antigravity: detected but not supported — usage is stored server-side / encrypted locally (nothing to record)");
+    }
+  } catch {}
+}
+
 function help() {
   banner("installer");
   console.log();
@@ -197,6 +215,7 @@ function help() {
   console.log(`    ${cmd("node install.mjs --claude")}     ${dim("Claude Code only")}`);
   console.log(`    ${cmd("node install.mjs --codex")}      ${dim("OpenAI Codex only")}`);
   console.log(`    ${cmd("node install.mjs --cursor")}     ${dim("Cursor only (needs Node >= 22.5)")}`);
+  console.log(`    ${cmd("node install.mjs --opencode")}   ${dim("OpenCode only (needs Node >= 22.5)")}`);
   console.log(`    ${cmd("node install.mjs --dashboard")}  ${dim("sync everything + open one dashboard across all projects")}`);
   console.log(`    ${cmd("node install.mjs --local")}      ${dim("Claude Code: this project only")}`);
   console.log(`    ${cmd("node install.mjs --update")}     ${dim("refresh app to the latest version")}`);
@@ -204,7 +223,7 @@ function help() {
   console.log(`    ${cmd("node install.mjs --sync")}       ${dim("also import existing session history")}`);
   console.log();
   console.log(`  ${bold("Backfill history")}  ${dim("(hooks only record from install time forward)")}`);
-  console.log(`    ${cmd(`node "${path.join("~", ".ai-usage-inspector", "app", "src", "sync.mjs")}"`)}   ${dim("[--provider claude|codex|cursor] [--days N]")}`);
+  console.log(`    ${cmd(`node "${path.join("~", ".ai-usage-inspector", "app", "src", "sync.mjs")}"`)}   ${dim("[--provider claude|codex|cursor|opencode] [--days N]")}`);
   console.log();
   console.log(`  ${bold("View a project")}  ${dim("(after its first prompt)")}`);
   console.log(`    ${cmd("node .ai-usage/viewer/server.mjs")}   ${dim("→ http://localhost:4317 (first free port; --port to pin)")}`);
@@ -250,6 +269,7 @@ if (args.has("--help") || args.has("-h")) {
   copyApp();
   ok(`updated app to v${VERSION}  ${gray(APP)}`);
   for (const p of selectedProviders(false)) installProvider(p); // ensure hooks exist
+  noteAntigravityIfPresent();
   const gc = seedGlobalConfig();
   skip(`config  ${gray(gc)}`);
   console.log();
@@ -270,6 +290,7 @@ if (args.has("--help") || args.has("-h")) {
   copyApp();
   ok(`copied app v${VERSION}  ${gray(APP)}`);
   for (const p of providers) installProvider(p);
+  noteAntigravityIfPresent();
   const gc = seedGlobalConfig();
   ok(`global defaults  ${gray(gc)}`);
   if (args.has("--sync")) {
