@@ -53,6 +53,9 @@ function classify(rec) {
 function isUserMessage(c) {
   return (c.sub === "message" || c.top === "message") && c.role === "user";
 }
+function isUserEvent(c) {
+  return c.top === "event_msg" && c.sub === "user_message";
+}
 function isAssistantMessage(c) {
   return (c.sub === "message" || c.top === "message") && c.role === "assistant";
 }
@@ -67,6 +70,9 @@ function isSessionMeta(c) {
 function isTurnContext(c) {
   return c.top === "turn_context" || c.sub === "turn_context";
 }
+function isTaskStarted(c) {
+  return c.top === "event_msg" && c.sub === "task_started";
+}
 
 // Join the text out of a Responses-API content array (input_text/output_text/text).
 function contentText(content) {
@@ -76,6 +82,67 @@ function contentText(content) {
     .filter((b) => b && typeof b.text === "string")
     .map((b) => b.text)
     .join("");
+}
+
+function userText(c) {
+  if (isUserEvent(c)) return typeof c.body.message === "string" ? c.body.message : "";
+  return contentText(c.body.content);
+}
+
+function normalizeSkillPath(value) {
+  return String(value || "").replace(/\\/g, "/").replace(/\/{2,}/g, "/").toLowerCase();
+}
+
+// Build file-path -> display-name from the skill catalog embedded in world
+// state. This preserves namespaced plugin names such as documents:documents.
+function skillCatalog(recs) {
+  const byPath = new Map();
+  const names = new Set();
+  for (const c of recs) {
+    const body = c.top === "world_state" && c.body && c.body.state && c.body.state.host_skills;
+    if (!body || typeof body.body !== "string") continue;
+    for (const line of body.body.split("\n")) {
+      const m = line.match(/^- (.+?): .* \(file: (.+?[\\/]SKILL\.md)\)\s*$/);
+      if (!m) continue;
+      names.add(m[1]);
+      byPath.set(normalizeSkillPath(m[2]), m[1]);
+    }
+  }
+  return { byPath, names };
+}
+
+function explicitSkills(prompt, catalog) {
+  const found = new Set();
+  const text = String(prompt || "");
+  for (const name of catalog.names) {
+    if (text.includes(`[$${name}]`) || text.includes(`$${name}`) || text.includes(`/${name}`)) {
+      found.add(name);
+    }
+  }
+  return found;
+}
+
+function collectStrings(value, out = []) {
+  if (typeof value === "string") out.push(value);
+  else if (Array.isArray(value)) for (const item of value) collectStrings(item, out);
+  else if (value && typeof value === "object") {
+    for (const item of Object.values(value)) collectStrings(item, out);
+  }
+  return out;
+}
+
+function collectToolSkills(c, catalog, found) {
+  if (!c || !c.body) return;
+  const isToolCall = ["function_call", "local_shell_call", "custom_tool_call"].includes(c.sub);
+  if (!isToolCall) return;
+  const haystack = normalizeSkillPath(collectStrings(c.body).join("\n"));
+  for (const [skillPath, name] of catalog.byPath) {
+    if (haystack.includes(skillPath)) found.add(name);
+  }
+  if (c.body.name === "Skill" && c.body.input && typeof c.body.input === "object") {
+    const name = c.body.input.skill || c.body.input.command || c.body.input.name;
+    if (name) found.add(String(name));
+  }
 }
 
 function usageVec(u) {
@@ -118,16 +185,27 @@ export function buildTurns(rolloutPath, opts = {}) {
   const turns = [];
   let cur = null;
   let currentModel = sessionModel;
+  let currentEffort = opts.effortLevel || null;
+  let pendingTurnId = null;
   let runningTotal = { input: 0, cached: 0, output: 0, reasoning: 0 };
+  // Modern Codex rollouts emit the real submitted prompt as
+  // event_msg/user_message. response_item/user also contains synthetic
+  // environment, policy, and approval-review context, which must not become
+  // dashboard turns. Fall back to response_item/user for older rollouts.
+  const hasUserEvents = recs.some(isUserEvent);
+  const catalog = skillCatalog(recs);
 
   const openTurn = (c) => {
     cur = {
+      turnId: pendingTurnId,
       ts: c.ts,
       endTs: c.ts,
       firstAsstTs: null,
-      prompt: contentText(c.body.content),
+      prompt: userText(c),
       response: "",
       model: currentModel,
+      effort: currentEffort,
+      skillSet: explicitSkills(userText(c), catalog),
       startTotal: { ...runningTotal },
       lastCtxInput: 0,
       ctxWindow: 0,
@@ -141,17 +219,25 @@ export function buildTurns(rolloutPath, opts = {}) {
   for (const c of recs) {
     if (isTurnContext(c)) {
       if (c.body.model) currentModel = c.body.model;
+      if (c.body.effort) currentEffort = c.body.effort;
       // A turn_context arriving inside an open turn (before its first request
       // completes) re-scopes that turn's model.
       if (cur && cur.apiCalls === 0 && c.body.model) cur.model = c.body.model;
+      if (cur && cur.apiCalls === 0 && c.body.effort) cur.effort = c.body.effort;
       continue;
     }
-    if (isUserMessage(c)) {
+    if (isTaskStarted(c)) {
+      pendingTurnId = c.body.turn_id || null;
+      continue;
+    }
+    if ((hasUserEvents && isUserEvent(c)) || (!hasUserEvents && isUserMessage(c))) {
       openTurn(c);
+      pendingTurnId = null;
       continue;
     }
     if (!cur) continue; // skip anything before the first user prompt
     if (c.ts) cur.endTs = c.ts;
+    collectToolSkills(c, catalog, cur.skillSet);
 
     if (isAssistantMessage(c)) {
       cur.response += contentText(c.body.content);
@@ -219,7 +305,7 @@ function finalizeTurn(t, ctx) {
     startTs && t.firstAsstTs ? Math.max(0, Date.parse(t.firstAsstTs) - Date.parse(startTs)) : 0;
 
   return {
-    id: `${ctx.sessionId || "codex"}:${ctx.index}`,
+    id: t.turnId || `${ctx.sessionId || "codex"}:${ctx.index}`,
     provider: "codex",
     sessionId: ctx.sessionId,
     cwd: ctx.cwd,
@@ -239,8 +325,8 @@ function finalizeTurn(t, ctx) {
     serviceTier: null,
     speed: null,
     permissionMode: ctx.permissionMode || "default",
-    effortLevel: null,
-    skills: [],
+    effortLevel: t.effort || null,
+    skills: [...t.skillSet],
     usage: tokens,
     contextTokens: ctxTokens,
     contextMax: ctxMax,

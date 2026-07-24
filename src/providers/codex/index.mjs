@@ -1,5 +1,5 @@
 // OpenAI Codex CLI provider. Codex exposes a Stop hook (configured in
-// ~/.codex/config.toml) that, like Claude Code's, runs a command and passes JSON
+// ~/.codex/hooks.json) that, like Claude Code's, runs a command and passes JSON
 // on stdin including transcript_path / cwd / session_id / model — but NOT token
 // usage. So we read the referenced rollout JSONL for tokens (see transcript.mjs).
 //
@@ -14,16 +14,20 @@ import { refreshPricing as refreshRemote } from "./remote-pricing.mjs";
 export const id = "codex";
 export const displayName = "OpenAI Codex";
 
-const CONFIG_FILE = path.join(HOME, ".codex", "config.toml");
+const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, ".codex");
+const CONFIG_FILE = path.join(CODEX_HOME, "config.toml");
+const HOOKS_FILE = path.join(CODEX_HOME, "hooks.json");
+const MARKER = "ai-usage-inspector";
 // Begin/end fences let uninstall remove exactly our block and never touch the
-// user's own TOML.
+// user's own TOML. New installs use hooks.json; these only remain for safely
+// migrating installs made by versions <= 2.0.0.
 const FENCE_BEGIN = "# >>> ai-usage-inspector (codex) >>>";
 const FENCE_END = "# <<< ai-usage-inspector (codex) <<<";
 
 /** Codex is "present" if its home dir exists. */
 export function detect() {
   try {
-    return fs.existsSync(path.join(HOME, ".codex"));
+    return fs.existsSync(CODEX_HOME);
   } catch {
     return false;
   }
@@ -57,7 +61,7 @@ export function normalizePayload(raw) {
  * files not modified since then.
  */
 export function discoverTranscripts({ sinceMs = 0 } = {}) {
-  const root = path.join(HOME, ".codex", "sessions");
+  const root = path.join(CODEX_HOME, "sessions");
   const out = [];
   const walk = (dir, depth) => {
     let ents;
@@ -85,54 +89,106 @@ export function buildTurns(transcriptPath, opts = {}) {
   return buildCodexTurns(transcriptPath, opts);
 }
 
-// ---- install-time (Stop hook in ~/.codex/config.toml) ----
+// ---- install-time (Stop hook in ~/.codex/hooks.json) ----
 
-function hookBlock(appPath) {
-  // Single-quoted TOML literal string keeps Windows backslashes intact.
-  const command = `node "${path.join(appPath, "src", "record.mjs")}" --provider ${id}`;
-  return [
-    FENCE_BEGIN,
-    "[[hooks.Stop]]",
-    "[[hooks.Stop.hooks]]",
-    'type = "command"',
-    `command = '${command}'`,
-    FENCE_END,
-    "",
-  ].join("\n");
+function hookCmd(appPath) {
+  return `node "${path.join(appPath, "src", "record.mjs")}" --provider ${id}`;
 }
 
-export function install({ appPath }) {
-  let text = "";
+function isOurHook(group) {
+  const text = JSON.stringify(group);
+  return text.includes(MARKER) || (text.includes("record.mjs") && text.includes("--provider codex"));
+}
+
+function readHooks() {
+  if (!fs.existsSync(HOOKS_FILE)) return {};
   try {
-    text = fs.readFileSync(CONFIG_FILE, "utf8");
-  } catch {}
-  if (text.includes(FENCE_BEGIN)) return { file: CONFIG_FILE, action: "exists" };
-  const sep = text && !text.endsWith("\n") ? "\n\n" : text ? "\n" : "";
-  fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true });
-  fs.writeFileSync(CONFIG_FILE, text + sep + hookBlock(appPath));
-  return { file: CONFIG_FILE, action: "added" };
+    const value = JSON.parse(fs.readFileSync(HOOKS_FILE, "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("root must be a JSON object");
+    }
+    return value;
+  } catch (e) {
+    throw new Error(`cannot update invalid ${HOOKS_FILE}: ${e.message}`);
+  }
 }
 
-export function uninstall() {
+function writeHooks(value) {
+  fs.mkdirSync(path.dirname(HOOKS_FILE), { recursive: true });
+  fs.writeFileSync(HOOKS_FILE, JSON.stringify(value, null, 2) + "\n");
+}
+
+// Old versions fenced an inline TOML hook. Codex or the desktop app may append
+// unrelated settings before the closing comment, so deleting the whole fenced
+// range can destroy user config. Remove only our exact hook stanza and marker
+// comments, leaving every unrelated line in place.
+function removeLegacyConfigHook() {
   let text;
   try {
     text = fs.readFileSync(CONFIG_FILE, "utf8");
   } catch {
-    return { file: CONFIG_FILE, removed: 0 };
+    return 0;
   }
-  // Remove each fenced block (begin..end inclusive, plus a trailing blank line).
-  const re = new RegExp(
-    `\\n?${escapeRe(FENCE_BEGIN)}[\\s\\S]*?${escapeRe(FENCE_END)}\\n?`,
-    "g",
-  );
-  const next = text.replace(re, "\n");
-  const removed = next === text ? 0 : 1;
-  if (removed) fs.writeFileSync(CONFIG_FILE, next.replace(/\n{3,}/g, "\n\n"));
-  return { file: CONFIG_FILE, removed };
+  const lines = text.split(/\r?\n/);
+  const drop = new Set();
+  let removed = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === FENCE_BEGIN || line.trim() === FENCE_END) drop.add(i);
+    if (!line.includes(MARKER) || !line.includes("--provider codex")) continue;
+    drop.add(i);
+    removed++;
+    const expected = [
+      /^type\s*=\s*["']command["']\s*$/,
+      /^\[\[hooks\.Stop\.hooks\]\]\s*$/,
+      /^\[\[hooks\.Stop\]\]\s*$/,
+    ];
+    let at = i - 1;
+    for (const re of expected) {
+      while (at >= 0 && !lines[at].trim()) at--;
+      if (at >= 0 && re.test(lines[at].trim())) drop.add(at--);
+      else break;
+    }
+  }
+  if (drop.size) {
+    const next = lines.filter((_, i) => !drop.has(i)).join("\n").replace(/\n{3,}/g, "\n\n");
+    fs.writeFileSync(CONFIG_FILE, next.replace(/^\n+/, "").replace(/\n*$/, "\n"));
+  }
+  return removed;
 }
 
-function escapeRe(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+export function install({ appPath }) {
+  const s = readHooks();
+  s.hooks = s.hooks && typeof s.hooks === "object" && !Array.isArray(s.hooks) ? s.hooks : {};
+  s.hooks.Stop = Array.isArray(s.hooks.Stop) ? s.hooks.Stop : [];
+  const exists = s.hooks.Stop.some(isOurHook);
+  if (!exists) {
+    s.hooks.Stop.push({ hooks: [{ type: "command", command: hookCmd(appPath) }] });
+    writeHooks(s);
+  }
+  const migrated = removeLegacyConfigHook();
+  return {
+    file: HOOKS_FILE,
+    action: exists ? "exists" : "added",
+    migrated,
+    trustRequired: true,
+  };
+}
+
+export function uninstall() {
+  const s = readHooks();
+  if (!s.hooks || !Array.isArray(s.hooks.Stop)) {
+    const migrated = removeLegacyConfigHook();
+    return { file: HOOKS_FILE, removed: migrated };
+  }
+  const before = s.hooks.Stop.length;
+  s.hooks.Stop = s.hooks.Stop.filter((group) => !isOurHook(group));
+  const removed = before - s.hooks.Stop.length;
+  if (s.hooks.Stop.length === 0) delete s.hooks.Stop;
+  if (s.hooks && Object.keys(s.hooks).length === 0) delete s.hooks;
+  if (removed) writeHooks(s);
+  const migrated = removeLegacyConfigHook();
+  return { file: HOOKS_FILE, removed: removed + migrated };
 }
 
 // Dynamic OpenAI pricing via models.dev (open JSON dataset); built-in table
