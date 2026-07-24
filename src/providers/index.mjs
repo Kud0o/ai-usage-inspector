@@ -5,12 +5,18 @@ import * as claude from "./claude/index.mjs";
 import * as codex from "./codex/index.mjs";
 import * as cursor from "./cursor/index.mjs";
 import * as opencode from "./opencode/index.mjs";
+import * as continueProvider from "./continue/index.mjs";
+import { cline, roo, kilo } from "./clinefamily/index.mjs";
 
 const PROVIDERS = {
   [claude.id]: claude,
   [codex.id]: codex,
   [cursor.id]: cursor,
   [opencode.id]: opencode,
+  [cline.id]: cline,
+  [roo.id]: roo,
+  [kilo.id]: kilo,
+  [continueProvider.id]: continueProvider,
 };
 
 export function getProvider(id) {

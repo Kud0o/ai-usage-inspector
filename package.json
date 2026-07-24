@@ -1,7 +1,7 @@
 {
   "name": "ai-usage-inspector",
-  "version": "2.1.0",
-  "description": "Zero-dependency tool that records every AI coding-agent prompt (tokens, model, mode, cost, context %) from Claude Code, OpenAI Codex, Cursor, and OpenCode, and shows it in a local dashboard.",
+  "version": "2.2.0",
+  "description": "Zero-dependency tool that records every AI coding-agent prompt (tokens, model, mode, cost, context %) from Claude Code, OpenAI Codex, Cursor, OpenCode, and VS Code agents (Cline, Roo Code, Kilo Code, Continue), and shows it in a local dashboard.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -28,6 +28,10 @@
     "codex",
     "cursor",
     "opencode",
+    "cline",
+    "roo-code",
+    "kilo-code",
+    "continue",
     "hook",
     "usage",
     "tokens",

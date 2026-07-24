@@ -7,6 +7,10 @@
 //   node install.mjs --codex        OpenAI Codex only
 //   node install.mjs --cursor       Cursor only (needs Node >= 22.5)
 //   node install.mjs --opencode     OpenCode only (needs Node >= 22.5)
+//   node install.mjs --cline         Cline (VS Code, scan-only — no hook)
+//   node install.mjs --roo           Roo Code (VS Code, scan-only)
+//   node install.mjs --kilo          Kilo Code (VS Code, scan-only)
+//   node install.mjs --continue      Continue (VS Code, scan-only)
 //   node install.mjs --all          all providers, whether detected or not
 //   node install.mjs --local        Claude Code: this project only (settings.local.json)
 //   node install.mjs --sync         also import existing session history
@@ -26,6 +30,7 @@ import { getProvider, listProviders, detectInstalled } from "./src/providers/ind
 
 const REPO = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
+const APPDATA = process.env.APPDATA || path.join(HOME, "AppData", "Roaming");
 const APP = path.join(HOME, ".ai-usage-inspector", "app");
 const GLOBAL_CFG = path.join(HOME, ".ai-usage-inspector", "config.json");
 
@@ -57,6 +62,11 @@ const KNOWN_FLAGS = new Set([
   "--claude",
   "--codex",
   "--cursor",
+  "--opencode",
+  "--cline",
+  "--roo",
+  "--kilo",
+  "--continue",
   "--all",
   "--local",
   "--global",
@@ -90,6 +100,10 @@ function selectedProviders(defaultAll) {
   if (args.has("--codex")) picked.push(getProvider("codex"));
   if (args.has("--cursor")) picked.push(getProvider("cursor"));
   if (args.has("--opencode")) picked.push(getProvider("opencode"));
+  if (args.has("--cline")) picked.push(getProvider("cline"));
+  if (args.has("--roo")) picked.push(getProvider("roo"));
+  if (args.has("--kilo")) picked.push(getProvider("kilo"));
+  if (args.has("--continue")) picked.push(getProvider("continue"));
   if (picked.length) return picked;
   if (scope === "local") return [getProvider("claude")];
   if (args.has("--all") || defaultAll) return listProviders();
@@ -173,6 +187,10 @@ function installProvider(p) {
     const r = p.install({ appPath: APP, scope, cwd: process.cwd() });
     if (r.action === "unsupported-node") {
       fail(`${p.displayName}: needs Node >= 22.5 for node:sqlite (you have ${r.node}) — hook NOT installed`);
+    } else if (r.action === "scan-only") {
+      // VS Code extensions (Cline/Roo/Kilo/Continue) have no turn-end hook; they
+      // are read on sync + every dashboard open.
+      ok(`${p.displayName}: ${p.detect() ? "detected" : "no data yet"} — captured on sync (no hook needed)`);
     } else if (r.action === "exists") skip(`${p.displayName}: hook already registered  ${gray(r.file)}`);
     else ok(`${p.displayName}: registered hook  ${gray(r.file)}`);
     if (r.migrated) ok(`${p.displayName}: safely migrated legacy config.toml hook`);
@@ -194,16 +212,21 @@ function uninstallProvider(p) {
   }
 }
 
-// Antigravity (Google's agentic IDE) is recognized but NOT supported: it keeps
-// usage server-side (credits model) and encrypts local conversation bodies, so
-// there is no local token/cost data to record. Surface this once, if present.
-function noteAntigravityIfPresent() {
-  try {
-    const dir = path.join(HOME, ".gemini", "antigravity");
-    if (fs.existsSync(dir)) {
-      skip("Antigravity: detected but not supported — usage is stored server-side / encrypted locally (nothing to record)");
-    }
-  } catch {}
+// Some tools are recognized but NOT supported because they keep usage
+// server-side with no local token/cost data: Antigravity (Google's IDE, credits
+// model + encrypted local conversations) and GitHub Copilot (subscription /
+// credits; VS Code stores chat text + model but no tokens or cost). Surface each
+// once, if present.
+function noteUnsupportedIfPresent() {
+  const checks = [
+    { dir: path.join(HOME, ".gemini", "antigravity"), name: "Antigravity", why: "usage is stored server-side / encrypted locally" },
+    { dir: path.join(APPDATA, "Code", "User", "globalStorage", "github.copilot-chat"), name: "GitHub Copilot", why: "usage is server-side; VS Code stores no local tokens/cost" },
+  ];
+  for (const c of checks) {
+    try {
+      if (fs.existsSync(c.dir)) skip(`${c.name}: detected but not supported — ${c.why} (nothing to record)`);
+    } catch {}
+  }
 }
 
 function help() {
@@ -216,6 +239,8 @@ function help() {
   console.log(`    ${cmd("node install.mjs --codex")}      ${dim("OpenAI Codex only")}`);
   console.log(`    ${cmd("node install.mjs --cursor")}     ${dim("Cursor only (needs Node >= 22.5)")}`);
   console.log(`    ${cmd("node install.mjs --opencode")}   ${dim("OpenCode only (needs Node >= 22.5)")}`);
+  console.log(`    ${cmd("node install.mjs --cline/--roo/--kilo")}  ${dim("Cline / Roo Code / Kilo Code (VS Code, scan-only)")}`);
+  console.log(`    ${cmd("node install.mjs --continue")}   ${dim("Continue (VS Code, scan-only)")}`);
   console.log(`    ${cmd("node install.mjs --dashboard")}  ${dim("sync everything + open one dashboard across all projects")}`);
   console.log(`    ${cmd("node install.mjs --local")}      ${dim("Claude Code: this project only")}`);
   console.log(`    ${cmd("node install.mjs --update")}     ${dim("refresh app to the latest version")}`);
@@ -223,7 +248,7 @@ function help() {
   console.log(`    ${cmd("node install.mjs --sync")}       ${dim("also import existing session history")}`);
   console.log();
   console.log(`  ${bold("Backfill history")}  ${dim("(hooks only record from install time forward)")}`);
-  console.log(`    ${cmd(`node "${path.join("~", ".ai-usage-inspector", "app", "src", "sync.mjs")}"`)}   ${dim("[--provider claude|codex|cursor|opencode] [--days N]")}`);
+  console.log(`    ${cmd(`node "${path.join("~", ".ai-usage-inspector", "app", "src", "sync.mjs")}"`)}   ${dim("[--provider claude|codex|cursor|opencode|cline|roo|kilo|continue] [--days N]")}`);
   console.log();
   console.log(`  ${bold("View a project")}  ${dim("(after its first prompt)")}`);
   console.log(`    ${cmd("node .ai-usage/viewer/server.mjs")}   ${dim("→ http://localhost:4317 (first free port; --port to pin)")}`);
@@ -269,7 +294,7 @@ if (args.has("--help") || args.has("-h")) {
   copyApp();
   ok(`updated app to v${VERSION}  ${gray(APP)}`);
   for (const p of selectedProviders(false)) installProvider(p); // ensure hooks exist
-  noteAntigravityIfPresent();
+  noteUnsupportedIfPresent();
   const gc = seedGlobalConfig();
   skip(`config  ${gray(gc)}`);
   console.log();
@@ -290,7 +315,7 @@ if (args.has("--help") || args.has("-h")) {
   copyApp();
   ok(`copied app v${VERSION}  ${gray(APP)}`);
   for (const p of providers) installProvider(p);
-  noteAntigravityIfPresent();
+  noteUnsupportedIfPresent();
   const gc = seedGlobalConfig();
   ok(`global defaults  ${gray(gc)}`);
   if (args.has("--sync")) {
