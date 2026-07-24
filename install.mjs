@@ -10,7 +10,6 @@
 //   node install.mjs --cline         Cline (VS Code, scan-only — no hook)
 //   node install.mjs --roo           Roo Code (VS Code, scan-only)
 //   node install.mjs --kilo          Kilo Code (VS Code, scan-only)
-//   node install.mjs --continue      Continue (VS Code, scan-only)
 //   node install.mjs --all          all providers, whether detected or not
 //   node install.mjs --local        Claude Code: this project only (settings.local.json)
 //   node install.mjs --sync         also import existing session history
@@ -30,7 +29,6 @@ import { getProvider, listProviders, detectInstalled } from "./src/providers/ind
 
 const REPO = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
-const APPDATA = process.env.APPDATA || path.join(HOME, "AppData", "Roaming");
 const APP = path.join(HOME, ".ai-usage-inspector", "app");
 const GLOBAL_CFG = path.join(HOME, ".ai-usage-inspector", "config.json");
 
@@ -66,7 +64,6 @@ const KNOWN_FLAGS = new Set([
   "--cline",
   "--roo",
   "--kilo",
-  "--continue",
   "--all",
   "--local",
   "--global",
@@ -103,7 +100,6 @@ function selectedProviders(defaultAll) {
   if (args.has("--cline")) picked.push(getProvider("cline"));
   if (args.has("--roo")) picked.push(getProvider("roo"));
   if (args.has("--kilo")) picked.push(getProvider("kilo"));
-  if (args.has("--continue")) picked.push(getProvider("continue"));
   if (picked.length) return picked;
   if (scope === "local") return [getProvider("claude")];
   if (args.has("--all") || defaultAll) return listProviders();
@@ -212,21 +208,15 @@ function uninstallProvider(p) {
   }
 }
 
-// Some tools are recognized but NOT supported because they keep usage
-// server-side with no local token/cost data: Antigravity (Google's IDE, credits
-// model + encrypted local conversations) and GitHub Copilot (subscription /
-// credits; VS Code stores chat text + model but no tokens or cost). Surface each
-// once, if present.
+// Antigravity (Google's agentic IDE) is recognized but NOT supported: it keeps
+// usage server-side (credits model) and encrypts local conversation bodies, so
+// there is no local token/cost data to record. Surface this once, if present.
 function noteUnsupportedIfPresent() {
-  const checks = [
-    { dir: path.join(HOME, ".gemini", "antigravity"), name: "Antigravity", why: "usage is stored server-side / encrypted locally" },
-    { dir: path.join(APPDATA, "Code", "User", "globalStorage", "github.copilot-chat"), name: "GitHub Copilot", why: "usage is server-side; VS Code stores no local tokens/cost" },
-  ];
-  for (const c of checks) {
-    try {
-      if (fs.existsSync(c.dir)) skip(`${c.name}: detected but not supported — ${c.why} (nothing to record)`);
-    } catch {}
-  }
+  try {
+    if (fs.existsSync(path.join(HOME, ".gemini", "antigravity"))) {
+      skip("Antigravity: detected but not supported — usage is stored server-side / encrypted locally (nothing to record)");
+    }
+  } catch {}
 }
 
 function help() {
@@ -240,7 +230,6 @@ function help() {
   console.log(`    ${cmd("node install.mjs --cursor")}     ${dim("Cursor only (needs Node >= 22.5)")}`);
   console.log(`    ${cmd("node install.mjs --opencode")}   ${dim("OpenCode only (needs Node >= 22.5)")}`);
   console.log(`    ${cmd("node install.mjs --cline/--roo/--kilo")}  ${dim("Cline / Roo Code / Kilo Code (VS Code, scan-only)")}`);
-  console.log(`    ${cmd("node install.mjs --continue")}   ${dim("Continue (VS Code, scan-only)")}`);
   console.log(`    ${cmd("node install.mjs --dashboard")}  ${dim("sync everything + open one dashboard across all projects")}`);
   console.log(`    ${cmd("node install.mjs --local")}      ${dim("Claude Code: this project only")}`);
   console.log(`    ${cmd("node install.mjs --update")}     ${dim("refresh app to the latest version")}`);
@@ -248,7 +237,7 @@ function help() {
   console.log(`    ${cmd("node install.mjs --sync")}       ${dim("also import existing session history")}`);
   console.log();
   console.log(`  ${bold("Backfill history")}  ${dim("(hooks only record from install time forward)")}`);
-  console.log(`    ${cmd(`node "${path.join("~", ".ai-usage-inspector", "app", "src", "sync.mjs")}"`)}   ${dim("[--provider claude|codex|cursor|opencode|cline|roo|kilo|continue] [--days N]")}`);
+  console.log(`    ${cmd(`node "${path.join("~", ".ai-usage-inspector", "app", "src", "sync.mjs")}"`)}   ${dim("[--provider claude|codex|cursor|opencode|cline|roo|kilo] [--days N]")}`);
   console.log();
   console.log(`  ${bold("View a project")}  ${dim("(after its first prompt)")}`);
   console.log(`    ${cmd("node .ai-usage/viewer/server.mjs")}   ${dim("→ http://localhost:4317 (first free port; --port to pin)")}`);

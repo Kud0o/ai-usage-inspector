@@ -115,7 +115,7 @@ const PROV = (e) => e.provider || "claude";
 const provColor = (p) => cssv(`--prov-${p}`) || cssv("--faint");
 // Distinct providers present in a set, in a stable order.
 function provsIn(arr) {
-  const order = ["claude", "codex", "cursor", "opencode", "cline", "roo", "kilo", "continue"];
+  const order = ["claude", "codex", "cursor", "opencode", "cline", "roo", "kilo"];
   const seen = new Set(arr.map(PROV));
   return order.filter((p) => seen.has(p)).concat([...seen].filter((p) => !order.includes(p)));
 }

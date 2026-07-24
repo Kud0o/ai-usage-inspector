@@ -2,7 +2,7 @@
 
 # AI Usage Inspector
 
-**Record every AI coding-agent prompt - tokens, model, mode, context %, and cost - from Claude Code, OpenAI Codex, Cursor, OpenCode, and VS Code agents (Cline, Roo Code, Kilo Code, Continue), then explore it in one local dashboard.**
+**Record every AI coding-agent prompt - tokens, model, mode, context %, and cost - from Claude Code, OpenAI Codex, Cursor, OpenCode, and VS Code agents (Cline, Roo Code, Kilo Code), then explore it in one local dashboard.**
 
 ![Node](https://img.shields.io/badge/Node-%3E%3D18-339933?logo=node.js&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-success)
@@ -18,8 +18,8 @@
 
 A tiny **zero-dependency** inspector for AI coding-agent usage. It records turns from
 **Claude Code**, **OpenAI Codex**, **Cursor**, **OpenCode**, and the VS Code agents
-**Cline**, **Roo Code**, **Kilo Code**, and **Continue**, normalizes them into one local
-record schema, and gives every project its own self-contained dashboard.
+**Cline**, **Roo Code**, and **Kilo Code**, normalizes them into one local record
+schema, and gives every project its own self-contained dashboard.
 
 The key idea: providers handle agent-specific details, while storage, privacy controls,
 pricing, and the dashboard stay shared. You can inspect one project in place, or point
@@ -33,7 +33,7 @@ Cursor / OpenCode SQLite /
 
 ## Features
 
-- **Multi-provider tracking** - Claude Code, OpenAI Codex, Cursor, OpenCode, and VS Code agents (Cline, Roo Code, Kilo Code, Continue) side by side, with provider filters, badges, charts, and cost/token splits.
+- **Multi-provider tracking** - Claude Code, OpenAI Codex, Cursor, OpenCode, and VS Code agents (Cline, Roo Code, Kilo Code) side by side, with provider filters, badges, charts, and cost/token splits.
 - **Per-prompt records** - prompt and response text, input/output/cache/reasoning tokens, model, permission mode, effort, context fill %, USD cost, duration, first-response latency, skills, and tool/subagent/thinking counts when the provider exposes them.
 - **Project-owned privacy controls** - each project owns `.ai-usage/config.json`; turn recording can be enabled/disabled, and field groups can be stripped before writing.
 - **Export and budget** - export the filtered view as CSV/JSON, and set an optional monthly USD budget in the settings drawer.
@@ -77,7 +77,7 @@ projects pick up the latest dashboard. Cloned repo? `git pull && node install.mj
 
 - **Node.js >= 18** for Claude Code and OpenAI Codex tracking.
 - **Node.js >= 22.5** for Cursor and OpenCode tracking, because both are read from local SQLite via built-in `node:sqlite`.
-- At least one supported agent: **Claude Code**, **OpenAI Codex**, **Cursor**, **OpenCode**, or a VS Code agent (**Cline**, **Roo Code**, **Kilo Code**, **Continue** — pure Node, no version requirement).
+- At least one supported agent: **Claude Code**, **OpenAI Codex**, **Cursor**, **OpenCode**, or a VS Code agent (**Cline**, **Roo Code**, **Kilo Code** — pure Node, no version requirement).
 
 Check Node: `node --version`.
 
@@ -90,12 +90,11 @@ Check Node: `node --version`.
 | Cursor | Cursor `state.vscdb` SQLite stores | `~/.cursor/hooks.json` | Scan-based; needs Node >= 22.5; may estimate tokens/cost when Cursor omits exact usage |
 | OpenCode | `~/.local/share/opencode/opencode.db` SQLite | `~/.config/opencode/plugins/` (`session.idle`) | Scan-based; needs Node >= 22.5; exact tokens **and cost read from OpenCode's own DB** (no pricing scrape) |
 | Cline / Roo Code / Kilo Code | `<VSCode>/User/globalStorage/<extId>/tasks/*/ui_messages.json` | none — scan-only | Exact tokens + cost from each task's `api_req_started` entries; model + workspace from the conversation history. No live hook (captured on sync). Pure Node |
-| Continue | `~/.continue/dev_data/**/*.jsonl` | none — scan-only | Token usage + model per event; Continue records **no cost** and omits prompt text. No live hook. Pure Node |
 
-> **Antigravity** (Google's agentic IDE) and **GitHub Copilot** are detected but **not supported**:
-> both keep usage server-side (Antigravity also encrypts local conversation bodies; VS Code stores
-> Copilot chat text + model but no tokens or cost), so there is no local usage data to record. The
-> installer notes each when present; revisit if either ships a usage API or local export.
+> **Antigravity** (Google's agentic IDE) is detected but **not supported**: it is a cloud
+> credits product that keeps usage server-side and encrypts its local conversation bodies,
+> so there is no local token/cost data to record. The installer notes this when Antigravity
+> is present; revisit if Google ships a usage API or local export.
 >
 > Cline / Roo Code / Kilo Code are the same lineage and share one on-disk format, so the scan across
 > VS Code and its forks (Cursor, Windsurf, VSCodium) covers all three.
@@ -373,7 +372,6 @@ src/providers/cursor/              Cursor: SQLite reader, token estimation, pric
 src/providers/opencode/            OpenCode: SQLite reader (tokens + cost from opencode.db), session.idle plugin
 src/lib/vscode.mjs                 shared VS Code globalStorage locator (Cline/Roo/Kilo across VS Code + forks)
 src/providers/clinefamily/         Cline / Roo Code / Kilo Code: shared ui_messages.json parser, scan-only
-src/providers/continue/            Continue: dev_data JSONL token-event reader, scan-only
 src/sync.mjs                       backfill/sync existing provider history
 viewer/server.mjs                  zero-dep HTTP API + static host (--no-sync / --no-pricing-refresh for smoke/dev)
 viewer/public/                     the dashboard SPA
