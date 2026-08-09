@@ -211,6 +211,18 @@ function toListItem(e) {
   };
 }
 
+// Full-text match against the STORED prompt/response — the list payload only
+// carries 280-char previews, so text search has to happen here, server-side,
+// or it silently misses every hit past the preview cut-off.
+function matchesQuery(e, q) {
+  if (!q) return true;
+  const hay = [e.prompt, e.response, e.slug, e.workspace, e.model]
+    .map((v) => (typeof v === "string" ? v : ""))
+    .join("\n")
+    .toLowerCase();
+  return hay.includes(q);
+}
+
 // Persistently remove records by composite identity across all ndjson files.
 // Tombstones survive sync; shared locked mutation prevents ingest/delete races.
 async function deleteEvents(keys, ids) {
@@ -261,7 +273,8 @@ const readBody = (req) =>
   });
 
 const server = http.createServer(async (req, res) => {
-  const route = new URL(req.url, "http://localhost").pathname;
+  const url = new URL(req.url, "http://localhost");
+  const route = url.pathname;
   try {
     if (route === "/api/events") {
       if (req.method === "DELETE") {
@@ -272,6 +285,31 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, JSON.stringify(await deleteEvents(body.keys, body.ids)));
       }
       return send(res, 200, JSON.stringify(loadEvents().map(toListItem)));
+    }
+    // Full-text search over stored prompt/response. Returns only the matching
+    // composite keys, so the client keeps its complete record set (the
+    // "this month" total stays search-independent) and the payload stays small.
+    if (route === "/api/search") {
+      const q = (url.searchParams.get("q") || "").trim().toLowerCase();
+      if (!q) return send(res, 200, JSON.stringify({ q: "", keys: null }));
+      const keys = loadEvents()
+        .filter((e) => matchesQuery(e, q))
+        .map(STORE.tombstoneKey);
+      return send(res, 200, JSON.stringify({ q, keys }));
+    }
+    // Export the FULL stored records (prompt/response included) for the given
+    // composite keys — the list endpoint only ships previews, so exporting
+    // straight from the table would silently drop the real text.
+    if (route === "/api/export" && req.method === "POST") {
+      let body = {};
+      try {
+        body = JSON.parse(await readBody(req)) || {};
+      } catch {}
+      const wanted = new Set((body.keys || []).filter(Boolean).map(STORE.tombstoneKey));
+      const rows = wanted.size
+        ? loadEvents().filter((e) => wanted.has(STORE.tombstoneKey(e)))
+        : [];
+      return send(res, 200, JSON.stringify(rows));
     }
     if (route.startsWith("/api/event/")) {
       const id = decodeURIComponent(route.slice("/api/event/".length));

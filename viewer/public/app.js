@@ -15,6 +15,8 @@ const state = {
   fields: {},                     // this project's stored-field flags
   enabled: true,                  // is this project tracked
   budgetMonthly: null,            // optional USD monthly budget (ui.budgetMonthly)
+  searchKeys: null,               // Set of record keys matching the server-side
+                                  // full-text search; null = no active search
 };
 // Field-group visible? Defaults to true so a missing/unreachable config shows all.
 const has = (g) => state.fields[g] !== false;
@@ -58,6 +60,10 @@ function toast(msg) {
 }
 // Permanently delete records by composite identity — always behind a confirm.
 const eventKey = (e) => ({ provider: PROV(e), sessionId: e.sessionId, id: e.id });
+// Mirrors STORE.tombstoneKey() on the server — the shared record identity used
+// for delete, export, and search-hit matching.
+const keyOf = (e) =>
+  JSON.stringify([PROV(e), e.sessionId == null ? "" : String(e.sessionId), e.id == null ? "" : String(e.id)]);
 async function delEvents(keys, label) {
   keys = (keys || []).filter((k) => k && k.id != null);
   if (!keys.length) return;
@@ -86,12 +92,24 @@ function csvCell(v) {
   const s = v == null ? "" : String(v);
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
-function exportRecords(kind) {
+async function exportRecords(kind) {
   const rows = state.view;
   if (!rows.length) { toast("nothing to export"); return; }
   const stamp = new Date().toISOString().slice(0, 10);
   if (kind === "json") {
-    download(`ai-usage-${stamp}.json`, JSON.stringify(rows, null, 2), "application/json");
+    // The table only holds 280-char previews — fetch the FULL stored records so
+    // the export actually contains the prompt/response text.
+    let full = null;
+    try {
+      full = await (await fetch("/api/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keys: rows.map(eventKey) }),
+      })).json();
+    } catch {}
+    const out = Array.isArray(full) && full.length ? full : rows;
+    if (!Array.isArray(full) || !full.length) toast("full text unavailable — exported previews");
+    download(`ai-usage-${stamp}.json`, JSON.stringify(out, null, 2), "application/json");
   } else {
     const cols = ["ts", "provider", "platform", "workspace", "sessionId", "model", "permissionMode", "promptChars", "responseChars", "input", "output", "reasoning", "cacheRead", "cacheWrite", "costTotal", "costSource", "estimated", "durationMs", "contextFillPct"];
     const line = (e) => [
@@ -205,7 +223,38 @@ async function load() {
   state.all = await res.json();
   buildFilterOptions();
   reflect();
+  await runSearch();
   apply();
+}
+
+// Resolve the current search term against the FULL stored text, server-side.
+// Only the matching keys come back, so state.all stays complete and totals that
+// are meant to ignore filters (e.g. "this month") stay correct.
+let searchSeq = 0;
+async function runSearch() {
+  const q = (state.filters.search || "").trim();
+  if (!q) {
+    state.searchKeys = null;
+    return;
+  }
+  const seq = ++searchSeq;
+  try {
+    const r = await (await fetch("/api/search?q=" + encodeURIComponent(q))).json();
+    if (seq !== searchSeq) return; // a newer keystroke already won
+    state.searchKeys = Array.isArray(r.keys) ? new Set(r.keys) : null;
+  } catch {
+    state.searchKeys = null; // fall back to preview matching
+  }
+}
+
+let searchTimer;
+function onSearchInput() {
+  clearTimeout(searchTimer);
+  apply(); // instant feedback from previews
+  searchTimer = setTimeout(async () => {
+    await runSearch();
+    apply();
+  }, 220);
 }
 
 function uniq(key) {
@@ -237,9 +286,16 @@ function apply() {
     if (f.effort && e.effortLevel !== f.effort) return false;
     if (f.since && dayKey(e.ts) < f.since) return false;
     if (f.ctx && (e.contextFillPct || 0) < f.ctx) return false;
+    // Text search is resolved server-side against the stored prompt/response
+    // (this list only carries 280-char previews). While the hit set is still in
+    // flight, fall back to matching the previews so typing stays responsive.
     if (q) {
-      const hay = ((e.promptPreview || "") + " " + (e.responsePreview || "") + " " + (e.slug || "") + " " + (e.workspace || "")).toLowerCase();
-      if (!hay.includes(q)) return false;
+      if (state.searchKeys) {
+        if (!state.searchKeys.has(keyOf(e))) return false;
+      } else {
+        const hay = ((e.promptPreview || "") + " " + (e.responsePreview || "") + " " + (e.slug || "") + " " + (e.workspace || "")).toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
     }
     return true;
   });
@@ -753,7 +809,7 @@ function initTheme() {
 
 // ---------- events ----------
 function bind() {
-  $("#f-search").addEventListener("input", (e) => { state.filters.search = e.target.value; apply(); });
+  $("#f-search").addEventListener("input", (e) => { state.filters.search = e.target.value; onSearchInput(); });
   const map = { "#f-provider": "provider", "#f-platform": "platform", "#f-workspace": "workspace", "#f-model": "model", "#f-mode": "mode", "#f-effort": "effort", "#f-since": "since" };
   for (const [sel, key] of Object.entries(map)) $(sel).addEventListener("change", (e) => { state.filters[key] = e.target.value; apply(); });
   $("#f-ctx").addEventListener("input", (e) => { state.filters.ctx = +e.target.value; $("#f-ctx-v").textContent = e.target.value; apply(); });
