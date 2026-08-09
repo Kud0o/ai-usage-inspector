@@ -272,6 +272,69 @@ const readBody = (req) =>
     req.on("end", () => resolve(d));
   });
 
+// ---- live updates (SSE) ----
+// Records arrive from a detached worker while the page is open, so the dashboard
+// watches the data dir and tells connected clients to refetch. fs.watch is not
+// reliable on every filesystem (network shares, some containers), so a slow mtime
+// poll backs it up; both funnel through the same debounce.
+const clients = new Set();
+let watching = false;
+let notifyTimer = null;
+
+function notifyClients() {
+  clearTimeout(notifyTimer);
+  notifyTimer = setTimeout(() => {
+    for (const res of clients) {
+      try {
+        res.write("event: change\ndata: {}\n\n");
+      } catch {
+        clients.delete(res);
+      }
+    }
+  }, 400);
+  if (notifyTimer.unref) notifyTimer.unref();
+}
+
+function dataFingerprint() {
+  try {
+    return fs
+      .readdirSync(DATA_DIR)
+      .filter((f) => f.endsWith(".ndjson"))
+      .map((f) => {
+        try {
+          const s = fs.statSync(path.join(DATA_DIR, f));
+          return `${f}:${s.size}:${s.mtimeMs}`;
+        } catch {
+          return f;
+        }
+      })
+      .join("|");
+  } catch {
+    return "";
+  }
+}
+
+function startWatching() {
+  if (watching) return;
+  watching = true;
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const w = fs.watch(DATA_DIR, { persistent: false }, (_e, name) => {
+      if (!name || String(name).endsWith(".ndjson")) notifyClients();
+    });
+    w.on("error", () => {});
+  } catch {}
+  let last = dataFingerprint();
+  const poll = setInterval(() => {
+    const now = dataFingerprint();
+    if (now !== last) {
+      last = now;
+      notifyClients();
+    }
+  }, 4000);
+  if (poll.unref) poll.unref();
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
   const route = url.pathname;
@@ -296,6 +359,31 @@ const server = http.createServer(async (req, res) => {
         .filter((e) => matchesQuery(e, q))
         .map(STORE.tombstoneKey);
       return send(res, 200, JSON.stringify({ q, keys }));
+    }
+    // Live change feed: one event whenever the data dir changes, so an open
+    // dashboard picks up turns recorded by the background worker.
+    if (route === "/api/stream") {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-store",
+        Connection: "keep-alive",
+      });
+      res.write("retry: 3000\n\n");
+      clients.add(res);
+      startWatching();
+      const beat = setInterval(() => {
+        try {
+          res.write(": ping\n\n");
+        } catch {}
+      }, 25000);
+      if (beat.unref) beat.unref();
+      const drop = () => {
+        clearInterval(beat);
+        clients.delete(res);
+      };
+      req.on("close", drop);
+      req.on("error", drop);
+      return;
     }
     // Export the FULL stored records (prompt/response included) for the given
     // composite keys — the list endpoint only ships previews, so exporting

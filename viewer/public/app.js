@@ -881,6 +881,31 @@ function bind() {
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeDrawer(); closeSettings(); } });
 }
 
+// ---------- live updates ----------
+// The recorder writes in the background, so subscribe to the server's change
+// feed instead of making the user hit refresh. Reloading is deferred while a
+// drawer is open so the view never changes under the reader; the pending
+// refresh is applied as soon as it closes.
+let livePending = false;
+function liveRefresh() {
+  const busy = !$("#drawer").hidden || !$("#settings-drawer").hidden;
+  if (busy) { livePending = true; return; }
+  livePending = false;
+  load().catch(() => {});
+}
+function initLive() {
+  if (typeof EventSource !== "function") return;
+  try {
+    const es = new EventSource("/api/stream");
+    es.addEventListener("change", liveRefresh);
+  } catch {}
+  // Flush a refresh that arrived while a drawer was open.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && livePending) setTimeout(liveRefresh, 0);
+  });
+}
+
 bind();
 initTheme();
 boot();
+initLive();
