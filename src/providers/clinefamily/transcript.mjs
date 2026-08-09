@@ -158,9 +158,14 @@ export function buildTurns(ref, opts = {}) {
     }
   }
 
-  const usable = turns.filter((t) => t.usage);
+  // Number turns by their position in the FULL turn list, before filtering. Using
+  // the filtered index would renumber every later record once an earlier turn
+  // gains usage on a rescan, so ids must not shift as a task grows.
+  const usable = turns.map((t, ordinal) => ({ t, ordinal })).filter(({ t }) => t.usage);
   if (!usable.length) return [];
-  return usable.map((t, i) => finalizeTurn(t, { provider, taskId, cwd, model: t.model || model, index: i }));
+  return usable.map(({ t, ordinal }) =>
+    finalizeTurn(t, { provider, taskId, cwd, model: t.model || model, index: ordinal }),
+  );
 }
 
 function finalizeTurn(t, ctx) {

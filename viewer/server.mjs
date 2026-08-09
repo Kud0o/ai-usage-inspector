@@ -158,6 +158,10 @@ function saveConfig(patch) {
 }
 
 const requestedPort = ARGS.port || Number(process.env.PORT) || loadConfig().port;
+// Bind to loopback by default — the dashboard serves prompt/response text and a
+// DELETE API, so it must not be reachable across the LAN unless explicitly opted
+// in (AI_USAGE_HOST=0.0.0.0).
+const HOST = process.env.AI_USAGE_HOST || "127.0.0.1";
 
 // ---- data ----
 function loadEvents() {
@@ -309,7 +313,7 @@ server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
     if (!requestedPort) {
       port++;
-      server.listen(port);
+      server.listen(port, HOST);
       return;
     }
     console.error(`\n  Port ${port} is already in use. Pick another with --port <n>.\n`);
@@ -318,7 +322,7 @@ server.on("error", (err) => {
   throw err;
 });
 
-server.listen(port, () => {
+server.listen(port, HOST, () => {
   console.log(`\n  AI Usage Inspector  ->  http://localhost:${port}`);
   console.log(`  project: ${loadConfig().title}`);
   console.log(`  reading: ${DATA_DIR}\n`);

@@ -259,10 +259,14 @@ function renderStats() {
   const tout = v.reduce((a, e) => a + T_OUT(e), 0);
   const ttot = v.reduce((a, e) => a + T_TOTAL(e), 0);
   const cost = v.reduce((a, e) => a + COST(e), 0);
-  const avgCtx = prompts ? v.reduce((a, e) => a + (e.contextFillPct || 0), 0) / prompts : 0;
+  // Average context only over records whose model window is known (contextMax > 0);
+  // providers that don't expose the window encode 0 and would drag the mean down.
+  const ctxRecs = v.filter((e) => e.contextMax > 0);
+  const avgCtx = ctxRecs.length ? ctxRecs.reduce((a, e) => a + (e.contextFillPct || 0), 0) / ctxRecs.length : 0;
   const dur = v.reduce((a, e) => a + (e.durationMs || 0), 0);
   const subs = v.reduce((a, e) => a + (e.counts ? e.counts.subagentCalls : 0), 0);
-  const respRecs = v.filter((e) => e.firstResponseMs != null);
+  // Only records with a real measured latency (> 0); unknown providers encode 0.
+  const respRecs = v.filter((e) => e.firstResponseMs > 0);
   const avgResp = respRecs.length ? respRecs.reduce((a, e) => a + e.firstResponseMs, 0) / respRecs.length : 0;
 
   const byModel = tally(v, (e) => e.model, () => 1);
@@ -278,14 +282,20 @@ function renderStats() {
   if (has("context")) cards.push({ label: "avg context", val: avgCtx.toFixed(1) + "<small>%</small>", sub: "of window filled", cls: "amber", bar: avgCtx });
   if (has("timing")) cards.push({ label: "active time", val: fmtDur(dur), sub: "summed turn duration", cls: "" });
   if (has("timing") && respRecs.length) cards.push({ label: "avg first response", val: fmtDur(avgResp), sub: "prompt → first reply", cls: "" });
-  cards.push({ label: "top model", val: shortModel(topModel), sub: topModel ? byModel[topModel] + " prompts" : "—", cls: "" });
+  cards.push({ label: "top model", val: esc(shortModel(topModel)), sub: topModel ? byModel[topModel] + " prompts" : "—", cls: "" });
   cards.push({ label: "busiest workspace", val: esc(topWs || "—"), sub: topWs ? byWs[topWs] + " prompts" : "—", cls: "" });
   if (has("cost")) cards.push({ label: "est. cost", val: fmtUsd(cost), sub: prompts ? `${fmtUsd(cost / prompts)} / prompt` : "—", cls: "cost" });
   // This month's spend (computed across ALL records, independent of filters) +
   // optional monthly budget with warn/danger accents.
   if (has("cost")) {
+    // Compare in LOCAL calendar months: record ts is UTC, so slicing the ISO
+    // string would bucket e.g. local Aug 1 00:30 (UTC Jul 31) into the wrong month.
     const now = new Date(), ym = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
-    const monthCost = state.all.reduce((a, e) => (dayKey(e.ts).slice(0, 7) === ym ? a + COST(e) : a), 0);
+    const localMonth = (ts) => {
+      const d = new Date(ts);
+      return Number.isNaN(d.getTime()) ? "" : d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+    };
+    const monthCost = state.all.reduce((a, e) => (localMonth(e.ts) === ym ? a + COST(e) : a), 0);
     const b = state.budgetMonthly;
     let cls = "cost", sub = "spent this month across all records";
     if (b) {
@@ -317,7 +327,13 @@ function tally(arr, keyFn, valFn) {
   return m;
 }
 const topKey = (m) => Object.keys(m).sort((a, b) => m[b] - m[a])[0] || "";
-const shortModel = (m) => (m ? m.replace(/^claude-/, "").replace(/-\d{8}$/, "") : "—");
+// Model may arrive as a non-string (a provider can store it as an object), so
+// coerce before trimming — `.replace` on an object would throw and blank the table.
+const shortModel = (m) => {
+  if (!m) return "—";
+  const s = typeof m === "string" ? m : m.id || m.modelID || m.model || String(m);
+  return s.replace(/^claude-/, "").replace(/-\d{8}$/, "");
+};
 
 // ---------- charts ----------
 function renderCharts() {
@@ -490,7 +506,7 @@ function rowHtml(e) {
     <td class="mono muted col-when">${fmtWhen(e.ts)}</td>
     <td class="col-provider"><span class="tag prov-${esc(prov)}">${esc(prov)}</span></td>
     <td class="ws col-workspace">${esc(e.workspace)}</td>
-    <td class="mono col-model">${shortModel(e.model)}</td>
+    <td class="mono col-model">${esc(shortModel(e.model))}</td>
     <td class="col-mode"><span class="tag ${esc(e.permissionMode)}">${esc(e.permissionMode)}</span></td>
     <td class="num col-in">${fmtTok(T_IN(e))}</td>
     <td class="num col-out">${fmtTok(T_OUT(e))}</td>

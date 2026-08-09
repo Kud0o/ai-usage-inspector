@@ -167,7 +167,10 @@ function responseText(messages) {
   return parts.join("");
 }
 
-// Build promptId -> [subagent assistant messages] from the subagents dir.
+// Build promptId -> { messages: [subagent assistant messages], invocations: n }
+// from the subagents dir. Messages drive token/cost totals; `invocations` counts
+// the FILES (one file = one Task invocation), which is what the dashboard's
+// "subagent calls" means — a flattened message count would badly overstate it.
 function loadSubagents(transcriptPath) {
   const dir = subagentsDir(transcriptPath);
   const byPrompt = new Map();
@@ -183,9 +186,10 @@ function loadSubagents(transcriptPath) {
     // user entries (the assistant entries don't repeat it).
     const fileEntry = entries.find((e) => e && e.promptId);
     const pid = (fileEntry && fileEntry.promptId) || "__none__";
-    if (!byPrompt.has(pid)) byPrompt.set(pid, []);
+    if (!byPrompt.has(pid)) byPrompt.set(pid, { messages: [], invocations: 0 });
     const bucket = byPrompt.get(pid);
-    for (const m of collectAssistants(entries)) bucket.push(m);
+    bucket.invocations++;
+    for (const m of collectAssistants(entries)) bucket.messages.push(m);
   }
   return byPrompt;
 }
@@ -230,7 +234,8 @@ export function buildTurns(transcriptPath, opts = {}) {
 function finalizeTurn(t, subByPrompt, opts) {
   const e = t.promptEntry;
   const main = t.main;
-  const subs = (t.promptId && subByPrompt.get(t.promptId)) || [];
+  const subBucket = (t.promptId && subByPrompt.get(t.promptId)) || { messages: [], invocations: 0 };
+  const subs = subBucket.messages;
 
   // Token totals (main + subagents), deduped already by message.id.
   const tokens = emptyTokens();
@@ -296,7 +301,7 @@ function finalizeTurn(t, subByPrompt, opts) {
     contextFillPct: ctxMax ? Math.round((ctxTokens / ctxMax) * 1000) / 10 : 0,
     counts: {
       apiCalls: main.length,
-      subagentCalls: subs.length,
+      subagentCalls: subBucket.invocations,
       toolCalls,
       thinkingBlocks: thinking,
     },
