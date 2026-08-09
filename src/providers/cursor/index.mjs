@@ -16,9 +16,9 @@ import {
   cursorDataDir,
   globalDbPath,
   listWorkspaces,
-  listComposerIds,
-  readComposerMeta,
-  available,
+  listComposerIdsStatus,
+  readComposerMetaStatus,
+  globalStoreStatus,
 } from "./store.mjs";
 
 export const id = "cursor";
@@ -48,7 +48,7 @@ export function detect() {
  * bounded rescan of recently updated conversations.
  */
 export function normalizePayload() {
-  return { rescan: true, sinceMs: Date.now() - 24 * 60 * 60 * 1000 };
+  return { rescan: true };
 }
 
 export async function buildTurns(composerRef, opts = {}) {
@@ -61,14 +61,36 @@ export async function buildTurns(composerRef, opts = {}) {
  * opts: {cwd} } — transcriptPath is the provider-opaque reference.
  */
 export async function discoverTranscripts({ sinceMs = 0 } = {}) {
-  if (!(await available())) return []; // node:sqlite missing (Node < 22.5)
+  return (await discoverTranscriptsStatus({ sinceMs })).transcripts;
+}
+
+const STATUS_RANK = { ok: 0, missing: 1, "unsupported-schema": 2, locked: 3 };
+function worseStatus(current, next) {
+  return (STATUS_RANK[next] || 0) > (STATUS_RANK[current] || 0) ? next : current;
+}
+
+export async function discoverTranscriptsStatus({ sinceMs = 0 } = {}) {
   const out = [];
   const gdb = globalDbPath();
+  const global = await globalStoreStatus(gdb);
+  let status = global.status;
+  let detail = global.detail;
   for (const ws of await listWorkspaces()) {
-    const ids = await listComposerIds(ws.dbPath);
-    for (const composerId of ids) {
+    const listed = await listComposerIdsStatus(ws.dbPath);
+    if (listed.status !== "ok") {
+      status = worseStatus(status, listed.status);
+      detail = listed.detail || detail;
+      continue;
+    }
+    for (const composerId of listed.ids) {
       if (sinceMs > 0) {
-        const composer = await readComposerMeta(gdb, composerId);
+        const meta = await readComposerMetaStatus(gdb, composerId);
+        if (meta.status !== "ok") {
+          status = worseStatus(status, meta.status);
+          detail = meta.detail || detail;
+          continue;
+        }
+        const composer = meta.composer;
         const upd = composer && (composer.lastUpdatedAt || composer.createdAt);
         if (!(Number(upd) >= sinceMs)) continue;
       }
@@ -78,7 +100,7 @@ export async function discoverTranscripts({ sinceMs = 0 } = {}) {
       });
     }
   }
-  return out;
+  return { status, detail: detail || null, transcripts: out };
 }
 
 // ---- install-time (stop hook in ~/.cursor/hooks.json) ----

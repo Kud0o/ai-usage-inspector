@@ -18,7 +18,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { available, openRO, toText, parseJson } from "../../lib/sqlite.mjs";
+import {
+  available,
+  openROStatus,
+  parseJson,
+  queryAll,
+  queryGet,
+  sqliteScanError,
+} from "../../lib/sqlite.mjs";
 
 export { available };
 
@@ -39,6 +46,17 @@ export function cursorDataDir() {
 
 export function globalDbPath() {
   return path.join(cursorDataDir(), "User", "globalStorage", "state.vscdb");
+}
+
+const GLOBAL_SCHEMA = { cursorDiskKV: ["key", "value"] };
+const WORKSPACE_SCHEMA = { ItemTable: ["key", "value"] };
+
+export async function globalStoreStatus(file = globalDbPath()) {
+  const opened = await openROStatus(file, { schema: GLOBAL_SCHEMA });
+  if (opened.db) {
+    try { opened.db.close(); } catch {}
+  }
+  return { status: opened.status, detail: opened.detail || null };
 }
 
 /** "file:///k%3A/Projects/Foo" -> "k:/Projects/Foo" (Windows drive handled). */
@@ -85,14 +103,19 @@ export async function listWorkspaces() {
  * has shipped: {allComposers:[{composerId}]}, {composers:[...]}, or a bare array.
  */
 export async function listComposerIds(workspaceDbPath) {
-  const db = await openRO(workspaceDbPath);
-  if (!db) return [];
+  return (await listComposerIdsStatus(workspaceDbPath)).ids;
+}
+
+export async function listComposerIdsStatus(workspaceDbPath) {
+  const opened = await openROStatus(workspaceDbPath, { schema: WORKSPACE_SCHEMA });
+  if (opened.status !== "ok") return { status: opened.status, detail: opened.detail, ids: [] };
+  const db = opened.db;
   try {
-    const row = db
-      .prepare("SELECT value FROM ItemTable WHERE key = ?")
-      .get("composer.composerData");
+    const queried = await queryGet(db, "SELECT value FROM ItemTable WHERE key = ?", "composer.composerData");
+    if (queried.status !== "ok") return { ...queried, ids: [] };
+    const row = queried.row;
     const data = row ? parseJson(row.value) : null;
-    if (!data) return [];
+    if (!data) return { status: "ok", ids: [] };
     const list = Array.isArray(data)
       ? data
       : Array.isArray(data.allComposers)
@@ -100,15 +123,12 @@ export async function listComposerIds(workspaceDbPath) {
         : Array.isArray(data.composers)
           ? data.composers
           : [];
-    return list
+    const ids = list
       .map((c) => (typeof c === "string" ? c : c && (c.composerId || c.id)))
       .filter(Boolean);
-  } catch {
-    return [];
+    return { status: "ok", ids };
   } finally {
-    try {
-      db.close();
-    } catch {}
+    try { db.close(); } catch {}
   }
 }
 
@@ -119,19 +139,20 @@ export async function listComposerIds(workspaceDbPath) {
  * lastUpdatedAt. Returns the parsed composer JSON, or null.
  */
 export async function readComposerMeta(globalDb, composerId) {
-  const db = await openRO(globalDb);
-  if (!db) return null;
+  const result = await readComposerMetaStatus(globalDb, composerId);
+  return result.composer;
+}
+
+export async function readComposerMetaStatus(globalDb, composerId) {
+  const opened = await openROStatus(globalDb, { schema: GLOBAL_SCHEMA });
+  if (opened.status !== "ok") return { status: opened.status, detail: opened.detail, composer: null };
+  const db = opened.db;
   try {
-    const meta = db
-      .prepare("SELECT value FROM cursorDiskKV WHERE key = ?")
-      .get(`composerData:${composerId}`);
-    return meta ? parseJson(meta.value) : null;
-  } catch {
-    return null;
+    const queried = await queryGet(db, "SELECT value FROM cursorDiskKV WHERE key = ?", `composerData:${composerId}`);
+    if (queried.status !== "ok") return { ...queried, composer: null };
+    return { status: "ok", composer: queried.row ? parseJson(queried.row.value) : null };
   } finally {
-    try {
-      db.close();
-    } catch {}
+    try { db.close(); } catch {}
   }
 }
 
@@ -140,29 +161,28 @@ export async function readComposerMeta(globalDb, composerId) {
  * bubbles = [{ bubbleId, ...bubbleJson }] in rowid (insertion) order.
  */
 export async function readComposer(globalDb, composerId) {
-  const db = await openRO(globalDb);
-  if (!db) return { composer: null, bubbles: [] };
+  const opened = await openROStatus(globalDb, { schema: GLOBAL_SCHEMA });
+  if (opened.status !== "ok") throw sqliteScanError(opened.status, opened.detail);
+  const db = opened.db;
   try {
-    const meta = db
-      .prepare("SELECT value FROM cursorDiskKV WHERE key = ?")
-      .get(`composerData:${composerId}`);
-    const composer = meta ? parseJson(meta.value) : null;
-    const rows = db
-      .prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY rowid")
-      .all(`bubbleId:${composerId}:%`);
+    const metaResult = await queryGet(db, "SELECT value FROM cursorDiskKV WHERE key = ?", `composerData:${composerId}`);
+    if (metaResult.status !== "ok") throw sqliteScanError(metaResult.status, metaResult.detail);
+    const composer = metaResult.row ? parseJson(metaResult.row.value) : null;
+    const rowsResult = await queryAll(
+      db,
+      "SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY rowid",
+      `bubbleId:${composerId}:%`,
+    );
+    if (rowsResult.status !== "ok") throw sqliteScanError(rowsResult.status, rowsResult.detail);
     const bubbles = [];
-    for (const r of rows) {
+    for (const r of rowsResult.rows) {
       const b = parseJson(r.value);
       if (!b) continue;
       const bubbleId = String(r.key).split(":")[2] || null;
       bubbles.push({ bubbleId, ...b });
     }
     return { composer, bubbles };
-  } catch {
-    return { composer: null, bubbles: [] };
   } finally {
-    try {
-      db.close();
-    } catch {}
+    try { db.close(); } catch {}
   }
 }

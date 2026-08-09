@@ -17,7 +17,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { available, openRO, parseJson } from "../../lib/sqlite.mjs";
+import {
+  available,
+  openROStatus,
+  parseJson,
+  queryAll,
+  queryGet,
+  sqliteScanError,
+} from "../../lib/sqlite.mjs";
 
 export { available };
 
@@ -32,25 +39,36 @@ export function dbPath() {
   return path.join(opencodeDataDir(), "opencode.db");
 }
 
+const SESSION_SCAN_SCHEMA = {
+  session: ["id", "directory", "time_created", "time_updated"],
+};
+
+const SESSION_DETAIL_SCHEMA = {
+  session: ["id", "directory", "model", "title", "cost", "tokens_input", "tokens_output", "tokens_reasoning", "tokens_cache_read", "tokens_cache_write", "time_created", "time_updated"],
+  message: ["id", "session_id", "time_created", "data"],
+  part: ["message_id", "session_id", "time_created", "data"],
+  session_input: ["session_id", "prompt", "time_created"],
+};
+
 /** Sessions updated at/after `sinceMs` (ms epoch), oldest first. Raw rows. */
-export async function listSessions({ sinceMs = 0 } = {}) {
-  const db = await openRO(dbPath());
-  if (!db) return [];
+export async function scanSessions({ sinceMs = 0 } = {}) {
+  const opened = await openROStatus(dbPath(), { schema: SESSION_SCAN_SCHEMA });
+  if (opened.status !== "ok") return { ...opened, rows: [] };
+  const db = opened.db;
   try {
-    // time_* columns are ms epoch integers.
-    const rows = db
-      .prepare(
-        "SELECT * FROM session WHERE COALESCE(time_updated, time_created, 0) >= ? ORDER BY COALESCE(time_updated, time_created, 0), rowid",
-      )
-      .all(Number(sinceMs) || 0);
-    return rows;
-  } catch {
-    return [];
+    const result = await queryAll(
+      db,
+      "SELECT * FROM session WHERE COALESCE(time_updated, time_created, 0) >= ? ORDER BY COALESCE(time_updated, time_created, 0), rowid",
+      Number(sinceMs) || 0,
+    );
+    return { ...result, rows: result.rows || [] };
   } finally {
-    try {
-      db.close();
-    } catch {}
+    try { db.close(); } catch {}
   }
+}
+
+export async function listSessions(options = {}) {
+  return (await scanSessions(options)).rows;
 }
 
 /**
@@ -58,55 +76,55 @@ export async function listSessions({ sinceMs = 0 } = {}) {
  *   { session, messages:[{id,ts,data}], partsByMsg:Map<msgId,[data]>, inputs:[{prompt,ts}] }
  * `data` fields are parsed JSON (or null). Empty/degraded on any failure.
  */
-export async function readSession(sessionId) {
+export async function readSessionStatus(sessionId) {
   const empty = { session: null, messages: [], partsByMsg: new Map(), inputs: [] };
-  const db = await openRO(dbPath());
-  if (!db) return empty;
+  const opened = await openROStatus(dbPath(), { schema: SESSION_DETAIL_SCHEMA });
+  if (opened.status !== "ok") return { ...opened, value: empty };
+  const db = opened.db;
   try {
-    const session = db.prepare("SELECT * FROM session WHERE id = ?").get(sessionId) || null;
+    const sessionResult = await queryGet(db, "SELECT * FROM session WHERE id = ?", sessionId);
+    if (sessionResult.status !== "ok") return { ...sessionResult, value: empty };
+    const session = sessionResult.row;
 
-    const msgRows = safeAll(
+    const msgResult = await queryAll(
       db,
       "SELECT id, time_created, data FROM message WHERE session_id = ? ORDER BY COALESCE(time_created, 0), rowid",
       sessionId,
     );
-    const messages = msgRows.map((r) => ({ id: r.id, ts: Number(r.time_created) || 0, data: parseJson(r.data) }));
+    if (msgResult.status !== "ok") return { ...msgResult, value: empty };
+    const messages = msgResult.rows.map((r) => ({ id: r.id, ts: Number(r.time_created) || 0, data: parseJson(r.data) }));
 
     const partsByMsg = new Map();
-    for (const r of safeAll(
+    const partsResult = await queryAll(
       db,
       "SELECT message_id, time_created, data FROM part WHERE session_id = ? ORDER BY COALESCE(time_created, 0), rowid",
       sessionId,
-    )) {
+    );
+    if (partsResult.status !== "ok") return { ...partsResult, value: empty };
+    for (const r of partsResult.rows) {
       const list = partsByMsg.get(r.message_id) || [];
       list.push(parseJson(r.data));
       partsByMsg.set(r.message_id, list);
     }
 
-    const inputs = safeAll(
+    const inputsResult = await queryAll(
       db,
       "SELECT prompt, time_created FROM session_input WHERE session_id = ? ORDER BY COALESCE(time_created, 0), rowid",
       sessionId,
-    ).map((r) => ({ prompt: r.prompt || "", ts: Number(r.time_created) || 0 }));
+    );
+    if (inputsResult.status !== "ok") return { ...inputsResult, value: empty };
+    const inputs = inputsResult.rows.map((r) => ({ prompt: r.prompt || "", ts: Number(r.time_created) || 0 }));
 
-    return { session, messages, partsByMsg, inputs };
-  } catch {
-    return empty;
+    return { status: "ok", value: { session, messages, partsByMsg, inputs } };
   } finally {
-    try {
-      db.close();
-    } catch {}
+    try { db.close(); } catch {}
   }
 }
 
-// Run a query that may reference a table/column an older OpenCode build lacks;
-// return [] instead of throwing so the provider degrades gracefully.
-function safeAll(db, sql, ...args) {
-  try {
-    return db.prepare(sql).all(...args);
-  } catch {
-    return [];
-  }
+export async function readSession(sessionId) {
+  const result = await readSessionStatus(sessionId);
+  if (result.status !== "ok") throw sqliteScanError(result.status, result.detail);
+  return result.value;
 }
 
 /** OpenCode is "present" when its data dir (or db) exists. */

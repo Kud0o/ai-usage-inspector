@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ingest, ingestTranscript } from "./lib/ingest.mjs";
 import { getProvider } from "./providers/index.mjs";
+import { scanWindow, recordScanResult } from "./lib/scan-state.mjs";
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -63,6 +64,54 @@ function restoreEnv(name, previous) {
   else process.env[name] = previous;
 }
 
+/**
+ * Rescan a scan-based provider (Cursor / OpenCode). The window comes from the
+ * durable high-water mark rather than a fixed 24h look-back, so an outage longer
+ * than a day no longer silently drops history. The mark is advanced ONLY when
+ * the scan both reported a healthy store and ingested every transcript it found
+ * — a locked DB, an unsupported schema, or a single failed ingest leaves the
+ * mark where it was so the next run picks the work back up.
+ */
+async function rescan(provider, norm) {
+  const { sinceMs, scanStartedAtMs } = scanWindow(provider.id);
+  const effectiveSince = Number.isFinite(norm.sinceMs) ? norm.sinceMs : sinceMs;
+
+  let status = "ok";
+  let detail = null;
+  let completed = false;
+  try {
+    let found = [];
+    if (typeof provider.discoverTranscriptsStatus === "function") {
+      const result = await provider.discoverTranscriptsStatus({ sinceMs: effectiveSince });
+      found = result.transcripts || [];
+      status = result.status || "ok";
+      detail = result.detail || null;
+    } else {
+      found = await provider.discoverTranscripts({ sinceMs: effectiveSince });
+    }
+    let allIngested = true;
+    for (const transcript of found) {
+      try {
+        await ingestTranscript(provider, transcript);
+      } catch (err) {
+        allIngested = false;
+        if (err && err.scanStatus) {
+          status = err.scanStatus;
+          detail = err.message || detail;
+        }
+      }
+    }
+    completed = allIngested && status === "ok";
+  } catch (err) {
+    status = (err && err.scanStatus) || status;
+    detail = (err && err.message) || detail;
+    completed = false;
+  }
+  try {
+    await recordScanResult(provider.id, { scanStartedAtMs, status, detail, completed });
+  } catch {}
+}
+
 export async function processEnvelope(envelope) {
   const provider = getProvider(envelope.provider);
   if (!provider) return { permanent: true };
@@ -81,10 +130,7 @@ export async function processEnvelope(envelope) {
 
     const norm = provider.normalizePayload(envelope.raw);
     if (norm && norm.rescan && typeof provider.discoverTranscripts === "function") {
-      const found = await provider.discoverTranscripts({ sinceMs: norm.sinceMs || 0 });
-      for (const transcript of found) {
-        try { await ingestTranscript(provider, transcript); } catch {}
-      }
+      await rescan(provider, norm);
     } else {
       await ingest(provider, envelope.raw);
     }

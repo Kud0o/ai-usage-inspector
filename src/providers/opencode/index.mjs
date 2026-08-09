@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { nodeSupported } from "../../lib/sqlite.mjs";
 import { buildTurns as buildOpencodeTurns } from "./transcript.mjs";
-import { detect, dbPath, listSessions, available } from "./store.mjs";
+import { detect, scanSessions } from "./store.mjs";
 
 export { detect, nodeSupported };
 export const id = "opencode";
@@ -31,7 +31,7 @@ const MARKER = "ai-usage-inspector";
  * path is a bounded rescan of recently updated sessions.
  */
 export function normalizePayload() {
-  return { rescan: true, sinceMs: Date.now() - 24 * 60 * 60 * 1000 };
+  return { rescan: true };
 }
 
 export async function buildTurns(ref, opts = {}) {
@@ -44,13 +44,17 @@ export async function buildTurns(ref, opts = {}) {
  * the provider-opaque reference.
  */
 export async function discoverTranscripts({ sinceMs = 0 } = {}) {
-  if (!(await available())) return []; // node:sqlite missing (Node < 22.5)
+  return (await discoverTranscriptsStatus({ sinceMs })).transcripts;
+}
+
+export async function discoverTranscriptsStatus({ sinceMs = 0 } = {}) {
+  const scanned = await scanSessions({ sinceMs });
   const out = [];
-  for (const s of await listSessions({ sinceMs })) {
+  for (const s of scanned.rows) {
     if (!s || !s.id) continue;
     out.push({ transcriptPath: { sessionId: s.id, cwd: s.directory || null }, opts: { cwd: s.directory || null } });
   }
-  return out;
+  return { status: scanned.status, detail: scanned.detail || null, transcripts: out };
 }
 
 // ---- install-time (session.idle plugin in ~/.config/opencode/plugins/) ----

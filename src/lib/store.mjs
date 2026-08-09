@@ -82,6 +82,22 @@ function atomicWrite(file, text) {
   }
 }
 
+/** Locked JSON read-modify-write using same owner-token lock + atomic temp path. */
+export async function mutateJson(file, fn, fallback = {}) {
+  return withFileLock(file, () => {
+    let current = fallback;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (parsed && typeof parsed === "object") current = parsed;
+    } catch {}
+    const changed = fn(current);
+    const next = changed && Object.hasOwn(changed, "data") ? changed.data : changed;
+    const value = changed && Object.hasOwn(changed, "data") ? changed.value : undefined;
+    atomicWrite(file, JSON.stringify(next, null, 2) + "\n");
+    return value === undefined ? true : value;
+  });
+}
+
 function readNdjson(file) {
   let text = "";
   try {
@@ -175,13 +191,31 @@ export async function addTombstones(file, values) {
   });
 }
 
+// A cost WE computed from a rate table ("priced"/"estimated") must not silently
+// change when history is re-scanned with today's rates — what a turn cost is a
+// fact about when it ran. A cost the tool itself reported ("provider") is always
+// taken fresh, since the tool is the authority on its own number. Set
+// AI_USAGE_REPRICE=1 (sync --reprice) to deliberately recompute.
+const COMPUTED_COST_SOURCES = new Set(["priced", "estimated"]);
+
+function preserveComputedCost(next, previous) {
+  if (process.env.AI_USAGE_REPRICE === "1") return next;
+  if (!previous || !previous.cost || !next || !next.cost) return next;
+  if (!COMPUTED_COST_SOURCES.has(previous.cost.source)) return next;
+  if (!COMPUTED_COST_SOURCES.has(next.cost.source)) return next;
+  return { ...next, cost: previous.cost };
+}
+
 /** Replace one session's records, filtering persistent tombstones. */
 export async function upsertSession(file, sessionId, records) {
   const result = await mutateNdjson(file, (existing) => {
     // Read while holding usage lock. Viewer writes tombstone before waiting for
     // this lock, closing delete-vs-upsert resurrection races.
     const blocked = loadTombstoneKeys(tombstonePath(file));
-    const accepted = records.filter((r) => !blocked.has(tombstoneKey(r)));
+    const priorByKey = new Map(existing.map((r) => [tombstoneKey(r), r]));
+    const accepted = records
+      .filter((r) => !blocked.has(tombstoneKey(r)))
+      .map((r) => preserveComputedCost(r, priorByKey.get(tombstoneKey(r))));
     return {
       records: existing.filter((r) => r.sessionId !== sessionId).concat(accepted),
       value: accepted.length,
