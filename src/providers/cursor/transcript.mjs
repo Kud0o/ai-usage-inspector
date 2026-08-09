@@ -164,11 +164,12 @@ function finalizeTurn(t, ctx) {
   const endTs = ctx.last ? ctx.updatedTs || ts : ts;
 
   const costOut = {
-    input: round4(cost.input),
-    output: round4(cost.output),
+    input: cost.input,
+    output: cost.output,
     cacheWrite: 0,
-    cacheRead: round4(cost.cacheRead),
-    total: round4(cost.total),
+    cacheRead: cost.cacheRead,
+    total: cost.total,
+    source: estimated ? "estimated" : "priced",
   };
   if (estimated) costOut.estimated = true;
 
@@ -208,8 +209,4 @@ function finalizeTurn(t, ctx) {
     cost: costOut,
     schema: 2,
   };
-}
-
-function round4(n) {
-  return Math.round(n * 10000) / 10000;
 }

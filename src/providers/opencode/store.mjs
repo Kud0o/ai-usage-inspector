@@ -40,7 +40,7 @@ export async function listSessions({ sinceMs = 0 } = {}) {
     // time_* columns are ms epoch integers.
     const rows = db
       .prepare(
-        "SELECT * FROM session WHERE COALESCE(time_updated, time_created, 0) >= ? ORDER BY COALESCE(time_updated, time_created, 0)",
+        "SELECT * FROM session WHERE COALESCE(time_updated, time_created, 0) >= ? ORDER BY COALESCE(time_updated, time_created, 0), rowid",
       )
       .all(Number(sinceMs) || 0);
     return rows;
@@ -67,7 +67,7 @@ export async function readSession(sessionId) {
 
     const msgRows = safeAll(
       db,
-      "SELECT id, time_created, data FROM message WHERE session_id = ? ORDER BY COALESCE(time_created, 0)",
+      "SELECT id, time_created, data FROM message WHERE session_id = ? ORDER BY COALESCE(time_created, 0), rowid",
       sessionId,
     );
     const messages = msgRows.map((r) => ({ id: r.id, ts: Number(r.time_created) || 0, data: parseJson(r.data) }));
@@ -75,7 +75,7 @@ export async function readSession(sessionId) {
     const partsByMsg = new Map();
     for (const r of safeAll(
       db,
-      "SELECT message_id, time_created, data FROM part WHERE session_id = ? ORDER BY COALESCE(time_created, 0)",
+      "SELECT message_id, time_created, data FROM part WHERE session_id = ? ORDER BY COALESCE(time_created, 0), rowid",
       sessionId,
     )) {
       const list = partsByMsg.get(r.message_id) || [];
@@ -85,7 +85,7 @@ export async function readSession(sessionId) {
 
     const inputs = safeAll(
       db,
-      "SELECT prompt, time_created FROM session_input WHERE session_id = ? ORDER BY COALESCE(time_created, 0)",
+      "SELECT prompt, time_created FROM session_input WHERE session_id = ? ORDER BY COALESCE(time_created, 0), rowid",
       sessionId,
     ).map((r) => ({ prompt: r.prompt || "", ts: Number(r.time_created) || 0 }));
 

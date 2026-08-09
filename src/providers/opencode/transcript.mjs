@@ -14,7 +14,6 @@
 import { readSession } from "./store.mjs";
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
-const round4 = (n) => Math.round(n * 10000) / 10000;
 
 function isoOrNull(ms) {
   const n = Number(ms);
@@ -47,7 +46,10 @@ const modelOf = (data) => (data && (data.modelID || data.model || data.modelId))
 // '{"id":"deepseek-v4-flash-free","providerID":"opencode"}'. Reduce it to the
 // bare model id; leave a plain string untouched.
 function cleanModel(model) {
-  if (typeof model !== "string" || !model) return model || null;
+  if (model && typeof model === "object") {
+    return cleanModel(model.id || model.modelID || model.modelId || model.model);
+  }
+  if (typeof model !== "string" || !model) return null;
   if (model[0] === "{") {
     try {
       const o = JSON.parse(model);
@@ -103,17 +105,18 @@ export async function buildTurns(ref, opts = {}) {
     const role = roleOf(m.data);
     const { text, tools } = partsText(partsByMsg.get(m.id));
     if (role === "user") {
-      cur = { prompt: text, response: "", model: null, usage: null, cost: 0, apiCalls: 0, toolCalls: tools, ts: m.ts, endTs: m.ts };
+      cur = { prompt: text, response: "", model: null, usage: null, usageCalls: 0, cost: 0, apiCalls: 0, toolCalls: tools, ts: m.ts, endTs: m.ts };
       turns.push(cur);
     } else if (role === "assistant" && cur) {
       cur.response += text;
       cur.toolCalls += tools;
       cur.apiCalls++;
       cur.endTs = m.ts || cur.endTs;
-      cur.model = cur.model || modelOf(m.data);
+      cur.model = cur.model || cleanModel(modelOf(m.data));
       cur.cost += num(m.data && m.data.cost);
       const u = msgUsage(m.data);
       if (u) {
+        cur.usageCalls++;
         cur.usage = cur.usage || { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
         cur.usage.input += u.input;
         cur.usage.output += u.output;
@@ -124,8 +127,10 @@ export async function buildTurns(ref, opts = {}) {
     }
   }
 
-  const anyUsage = turns.some((t) => t.usage);
-  if (turns.length && anyUsage) {
+  const completeUsage =
+    turns.length > 0 &&
+    turns.every((t) => t.apiCalls > 0 && t.usageCalls === t.apiCalls);
+  if (completeUsage) {
     return turns.map((t, i) =>
       finalizeTurn(
         {
@@ -144,7 +149,8 @@ export async function buildTurns(ref, opts = {}) {
     );
   }
 
-  // Fallback: one session-level record from the authoritative session columns.
+  // Any missing assistant usage makes per-turn accounting incomplete. Do not
+  // invent an allocation: emit one authoritative session rollup instead.
   return [sessionRecord(session, inputs, { sessionId, cwd })];
 }
 
@@ -165,7 +171,7 @@ function finalizeTurn(t, ctx) {
   };
   const ctxTokens = usage.input + usage.cacheRead;
   const ctxMax = contextMax(t.model);
-  const total = round4(num(t.cost));
+  const total = num(t.cost);
   const ts = isoOrNull(t.ts);
   const endTs = isoOrNull(t.endTs) || ts;
   return record({
@@ -181,7 +187,7 @@ function finalizeTurn(t, ctx) {
     usage,
     ctxTokens,
     ctxMax,
-    cost: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total },
+    cost: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total, source: "provider" },
     counts: { apiCalls: t.apiCalls, subagentCalls: 0, toolCalls: t.toolCalls, thinkingBlocks: 0 },
   });
 }
@@ -214,9 +220,10 @@ function sessionRecord(session, inputs, ctx) {
     durationMs: ts && endTs ? Math.max(0, Date.parse(endTs) - Date.parse(ts)) : 0,
     usage,
     ctxTokens,
-    ctxMax: contextMax(s.model),
-    cost: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total: round4(num(s.cost)) },
+    ctxMax: contextMax(cleanModel(s.model)),
+    cost: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total: num(s.cost), source: "provider" },
     counts: { apiCalls: 0, subagentCalls: 0, toolCalls: 0, thinkingBlocks: 0 },
+    quality: "session-rollup",
   });
 }
 
@@ -251,6 +258,7 @@ function record(r) {
     contextFillPct: r.ctxMax ? Math.round((r.ctxTokens / r.ctxMax) * 1000) / 10 : 0,
     counts: r.counts,
     cost: r.cost,
+    ...(r.quality ? { quality: r.quality } : {}),
     schema: 2,
   };
 }

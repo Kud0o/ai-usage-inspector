@@ -74,10 +74,10 @@ export function contextMax(modelId) {
  * Returns the shared cost object.
  */
 export function costOf(modelId, tokens) {
-  if (!tokens) return zeroCost();
+  if (!tokens) return { ...zeroCost(), source: "priced" };
   const r = modelInfo(modelId);
   const input = (Math.max(0, tokens.input || 0) * r.input) / M;
   const cacheRead = (Math.max(0, tokens.cached || 0) * r.cachedInput) / M;
   const output = (Math.max(0, tokens.output || 0) * r.output) / M;
-  return { input, output, cacheRead, cacheWrite: 0, total: input + cacheRead + output };
+  return { input, output, cacheRead, cacheWrite: 0, total: input + cacheRead + output, source: "priced" };
 }

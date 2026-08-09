@@ -85,6 +85,14 @@ try {
   CFG = await import("../src/lib/config.mjs");
 }
 
+// Same bundle-or-repo lookup for lock-guarded usage/tombstone mutations.
+let STORE;
+try {
+  STORE = await import("./store.mjs");
+} catch {
+  STORE = await import("../src/lib/store.mjs");
+}
+
 // Same bundle-or-repo dance for the per-provider pricing refreshers. On a fresh
 // install a module may not be bundled yet; degrade silently if so.
 async function loadPricing(bundle, repo) {
@@ -119,6 +127,7 @@ function resolveDataDir() {
 
 const DATA_DIR = resolveDataDir();
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
+const TOMBSTONE_FILE = path.join(DATA_DIR, "tombstones.json");
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -171,6 +180,7 @@ function loadEvents() {
   } catch {
     return [];
   }
+  const tombstones = STORE.loadTombstoneKeys(TOMBSTONE_FILE);
   const events = [];
   for (const f of files) {
     let text;
@@ -183,7 +193,8 @@ function loadEvents() {
       const s = line.trim();
       if (!s) continue;
       try {
-        events.push(JSON.parse(s));
+        const event = JSON.parse(s);
+        if (!tombstones.has(STORE.tombstoneKey(event))) events.push(event);
       } catch {}
     }
   }
@@ -200,12 +211,21 @@ function toListItem(e) {
   };
 }
 
-// Permanently remove records by id across all ndjson files. Rewrites each file
-// atomically (tmp + rename); deletes a file that becomes empty. Returns how many
-// records were removed and how many bytes that freed.
-function deleteEvents(ids) {
-  const set = new Set(ids || []);
-  if (!set.size) return { removed: 0, bytesFreed: 0 };
+// Persistently remove records by composite identity across all ndjson files.
+// Tombstones survive sync; shared locked mutation prevents ingest/delete races.
+async function deleteEvents(keys, ids) {
+  const wanted = new Set((keys || []).filter(Boolean).map(STORE.tombstoneKey));
+  const legacyIds = new Set((ids || []).filter((id) => id != null).map(String));
+  if (!wanted.size && !legacyIds.size) return { removed: 0, bytesFreed: 0 };
+
+  const targets = loadEvents().filter(
+    (e) => wanted.has(STORE.tombstoneKey(e)) || legacyIds.has(String(e.id)),
+  );
+  if (!targets.length) return { removed: 0, bytesFreed: 0 };
+  const tombstoned = await STORE.addTombstones(TOMBSTONE_FILE, targets);
+  if (tombstoned === false) return { removed: 0, bytesFreed: 0, error: "tombstone-lock-timeout" };
+  const targetKeys = new Set(targets.map(STORE.tombstoneKey));
+
   let files = [];
   try {
     files = fs.readdirSync(DATA_DIR).filter((f) => f.endsWith(".ndjson"));
@@ -216,40 +236,14 @@ function deleteEvents(ids) {
     bytesFreed = 0;
   for (const f of files) {
     const fp = path.join(DATA_DIR, f);
-    let text;
     try {
-      text = fs.readFileSync(fp, "utf8");
-    } catch {
-      continue;
-    }
-    const before = Buffer.byteLength(text);
-    const kept = [];
-    let changed = false;
-    for (const line of text.split("\n")) {
-      const s = line.trim();
-      if (!s) continue;
-      let id = null;
-      try {
-        id = JSON.parse(s).id;
-      } catch {}
-      if (id != null && set.has(id)) {
-        removed++;
-        changed = true;
-      } else {
-        kept.push(s);
-      }
-    }
-    if (!changed) continue;
-    const out = kept.length ? kept.join("\n") + "\n" : "";
-    try {
-      if (out) {
-        const tmp = fp + ".tmp";
-        fs.writeFileSync(tmp, out);
-        fs.renameSync(tmp, fp);
-      } else {
-        fs.rmSync(fp, { force: true });
-      }
-      bytesFreed += Math.max(0, before - Buffer.byteLength(out));
+      const result = await STORE.mutateNdjson(fp, (records) => {
+        const kept = records.filter((e) => !targetKeys.has(STORE.tombstoneKey(e)));
+        return { records: kept, value: records.length - kept.length };
+      });
+      if (result === false) continue;
+      removed += result.value;
+      bytesFreed += Math.max(0, result.beforeBytes - result.afterBytes);
     } catch {}
   }
   return { removed, bytesFreed };
@@ -275,7 +269,7 @@ const server = http.createServer(async (req, res) => {
         try {
           body = JSON.parse(await readBody(req)) || {};
         } catch {}
-        return send(res, 200, JSON.stringify(deleteEvents(body.ids)));
+        return send(res, 200, JSON.stringify(await deleteEvents(body.keys, body.ids)));
       }
       return send(res, 200, JSON.stringify(loadEvents().map(toListItem)));
     }

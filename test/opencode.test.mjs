@@ -122,6 +122,66 @@ test("OpenCode falls back to a session-level record when messages lack usage", n
   }
 });
 
+test("OpenCode uses rowid tiebreaks and cleans per-message object models", needsSqlite, async () => {
+  const t0 = Date.parse("2026-07-23T11:00:00Z");
+  const dir = makeDb({
+    sessions: [{ id: "sesOrder", directory: "K:/order", model: "fallback", title: "Order", cost: 0.03,
+      tokens_input: 30, tokens_output: 3, tokens_reasoning: 0, tokens_cache_read: 0, tokens_cache_write: 0,
+      time_created: t0, time_updated: t0 + 1 }],
+    messages: [
+      { id: "u1", session_id: "sesOrder", time_created: t0, data: { role: "user" } },
+      { id: "a1", session_id: "sesOrder", time_created: t0, data: asst({ id: "object-model" }, 0.01, { input: 10, output: 1 }) },
+      { id: "u2", session_id: "sesOrder", time_created: t0, data: { role: "user" } },
+      { id: "a2", session_id: "sesOrder", time_created: t0, data: asst("string-model", 0.02, { input: 20, output: 2 }) },
+    ],
+    parts: [
+      textPart("u1", "sesOrder", t0, "first"),
+      textPart("a1", "sesOrder", t0, "answer one"),
+      textPart("u2", "sesOrder", t0, "second"),
+      textPart("a2", "sesOrder", t0, "answer two"),
+    ],
+  });
+  try {
+    await withDataDir(dir, async (m) => {
+      const turns = await m.buildTurns({ sessionId: "sesOrder", cwd: "K:/order" });
+      assert.deepEqual(turns.map((t) => [t.prompt, t.response, t.model]), [
+        ["first", "answer one", "object-model"],
+        ["second", "answer two", "string-model"],
+      ]);
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("OpenCode incomplete message usage emits identifiable session rollup", needsSqlite, async () => {
+  const t0 = Date.parse("2026-07-23T12:00:00Z");
+  const dir = makeDb({
+    sessions: [{ id: "sesPartial", directory: "K:/partial", model: "provider-model", title: "Partial", cost: 0.00004,
+      tokens_input: 300, tokens_output: 30, tokens_reasoning: 3, tokens_cache_read: 20, tokens_cache_write: 2,
+      time_created: t0, time_updated: t0 + 1000 }],
+    messages: [
+      { id: "u1", session_id: "sesPartial", time_created: t0, data: { role: "user" } },
+      { id: "a1", session_id: "sesPartial", time_created: t0 + 1, data: asst("provider-model", 0.01, { input: 100, output: 10 }) },
+      { id: "u2", session_id: "sesPartial", time_created: t0 + 2, data: { role: "user" } },
+      { id: "a2", session_id: "sesPartial", time_created: t0 + 3, data: { role: "assistant", modelID: "provider-model", cost: 0.02 } },
+    ],
+    parts: [textPart("u1", "sesPartial", t0, "first"), textPart("u2", "sesPartial", t0 + 2, "second")],
+  });
+  try {
+    await withDataDir(dir, async (m) => {
+      const turns = await m.buildTurns({ sessionId: "sesPartial", cwd: "K:/partial" });
+      assert.equal(turns.length, 1);
+      assert.equal(turns[0].quality, "session-rollup");
+      assert.equal(turns[0].usage.input, 300);
+      assert.equal(turns[0].cost.total, 0.00004);
+      assert.equal(turns[0].cost.source, "provider");
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("OpenCode plugin install/uninstall is idempotent and marker-scoped", needsSqlite, async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-opencode-home-"));
   const prevUser = process.env.USERPROFILE;

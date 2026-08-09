@@ -12,6 +12,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 // The eight selectable field groups (all on by default).
 export const FIELD_GROUPS = ["text", "tokens", "cost", "context", "timing", "skills", "counts", "meta"];
@@ -99,23 +100,41 @@ const LOCK_STALE_MS = 10_000;
 const LOCK_TIMEOUT_MS = 2_000;
 const LOCK_RETRY_MS = 25;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const tempName = (file) => `${file}.${process.pid}.${randomUUID()}.tmp`;
+
+function readLockToken(file) {
+  try { return fs.readFileSync(file, "utf8"); } catch { return null; }
+}
+
+function removeOwnedLock(file, token) {
+  try {
+    if (readLockToken(file) === token) fs.rmSync(file, { force: true });
+  } catch {}
+}
 
 // Read-modify-write any JSON config file under an exclusive lock. Returns the
 // saved object, or null if the lock couldn't be taken (caller best-effort).
 export async function mutateFile(file, fn) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const lock = `${file}.lock`;
+  const token = `${process.pid}:${randomUUID()}`;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   let fd = null;
   while (true) {
     try {
       fd = fs.openSync(lock, "wx");
+      fs.writeFileSync(fd, token, "utf8");
       break;
     } catch (err) {
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch {}
+        fd = null;
+      }
       if (err.code !== "EEXIST") throw err;
       try {
+        const seen = readLockToken(lock);
         const age = Date.now() - fs.statSync(lock).mtimeMs;
-        if (age > LOCK_STALE_MS) {
+        if (seen !== null && age > LOCK_STALE_MS && readLockToken(lock) === seen) {
           fs.rmSync(lock, { force: true });
           continue;
         }
@@ -129,13 +148,17 @@ export async function mutateFile(file, fn) {
   try {
     const obj = loadJson(file);
     fn(obj);
-    const tmp = `${file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n");
-    fs.renameSync(tmp, file);
+    const tmp = tempName(file);
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n");
+      fs.renameSync(tmp, file);
+    } finally {
+      try { fs.rmSync(tmp, { force: true }); } catch {}
+    }
     return obj;
   } finally {
     try { fs.closeSync(fd); } catch {}
-    try { fs.rmSync(lock, { force: true }); } catch {}
+    removeOwnedLock(lock, token);
   }
 }
 

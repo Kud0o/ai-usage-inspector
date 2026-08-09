@@ -338,16 +338,13 @@ function finalizeTurn(t, ctx) {
       thinkingBlocks: t.thinking,
     },
     cost: {
-      input: round4(cost.input),
-      output: round4(cost.output),
-      cacheWrite: round4(cost.cacheWrite),
-      cacheRead: round4(cost.cacheRead),
-      total: round4(cost.total),
+      input: cost.input,
+      output: cost.output,
+      cacheWrite: cost.cacheWrite,
+      cacheRead: cost.cacheRead,
+      total: cost.total,
+      source: cost.source || "priced",
     },
     schema: 2,
   };
-}
-
-function round4(n) {
-  return Math.round(n * 10000) / 10000;
 }

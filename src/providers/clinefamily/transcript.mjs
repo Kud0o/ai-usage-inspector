@@ -25,7 +25,6 @@ import fs from "node:fs";
 import path from "node:path";
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
-const round4 = (n) => Math.round(n * 10000) / 10000;
 
 function isoOrNull(ms) {
   const n = Number(ms);
@@ -213,7 +212,7 @@ function finalizeTurn(t, ctx) {
     contextMax: ctxMax,
     contextFillPct: ctxMax ? Math.round((ctxTokens / ctxMax) * 1000) / 10 : 0,
     counts: { apiCalls: t.apiCalls, subagentCalls: 0, toolCalls: t.toolCalls, thinkingBlocks: 0 },
-    cost: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total: round4(t.cost) },
+    cost: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total: t.cost, source: "provider" },
     schema: 2,
   };
 }

@@ -11,11 +11,18 @@ export function zeroCost() {
 }
 
 export function addCost(a, b) {
-  return {
+  const out = {
     input: a.input + b.input,
     output: a.output + b.output,
     cacheRead: a.cacheRead + b.cacheRead,
     cacheWrite: a.cacheWrite + b.cacheWrite,
     total: a.total + b.total,
   };
+  const source =
+    a.source === "estimated" || b.source === "estimated"
+      ? "estimated"
+      : b.source || a.source;
+  if (source) out.source = source;
+  if (a.estimated || b.estimated) out.estimated = true;
+  return out;
 }

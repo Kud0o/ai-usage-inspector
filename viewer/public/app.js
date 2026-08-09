@@ -56,17 +56,18 @@ function toast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { t.classList.remove("show"); setTimeout(() => (t.hidden = true), 300); }, 3200);
 }
-// Permanently delete records by id (irreversible) — always behind a confirm.
-async function delEvents(ids, label) {
-  ids = (ids || []).filter(Boolean);
-  if (!ids.length) return;
-  if (!confirm(`Permanently delete ${ids.length} ${label}?\n\nThis removes the record(s) from disk and cannot be undone.`)) return;
+// Permanently delete records by composite identity — always behind a confirm.
+const eventKey = (e) => ({ provider: PROV(e), sessionId: e.sessionId, id: e.id });
+async function delEvents(keys, label) {
+  keys = (keys || []).filter((k) => k && k.id != null);
+  if (!keys.length) return;
+  if (!confirm(`Permanently delete ${keys.length} ${label}?\n\nThis removes the record(s) from disk and cannot be undone.`)) return;
   let r = {};
   try {
     r = await (await fetch("/api/events", {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ids }),
+      body: JSON.stringify({ keys }),
     })).json();
   } catch {}
   await load();
@@ -92,12 +93,12 @@ function exportRecords(kind) {
   if (kind === "json") {
     download(`ai-usage-${stamp}.json`, JSON.stringify(rows, null, 2), "application/json");
   } else {
-    const cols = ["ts", "provider", "platform", "workspace", "sessionId", "model", "permissionMode", "promptChars", "responseChars", "input", "output", "reasoning", "cacheRead", "cacheWrite", "costTotal", "estimated", "durationMs", "contextFillPct"];
+    const cols = ["ts", "provider", "platform", "workspace", "sessionId", "model", "permissionMode", "promptChars", "responseChars", "input", "output", "reasoning", "cacheRead", "cacheWrite", "costTotal", "costSource", "estimated", "durationMs", "contextFillPct"];
     const line = (e) => [
       e.ts, PROV(e), e.entrypoint || "", e.workspace, e.sessionId, e.model, e.permissionMode,
       e.promptChars, e.responseChars,
       T_IN(e), T_OUT(e), (e.usage && e.usage.reasoning) || 0, (e.usage && e.usage.cacheRead) || 0, (e.usage && e.usage.cacheCreate) || 0,
-      COST(e), (e.cost && e.cost.estimated) ? 1 : 0, e.durationMs || 0, e.contextFillPct || 0,
+      COST(e), (e.cost && e.cost.source) || "", COST_ESTIMATED(e) ? 1 : 0, e.durationMs || 0, e.contextFillPct || 0,
     ].map(csvCell).join(",");
     const csv = [cols.join(","), ...rows.map(line)].join("\r\n");
     download(`ai-usage-${stamp}.csv`, csv, "text/csv");
@@ -110,6 +111,7 @@ const T_IN = (e) => (e.usage && e.usage.input) || 0;
 const T_OUT = (e) => (e.usage && e.usage.output) || 0;
 const T_TOTAL = (e) => { const u = e.usage; return u ? (u.input || 0) + (u.output || 0) + (u.cacheCreate || 0) + (u.cacheRead || 0) : 0; };
 const COST = (e) => (e.cost && e.cost.total) || 0;
+const COST_ESTIMATED = (e) => !!(e.cost && (e.cost.estimated || e.cost.source === "estimated"));
 const PROV = (e) => e.provider || "claude";
 // Provider → its brand color (shared with badges via CSS vars).
 const provColor = (p) => cssv(`--prov-${p}`) || cssv("--faint");
@@ -284,7 +286,7 @@ function renderStats() {
   if (has("timing") && respRecs.length) cards.push({ label: "avg first response", val: fmtDur(avgResp), sub: "prompt → first reply", cls: "" });
   cards.push({ label: "top model", val: esc(shortModel(topModel)), sub: topModel ? byModel[topModel] + " prompts" : "—", cls: "" });
   cards.push({ label: "busiest workspace", val: esc(topWs || "—"), sub: topWs ? byWs[topWs] + " prompts" : "—", cls: "" });
-  if (has("cost")) cards.push({ label: "est. cost", val: fmtUsd(cost), sub: prompts ? `${fmtUsd(cost / prompts)} / prompt` : "—", cls: "cost" });
+  if (has("cost")) cards.push({ label: "cost", val: fmtUsd(cost), sub: prompts ? `${fmtUsd(cost / prompts)} / prompt` : "—", cls: "cost" });
   // This month's spend (computed across ALL records, independent of filters) +
   // optional monthly budget with warn/danger accents.
   if (has("cost")) {
@@ -370,7 +372,7 @@ function renderCharts() {
   cards.push(`<div class="card"><h3>permission mode</h3>${donut(modeCount, (x) => x + " prompts")}</div>`);
   cards.push(`<div class="card"><h3>prompts by model</h3>${donut(modelCount, (x) => x + " prompts")}</div>`);
   if (has("skills") && skillsUsed) cards.push(`<div class="card"><h3>skills invoked <b>${skillsUsed}</b></h3>${donut(skillCount, (x) => x + "×")}</div>`);
-  if (has("cost")) cards.push(`<div class="card"><h3>est. cost / day <b class="cost-b">${fmtUsd(cost.reduce((a, b) => a + b, 0))}</b></h3>${barChart(keys, cost, cssv("--faint"), (x) => fmtUsd(x))}</div>`);
+  if (has("cost")) cards.push(`<div class="card"><h3>cost / day <b class="cost-b">${fmtUsd(cost.reduce((a, b) => a + b, 0))}</b></h3>${barChart(keys, cost, cssv("--faint"), (x) => fmtUsd(x))}</div>`);
   // Per-provider breakdowns — only when the view spans more than one provider.
   const provs = provsIn(v);
   if (provs.length > 1) {
@@ -656,16 +658,18 @@ async function openDrawer(id) {
   if (has("counts") && e.counts) cells.push(
     `<div><div class="k">api calls</div><div class="v">${k.apiCalls} <span class="muted" style="font-size:11px">+${k.subagentCalls} sub</span></div></div>`,
     `<div><div class="k">tools / think</div><div class="v">${k.toolCalls} / ${k.thinkingBlocks}</div></div>`);
-  const estFlag = e.cost && e.cost.estimated ? ` <span class="est-flag" title="Cursor doesn't store exact token counts locally; tokens estimated from text length">≈ estimated</span>` : "";
+  const estFlag = COST_ESTIMATED(e) ? ` <span class="est-flag" title="Cursor doesn't store exact token counts locally; tokens estimated from text length">≈ estimated</span>` : "";
+  const costSource = c.source || (c.estimated ? "estimated" : "legacy");
   const costBreakdown = has("cost") && e.cost
     ? `<div class="block"><div class="bh"><span>cost breakdown · USD${estFlag}</span></div><pre>input  ${fmtUsd(c.input)}
 output ${fmtUsd(c.output)}
 cache write ${fmtUsd(c.cacheWrite)}
 cache read  ${fmtUsd(c.cacheRead)}
 ──────────────
-total  ${fmtUsd(c.total)}</pre></div>` : "";
+total  ${fmtUsd(c.total)}
+source ${esc(costSource)}</pre></div>` : "";
   $("#drawer-panel").innerHTML = `
-    <div class="dhead"><span class="deyebrow">prompt detail</span><span class="dhead-actions"><button class="btn danger ddel" data-del="${esc(e.id)}">delete</button><button class="btn ghost dclose" data-close>✕ close</button></span></div>
+    <div class="dhead"><span class="deyebrow">prompt detail</span><span class="dhead-actions"><button class="btn danger ddel" data-del="${esc(e.id)}" data-provider="${esc(PROV(e))}" data-session="${esc(e.sessionId)}">delete</button><button class="btn ghost dclose" data-close>✕ close</button></span></div>
     <h2>${esc(e.workspace)} <span class="muted" style="font-family:var(--mono);font-size:13px">/ ${esc(e.slug || "")}</span></h2>
     <div class="dmeta">${meta.join("")}</div>
     ${has("skills") && e.skills && e.skills.length ? `<div class="dskills"><span class="dskills-k">skills</span>${e.skills.map((s) => `<span class="skill-tag">${esc(s)}</span>`).join("")}</div>` : ""}
@@ -686,7 +690,7 @@ function closeDrawer() { $("#drawer").hidden = true; }
 const FIELD_META = [
   ["text", "prompt & response text", "the full prompt/response (largest + most sensitive)"],
   ["tokens", "token usage", "input / output / cache token counts"],
-  ["cost", "estimated cost", "per-prompt USD estimate"],
+  ["cost", "cost", "provider-reported or locally priced per-prompt USD cost"],
   ["context", "context fill", "context window occupancy %"],
   ["timing", "timing", "duration + first-response latency"],
   ["skills", "skills", "skills invoked per prompt"],
@@ -762,7 +766,7 @@ function bind() {
   });
   $("#f-csv").addEventListener("click", () => exportRecords("csv"));
   $("#f-json").addEventListener("click", () => exportRecords("json"));
-  $("#f-del").addEventListener("click", () => delEvents(state.view.map((e) => e.id), "prompt(s) shown"));
+  $("#f-del").addEventListener("click", () => delEvents(state.view.map(eventKey), "prompt(s) shown"));
   $("#refresh").addEventListener("click", load);
   $("#theme").addEventListener("click", () => {
     const cur = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
@@ -801,9 +805,13 @@ function bind() {
   $("#drawer").addEventListener("click", async (e) => {
     if (e.target.dataset.close !== undefined) return closeDrawer();
     if (e.target.dataset.del !== undefined) {
-      const id = e.target.dataset.del;
+      const key = {
+        provider: e.target.dataset.provider || "claude",
+        sessionId: e.target.dataset.session || "",
+        id: e.target.dataset.del,
+      };
       closeDrawer();
-      await delEvents([id], "this prompt");
+      await delEvents([key], "this prompt");
       return;
     }
     if (e.target.dataset.raw !== undefined) {

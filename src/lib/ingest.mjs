@@ -12,7 +12,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Bump when the bundled viewer changes so existing projects refresh their copy
 // on the next prompt (after the user re-installs the app via npx).
-export const VIEWER_VERSION = "15";
+export const VIEWER_VERSION = "16";
 
 // Make each project self-contained: copy the viewer + a default config into
 // <project>/.ai-usage/ so it can be viewed in place. Skipped in aggregate mode
@@ -51,9 +51,9 @@ async function storeTurns(turns, cwd, cfg, sessionId) {
   if (!sid) return 0;
 
   const slim = turns.map((t) => applyFieldSelection(t, cfg.fields));
-  await upsertSession(workspaceFile(cwd), sid, slim);
+  const written = await upsertSession(workspaceFile(cwd), sid, slim);
   ensureBundle(cwd);
-  return turns.length;
+  return written;
 }
 
 /**

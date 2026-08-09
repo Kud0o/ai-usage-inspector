@@ -82,7 +82,7 @@ export function contextMax(modelId) {
  * `usage` is the Anthropic usage object from the transcript.
  */
 export function costOf(modelId, usage) {
-  if (!usage) return zeroCost();
+  if (!usage) return { ...zeroCost(), source: "priced" };
   const r = modelInfo(modelId);
   const cc = usage.cache_creation || {};
   // If no breakdown, treat all cache_creation as 5m (the common case).
@@ -102,5 +102,6 @@ export function costOf(modelId, usage) {
     cacheRead,
     cacheWrite,
     total: input + output + cacheRead + cacheWrite,
+    source: "priced",
   };
 }
