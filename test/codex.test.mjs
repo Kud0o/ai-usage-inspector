@@ -10,8 +10,9 @@ function writeJsonl(file, records) {
   fs.writeFileSync(file, records.map((r) => JSON.stringify(r)).join("\n") + "\n");
 }
 
-test("modern Codex events track real prompts and cumulative token deltas", () => {
+test("modern Codex events track real prompts and cumulative token deltas", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-codex-parser-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, "rollout-test.jsonl");
   const rec = (timestamp, type, payload) => ({ timestamp, type, payload });
   writeJsonl(file, [
@@ -78,5 +79,6 @@ test("Codex hook install migrates legacy TOML without deleting unrelated setting
   } finally {
     if (oldHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = oldHome;
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
