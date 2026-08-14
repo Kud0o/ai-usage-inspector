@@ -72,7 +72,7 @@ function restoreEnv(name, previous) {
  * — a locked DB, an unsupported schema, or a single failed ingest leaves the
  * mark where it was so the next run picks the work back up.
  */
-async function rescan(provider, norm) {
+export async function rescan(provider, norm) {
   const { sinceMs, scanStartedAtMs } = scanWindow(provider.id);
   const effectiveSince = Number.isFinite(norm.sinceMs) ? norm.sinceMs : sinceMs;
 

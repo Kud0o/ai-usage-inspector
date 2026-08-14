@@ -206,7 +206,24 @@ function preserveComputedCost(next, previous) {
   return { ...next, cost: previous.cost };
 }
 
-/** Replace one session's records, filtering persistent tombstones. */
+/**
+ * Raised when the usage-file lock could not be taken. Callers must be able to
+ * tell "the write never happened" from "nothing needed writing" — both used to
+ * surface as 0, which let a failed write look like a completed one.
+ */
+export class LockTimeoutError extends Error {
+  constructor(file) {
+    super(`timed out waiting for lock on ${file}`);
+    this.name = "LockTimeoutError";
+    this.code = "ELOCKTIMEOUT";
+  }
+}
+
+/**
+ * Replace one session's records, filtering persistent tombstones. Returns how
+ * many records were accepted; THROWS LockTimeoutError if the lock was never
+ * acquired, so the caller can retry instead of recording a phantom success.
+ */
 export async function upsertSession(file, sessionId, records) {
   const result = await mutateNdjson(file, (existing) => {
     // Read while holding usage lock. Viewer writes tombstone before waiting for
@@ -221,5 +238,6 @@ export async function upsertSession(file, sessionId, records) {
       value: accepted.length,
     };
   });
-  return result === false ? 0 : result.value;
+  if (result === false) throw new LockTimeoutError(file);
+  return result.value;
 }

@@ -250,6 +250,9 @@ async function runSearch() {
 let searchTimer;
 function onSearchInput() {
   clearTimeout(searchTimer);
+  // Drop the previous query's hit set first — keeping it would filter the table
+  // by the OLD term until the new search resolves.
+  state.searchKeys = null;
   apply(); // instant feedback from previews
   searchTimer = setTimeout(async () => {
     await runSearch();
@@ -740,7 +743,7 @@ function textBlock(kind, label, chars, text) {
   return `<div class="block ${kind}"><div class="bh"><span>${label}</span><span>${fmtInt(chars)} chars</span></div>
     <div class="md md-empty muted">— text not stored (the “text” field group is off for this project) —</div></div>`;
 }
-function closeDrawer() { $("#drawer").hidden = true; }
+function closeDrawer() { $("#drawer").hidden = true; flushPendingLive(); }
 
 // ---------- settings panel (this project only) ----------
 const FIELD_META = [
@@ -793,7 +796,7 @@ function openSettings() {
   renderSettings();
   loadConfig().then(renderSettings); // refresh from disk
 }
-function closeSettings() { $("#settings-drawer").hidden = true; }
+function closeSettings() { $("#settings-drawer").hidden = true; flushPendingLive(); }
 
 // ---------- theme (light / dark, persisted; default = system) ----------
 function setTheme(t) {
@@ -893,16 +896,17 @@ function liveRefresh() {
   livePending = false;
   load().catch(() => {});
 }
+// Called whenever a drawer closes — however it was closed — so a refresh that
+// arrived while it was open is applied instead of waiting for the next change.
+function flushPendingLive() {
+  if (livePending) setTimeout(liveRefresh, 0);
+}
 function initLive() {
   if (typeof EventSource !== "function") return;
   try {
     const es = new EventSource("/api/stream");
     es.addEventListener("change", liveRefresh);
   } catch {}
-  // Flush a refresh that arrived while a drawer was open.
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && livePending) setTimeout(liveRefresh, 0);
-  });
 }
 
 bind();
