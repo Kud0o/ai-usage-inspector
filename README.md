@@ -25,21 +25,33 @@ The key idea: providers handle agent-specific details, while storage, privacy co
 pricing, and the dashboard stay shared. You can inspect one project in place, or point
 `AI_USAGE_DIR` at a shared folder for a combined dashboard across all workspaces.
 
+The hook the agent waits on does no work: it spools the payload and exits, and a
+detached worker does the parsing and writing.
+
 ```text
-Claude Code Stop hook   \
-OpenAI Codex Stop hook   +--> provider parser --> .ai-usage/usage.ndjson --> dashboard
-Cursor / OpenCode SQLite /
+Claude Code Stop hook   \                      (returns immediately)
+OpenAI Codex Stop hook   +--> record.mjs --> spool --> worker.mjs --> parser
+Cursor / OpenCode hook  /                                               |
+VS Code agents (scan only, no hook) --------------------------------->  |
+                                                                        v
+                                       .ai-usage/usage.ndjson --> dashboard (live)
 ```
 
 ## Features
 
 - **Multi-provider tracking** - Claude Code, OpenAI Codex, Cursor, OpenCode, and VS Code agents (Cline, Roo Code, Kilo Code) side by side, with provider filters, badges, charts, and cost/token splits.
 - **Per-prompt records** - prompt and response text, input/output/cache/reasoning tokens, model, permission mode, effort, context fill %, USD cost, duration, first-response latency, skills, and tool/subagent/thinking counts when the provider exposes them.
+- **Never blocks your agent** - the hook spools the payload and exits (a few tens of ms over Node's own startup); a detached worker does the parsing, scanning, and writing.
 - **Project-owned privacy controls** - each project owns `.ai-usage/config.json`; turn recording can be enabled/disabled, and field groups can be stripped before writing.
+- **Live dashboard** - the page follows the data as the worker records it, no manual refresh.
+- **Full-text search and export** - search matches the whole stored prompt/response, not a preview, and JSON export contains the complete records.
+- **Deletes that stay deleted** - removing a record writes a tombstone, so the next sync cannot resurrect it.
+- **Costs that don't drift** - a cost this tool computed is kept as recorded; re-syncing never silently reprices history (`sync --reprice` opts in).
 - **Export and budget** - export the filtered view as CSV/JSON, and set an optional monthly USD budget in the settings drawer.
 - **Accurate provider accounting** - Claude streamed message dedupe and subagent attribution; Codex cumulative-token deltas; Cursor SQLite scan with estimated usage when exact local token counts are unavailable; OpenCode SQLite scan with exact tokens and cost read straight from its own database.
+- **Resilient capture** - scans resume from a durable high-water mark instead of a fixed window, writes are lock-guarded and atomic, and a failed write is retried rather than mistaken for success.
 - **Self-contained projects** - each `.ai-usage/` folder holds `usage.ndjson`, `config.json`, and a bundled viewer copy.
-- **Zero dependencies, zero build** - pure Node built-ins on the server and vanilla browser JS on the client.
+- **Zero dependencies, zero build** - pure Node built-ins on the server and vanilla browser JS on the client, covered by 88 tests.
 
 ## Quick start
 
@@ -151,12 +163,20 @@ agents already have on disk (Claude Code under `~/.claude/projects/...`, Codex u
 node install.mjs --sync                                  # at install time
 node ~/.ai-usage-inspector/app/src/sync.mjs              # any time later
 node ~/.ai-usage-inspector/app/src/sync.mjs --provider codex --days 30
+node ~/.ai-usage-inspector/app/src/sync.mjs --reprice          # recompute stored costs
 node ~/.ai-usage-inspector/app/src/sync.mjs --help
 ```
 
 Sync is idempotent (records upsert per session - re-running never duplicates)
 and respects each project's tracking config: projects with tracking disabled
-are skipped, exactly like the hook path.
+are skipped, exactly like the hook path. Records you deleted from the dashboard
+stay deleted: a tombstone is kept per record, and sync honours it.
+
+Re-syncing also leaves the cost of already-recorded turns alone. What a turn cost
+is a fact about when it ran, so rebuilding history at today's rates would quietly
+rewrite it - pass `--reprice` when you actually want that. Costs a tool reports
+itself (OpenCode, Cline/Roo/Kilo) are always taken fresh, since the tool is the
+authority on its own number.
 
 ### 3. View the dashboard
 
@@ -176,6 +196,18 @@ specific port with `--port` (or `$PORT`, or `"port"` in
 `.ai-usage/config.json`). Opening the viewer normally refreshes pricing caches and
 starts a background 7-day sync; use `--no-sync --no-pricing-refresh` for smoke tests,
 CI checks, or offline demos.
+
+The dashboard serves your prompt and response text and exposes a delete API, so it
+binds to `127.0.0.1` only. Set `AI_USAGE_HOST=0.0.0.0` if you deliberately want it
+reachable from elsewhere on your network.
+
+It also updates itself: turns are written by a background worker, so the page
+subscribes to a change feed and reloads as records land - no manual refresh. A
+refresh is held back while a detail drawer is open and applied when you close it.
+
+Search matches the **whole stored prompt and response**, not the 280-character
+preview the table shows, and JSON export contains the complete records rather than
+those previews.
 
 Your filters, sort order, and grouping are saved per project in
 `.ai-usage/config.json`. Add `.ai-usage/` to your project's
@@ -279,17 +311,35 @@ the hook payload shape, transcript/history discovery, parser, pricing table, dyn
 refresh, and install/uninstall wiring. The shared core owns config, field stripping, atomic
 NDJSON upserts, viewer bundling, and the dashboard API.
 
-Hook path:
+Hook path - split in two so the agent never waits on the work:
 
 ```text
-agent stop hook -> src/record.mjs --provider <id> -> provider.buildTurns() -> .ai-usage/usage.ndjson
+agent stop hook -> src/record.mjs  (read stdin, spool, spawn, exit 0)
+                        |
+                   spool file
+                        |
+        src/worker.mjs -> provider.buildTurns() -> .ai-usage/usage.ndjson
 ```
 
-Backfill path:
+`record.mjs` imports no provider, opens no database, and takes no lock; it writes
+the payload to `~/.ai-usage-inspector/spool/` and returns. The detached worker
+claims each spool entry by atomic rename, so two workers never process the same
+event, and a failed entry is retried (attempts capped, poison dropped, stale aged
+out) rather than lost.
+
+Backfill path - synchronous, since it's a CLI you're waiting on:
 
 ```text
 src/sync.mjs -> provider.discoverTranscripts() -> ingestTranscript() -> .ai-usage/usage.ndjson
 ```
+
+Scan-based providers (Cursor, OpenCode) don't rescan a fixed window. Each keeps a
+durable high-water mark in `~/.ai-usage-inspector/scan-state.json` and resumes from
+it with a short overlap, so an outage longer than a day doesn't quietly drop
+history. The mark only advances when a scan both found a healthy store and stored
+everything it found - a locked database, a schema the reader doesn't recognise, or
+a single failed write leaves it where it was, and that scan status is recorded so
+stale capture is visible rather than looking like an idle day.
 
 Every provider emits the same turn-record shape, so the viewer can mix Claude, Codex,
 Cursor, OpenCode, and the VS Code agents in one table without provider-specific UI branches.
@@ -327,8 +377,19 @@ Everything for a project lives **inside that project**, self-contained:
 ```text
 <project>/.ai-usage/
 |-- usage.ndjson     one JSON record per prompt (many sessions)
+|-- tombstones.json  records you deleted, so a later sync cannot bring them back
 |-- config.json      the viewer's saved settings (title, port, filters, sort, grouping)
 `-- viewer/          a copy of the dashboard; run it in place
+```
+
+Machine-wide state lives once, outside your projects:
+
+```text
+~/.ai-usage-inspector/
+|-- app/             the installed copy every hook runs
+|-- spool/           hook payloads waiting for the worker (normally empty)
+|-- scan-state.json  per-provider high-water marks + last scan status
+`-- pricing-*.json   cached rate tables
 ```
 
 The data never touches the agents' own dirs, and the viewer that ships with each project
@@ -339,9 +400,12 @@ only the recorded data + viewer copy are per-project.)
 hook and the viewer, and every project is collected there as `<encoded-cwd>.ndjson` - one
 dashboard across all your workspaces (no per-project bundle in this mode).
 
-**Concurrency:** two sessions in the *same* project use a lock-guarded atomic write
-(`tmp`+rename, stale-lock stealing, skip-on-timeout). Each `Stop` re-derives the whole
-session, so a skipped write self-heals on the next prompt.
+**Concurrency:** concurrent writers to the same project serialise on an
+owner-token lock and write atomically (unique temp file + rename). A lock is only
+stolen once it is genuinely stale, and only ever removed by its owner. If a write
+cannot get the lock it fails loudly rather than reporting success, so the work is
+retried instead of being dropped. Lines that are not valid JSON are carried
+through a rewrite rather than discarded.
 
 ## Notes & caveats
 
@@ -350,6 +414,9 @@ session, so a skipped write self-heals on the next prompt.
 - **Antigravity** is detected but not supported: usage is server-side and local conversation bodies are encrypted, so there is nothing to record.
 - **effort** is Claude-specific; it is read best-effort from `settings.json` at capture time. Other providers leave it blank unless they expose it.
 - **Pricing** ships with built-in fallback tables and refreshes best-effort from provider sources when the viewer starts. The hook path never performs network work.
+- **Cost provenance** is recorded per turn as `cost.source`: `provider` (the tool's own figure), `priced` (computed here from a rate table), or `estimated` (computed from a token estimate). A turn mixing exact and estimated parts counts as estimated, so a guess is never shown as authoritative.
+- **A computed cost is preserved once recorded**, including on the hook path. If a turn were ever captured before it finished, its cost would stay as first recorded until you run `sync --reprice`.
+- **The dashboard binds to `127.0.0.1`.** Override with `AI_USAGE_HOST` only if you intend to expose your prompt text on the network.
 - **context fill %** uses each provider's latest request/input size over the known model context window. Unknown windows fall back to provider defaults.
 - **first-response latency** is transcript-granularity timing, not a direct model-side metric.
 - **Disabling a field group affects new records only** - it does not scrub text or fields already written. Use delete controls to remove old records you do not want.
@@ -358,13 +425,15 @@ session, so a skipped write self-heals on the next prompt.
 ## Project layout
 
 ```
-src/record.mjs                     hook entry point: node record.mjs --provider <id>
+src/record.mjs                     hook launcher: read stdin, spool, spawn worker, exit 0
+src/worker.mjs                     detached spool consumer: parse, scan, write, retry
 src/lib/ingest.mjs                 provider-neutral flow: normalize -> buildTurns -> upsert -> bundle
-src/lib/store.mjs                  lock-guarded atomic per-workspace upsert
+src/lib/store.mjs                  owner-token locks, atomic upsert, tombstones, cost preservation
+src/lib/scan-state.mjs             per-provider scan high-water marks + scan health
 src/lib/config.mjs                 global tracking/field config (copied into the bundle)
 src/lib/paths.mjs                  data dir / cwd-encoding helpers (provider-neutral)
-src/lib/pricing-core.mjs           shared cost object + math
-src/lib/sqlite.mjs                 shared node:sqlite helpers for scan-based providers (Cursor, OpenCode)
+src/lib/pricing-core.mjs           shared cost object + math (incl. cost provenance)
+src/lib/sqlite.mjs                 shared node:sqlite helpers: busy retry, schema check, scan status
 src/providers/index.mjs            provider registry + install-detection
 src/providers/claude/              Claude Code: transcript parser, pricing docs scrape, hook
 src/providers/codex/               OpenAI Codex: rollout parser, models.dev pricing refresh, hooks.json hook
@@ -375,8 +444,29 @@ src/providers/clinefamily/         Cline / Roo Code / Kilo Code: shared ui_messa
 src/sync.mjs                       backfill/sync existing provider history
 viewer/server.mjs                  zero-dep HTTP API + static host (--no-sync / --no-pricing-refresh for smoke/dev)
 viewer/public/                     the dashboard SPA
-install.mjs                        installer (--claude | --codex | --cursor | --opencode | --local | --dashboard | --sync | --update | --uninstall)
+install.mjs                        installer (--claude | --codex | --cursor | --opencode | --cline | --roo | --kilo | --local | --dashboard | --sync | --update | --uninstall)
+test/                              88 tests: every provider, the store, the spool, the HTTP API, the installer
 ```
+
+Run them with `npm test` (Node's built-in runner, no dependencies):
+
+```sh
+npm test
+```
+
+## Dashboard API
+
+The viewer is a small HTTP service, so the data is scriptable without the UI:
+
+| Route | Purpose |
+|---|---|
+| `GET /api/events` | every record as list items (280-char previews, no full text) |
+| `GET /api/search?q=` | full-text match over the stored prompt/response; returns matching record keys |
+| `POST /api/export` | `{keys:[...]}` -> the complete records, prompt and response included |
+| `GET /api/event/:id` | one full record |
+| `GET /api/stream` | server-sent events; emits `change` when the data dir is written |
+| `GET/POST /api/config` | the project's tracking, field, and UI settings |
+| `DELETE /api/events` | `{keys:[...]}` -> tombstone + remove |
 
 ## License
 
