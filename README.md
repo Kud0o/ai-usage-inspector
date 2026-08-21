@@ -29,13 +29,13 @@ The hook the agent waits on does no work: it spools the payload and exits, and a
 detached worker does the parsing and writing.
 
 ```mermaid
-flowchart LR
-  A["Claude / Codex<br/>stop hook"] --> R
+flowchart TD
+  A["Claude / Codex<br/>stop hook"] --> R["record.mjs<br/>spool, then exit 0"]
   B["Cursor / OpenCode<br/>hook is only a trigger"] --> R
-  R["record.mjs<br/>spool, then exit 0"] --> S[("spool file")]
+  R --> S[("spool file")]
   S --> W["worker.mjs<br/>detached"]
   W --> I["ingest<br/>parse + gate"]
-  V["Cline / Roo / Kilo<br/>no hook available"] --> Y["sync.mjs"]
+  V["Cline / Roo / Kilo<br/>no hook"] --> Y["sync.mjs"]
   Y --> I
   I --> D[("usage.ndjson")]
   D --> P["dashboard<br/>updates live"]
@@ -336,7 +336,7 @@ NDJSON upserts, viewer bundling, and the dashboard API.
 Hook path - split in two so the agent never waits on the work:
 
 ```mermaid
-flowchart LR
+flowchart TD
   subgraph clock["on the agent's clock"]
     H["stop hook fires"] --> L["record.mjs<br/>read stdin, spool, spawn, exit 0"]
   end
