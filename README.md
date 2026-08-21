@@ -28,14 +28,22 @@ pricing, and the dashboard stay shared. You can inspect one project in place, or
 The hook the agent waits on does no work: it spools the payload and exits, and a
 detached worker does the parsing and writing.
 
-```text
-Claude Code Stop hook   \                      (returns immediately)
-OpenAI Codex Stop hook   +--> record.mjs --> spool --> worker.mjs --> parser
-Cursor / OpenCode hook  /                                               |
-VS Code agents (scan only, no hook) --------------------------------->  |
-                                                                        v
-                                       .ai-usage/usage.ndjson --> dashboard (live)
+```mermaid
+flowchart LR
+  A["Claude / Codex<br/>stop hook"] --> R
+  B["Cursor / OpenCode<br/>hook is only a trigger"] --> R
+  R["record.mjs<br/>spool, then exit 0"] --> S[("spool file")]
+  S --> W["worker.mjs<br/>detached"]
+  W --> I["ingest<br/>parse + gate"]
+  V["Cline / Roo / Kilo<br/>no hook available"] --> Y["sync.mjs"]
+  Y --> I
+  I --> D[("usage.ndjson")]
+  D --> P["dashboard<br/>updates live"]
 ```
+
+Two ways in, one way through: a live turn is captured the moment an agent stops,
+history already on disk is imported by sync, and both meet at the same ingest step -
+so a record looks identical no matter which path produced it.
 
 ## Features
 
@@ -304,6 +312,20 @@ hook reads the cache locally - it never makes a network call). New models the
 table doesn't know about yet are picked up automatically; their context window
 falls back to a default until the built-in table is updated.
 
+Not every dollar figure is equally trustworthy, so each record says where its number
+came from - and that decides what a re-sync is allowed to do with it:
+
+| `cost.source` | Who worked the number out | On a re-sync |
+|---|---|---|
+| `provider` | the agent itself (OpenCode, Cline / Roo / Kilo) | **always taken fresh** - the tool is the authority on its own number |
+| `priced` | this tool, from a rate table (Claude, Codex, Cursor with exact counts) | **kept as recorded** |
+| `estimated` | this tool, from a token estimate (Cursor with no local counts) | **kept as recorded** |
+
+A cost this tool worked out is a fact about the day the turn ran, so re-importing
+history doesn't quietly restate it at today's rates - pass `--reprice` when you
+actually want that. A turn whose cost mixes exact and estimated parts counts as
+estimated overall, so a guess is never presented as an authoritative figure.
+
 ## How it works
 
 Every supported agent has a provider module under `src/providers/<id>/`. A provider owns
@@ -313,19 +335,37 @@ NDJSON upserts, viewer bundling, and the dashboard API.
 
 Hook path - split in two so the agent never waits on the work:
 
-```text
-agent stop hook -> src/record.mjs  (read stdin, spool, spawn, exit 0)
-                        |
-                   spool file
-                        |
-        src/worker.mjs -> provider.buildTurns() -> .ai-usage/usage.ndjson
+```mermaid
+flowchart LR
+  subgraph clock["on the agent's clock"]
+    H["stop hook fires"] --> L["record.mjs<br/>read stdin, spool, spawn, exit 0"]
+  end
+  L --> F[("spool entry")]
+  F --> K["worker.mjs<br/>parse, scan, lock, write"]
+  K --> N[("usage.ndjson")]
 ```
 
-`record.mjs` imports no provider, opens no database, and takes no lock; it writes
-the payload to `~/.ai-usage-inspector/spool/` and returns. The detached worker
-claims each spool entry by atomic rename, so two workers never process the same
-event, and a failed entry is retried (attempts capped, poison dropped, stale aged
-out) rather than lost.
+Only the boxed step is time the agent pays for. `record.mjs` imports no provider,
+opens no database, and takes no lock; it writes the payload to
+`~/.ai-usage-inspector/spool/` and returns. Measured on Windows the launcher comes
+back in ~158 ms, of which ~110 ms is Node starting up at all - so the tool itself
+costs roughly 50 ms, against a hook that used to hold the agent through a
+transcript parse, a database scan, a lock wait, and a full file rewrite.
+
+A spooled event is not a fire-and-forget gamble. Each entry changes state by atomic
+rename, so exactly one worker can ever claim it, and anything left behind by a
+crashed worker is picked up later:
+
+```mermaid
+stateDiagram-v2
+    [*] --> event: hook spools the payload
+    event --> work: claimed (atomic rename)
+    work --> [*]: stored, entry deleted
+    work --> event: write failed, attempt + 1
+    work --> event: worker died, stale claim reclaimed after 15 min
+    event --> dropped: 3 attempts, or 7 days old
+    dropped --> [*]
+```
 
 Backfill path - synchronous, since it's a CLI you're waiting on:
 
@@ -400,12 +440,25 @@ only the recorded data + viewer copy are per-project.)
 hook and the viewer, and every project is collected there as `<encoded-cwd>.ndjson` - one
 dashboard across all your workspaces (no per-project bundle in this mode).
 
-**Concurrency:** concurrent writers to the same project serialise on an
-owner-token lock and write atomically (unique temp file + rename). A lock is only
-stolen once it is genuinely stale, and only ever removed by its owner. If a write
-cannot get the lock it fails loudly rather than reporting success, so the work is
-retried instead of being dropped. Lines that are not valid JSON are carried
-through a rewrite rather than discarded.
+**Concurrency:** several agent sessions can write to one project at once, so every
+write takes a lock and lands atomically.
+
+```mermaid
+flowchart TD
+  A["worker has turns to store"] --> B{"owner-token lock<br/>taken within 2s?"}
+  B -- no --> E["LockTimeoutError thrown"]
+  E --> F["spool entry kept for a retry<br/>scan mark does not advance past it"]
+  B -- yes --> C["drop tombstoned records<br/>keep costs already computed"]
+  C --> D["unique temp file, then atomic rename"]
+  D --> G["visible to the dashboard"]
+```
+
+The `no` branch matters more than it looks. A write that *could not happen* used to
+report the same `0` as a write that legitimately had nothing to do, so a busy lock
+looked like success and the work was silently dropped. It now throws, which is what
+makes the retry possible. A lock is only stolen once genuinely stale, and only ever
+removed by its owner; lines that are not valid JSON are carried through a rewrite
+rather than discarded.
 
 ## Notes & caveats
 
