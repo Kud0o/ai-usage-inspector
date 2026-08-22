@@ -202,8 +202,12 @@ function installProvider(p) {
 function uninstallProvider(p) {
   try {
     const r = p.uninstall({ scope, cwd: process.cwd() });
-    if (r.removed) ok(`${p.displayName}: removed hook  ${gray(r.file)}`);
-    else skip(`${p.displayName}: no matching hook  ${gray(r.file)}`);
+    // Scan-only providers (the VS Code agents) never registered a hook, so they
+    // have no file to name — say that, rather than printing "null" at the user.
+    const where = r.file ? `  ${gray(r.file)}` : "";
+    if (r.removed) ok(`${p.displayName}: removed hook${where}`);
+    else if (!r.file) skip(`${p.displayName}: nothing to remove (scan-only, never had a hook)`);
+    else skip(`${p.displayName}: no matching hook${where}`);
   } catch (e) {
     skip(`${p.displayName}: uninstall skipped (${e.message})`);
   }
