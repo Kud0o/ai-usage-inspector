@@ -14,7 +14,7 @@ export const PROJECT_DIRNAME = ".ai-usage";
 /**
  * Encode a cwd into a flat, filesystem-safe token used for aggregate-mode
  * filenames: ":" and path separators become "-".
- * e.g. "K:\Projects\Tracker" -> "K--Projects-Tracker".
+ * e.g. "C:\Work\MyApp" -> "C--Work-MyApp".
  * (Matches Claude Code's own project-folder encoding, which the Claude provider
  * also relies on to locate transcripts.)
  */

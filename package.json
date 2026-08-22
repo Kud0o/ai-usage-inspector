@@ -4,6 +4,14 @@
   "description": "Zero-dependency tool that records every AI coding-agent prompt (tokens, model, mode, cost, context %) from Claude Code, OpenAI Codex, Cursor, OpenCode, and VS Code agents (Cline, Roo Code, Kilo Code), and shows it in a local dashboard.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kud0o/ai-usage-inspector.git"
+  },
+  "homepage": "https://github.com/Kud0o/ai-usage-inspector#readme",
+  "bugs": {
+    "url": "https://github.com/Kud0o/ai-usage-inspector/issues"
+  },
   "engines": {
     "node": ">=18"
   },

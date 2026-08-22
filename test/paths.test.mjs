@@ -20,7 +20,7 @@ function withAggregateDir(t, value) {
 }
 
 test("encCwd flattens drives and separators, trimming the edges", () => {
-  assert.equal(encCwd("K:\\Projects\\Tracker"), "K--Projects-Tracker");
+  assert.equal(encCwd("C:\\Work\\MyApp"), "C--Work-MyApp");
   assert.equal(encCwd("/home/me/proj"), "home-me-proj", "leading separator trimmed");
   assert.equal(encCwd("/trailing/"), "trailing");
   assert.equal(encCwd(""), "");
@@ -31,7 +31,7 @@ test("encCwd flattens drives and separators, trimming the edges", () => {
 // the Claude provider can locate transcripts by it — so it cannot be changed
 // unilaterally.
 test("encCwd matches the layout Claude Code itself uses", () => {
-  assert.equal(encCwd("K:\\Projects\\Tracker"), "K--Projects-Tracker");
+  assert.equal(encCwd("C:\\Work\\MyApp"), "C--Work-MyApp");
 });
 
 // KNOWN LIMITATION, pinned deliberately: separators and dashes both collapse to
@@ -53,12 +53,12 @@ test("workspaceFile writes inside the project by default", (t) => {
 
 test("AI_USAGE_DIR switches to one flat file per project", (t) => {
   withAggregateDir(t, "/agg");
-  assert.equal(workspaceFile("K:\\Projects\\Tracker"), path.join("/agg", "K--Projects-Tracker.ndjson"));
+  assert.equal(workspaceFile("C:\\Work\\MyApp"), path.join("/agg", "C--Work-MyApp.ndjson"));
   assert.equal(workspaceFile(""), path.join("/agg", "unknown.ndjson"), "unnameable cwd still lands somewhere");
 });
 
 test("workspaceLabel is the last path segment", () => {
-  assert.equal(workspaceLabel("K:\\Projects\\Tracker"), "Tracker");
+  assert.equal(workspaceLabel("C:\\Work\\MyApp"), "MyApp");
   assert.equal(workspaceLabel("/home/me/proj"), "proj");
   assert.equal(workspaceLabel("/home/me/proj/"), "proj", "trailing separator ignored");
   assert.equal(workspaceLabel(""), "unknown");
