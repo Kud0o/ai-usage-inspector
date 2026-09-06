@@ -197,7 +197,7 @@ from — and that decides what a re-sync may do with it:
 |---|---|---|
 | `provider` | the agent itself (OpenCode, Cline / Roo / Kilo) | **always taken fresh** — it is the authority on its own number |
 | `priced` | this tool, from a rate table (Claude, Codex, Cursor with exact counts) | **kept as recorded** |
-| `estimated` | this tool, from a token estimate (Cursor with no local counts) | **kept as recorded** |
+| `estimated` | this tool, but something in the number was a guess — token counts derived from text length (Cursor with no local counts), or a model with no listed rate, charged at its family default | **kept as recorded** |
 
 A cost this tool worked out is a fact about the day the turn ran, so re-importing history
 does not quietly restate it at today's rates — pass `--reprice` when you want that. A turn
@@ -209,9 +209,12 @@ touches the network. See [pricing refresh](docs/internals.md#pricing-refresh).
 
 ## Caveats
 
-- **Cursor usage can be approximate.** When its local stores hold no exact token counts the
-  provider estimates from text length and marks those rows in the dashboard. OpenCode and
-  the VS Code agents store exact tokens and cost, so their rows are never estimated.
+- **Some rows are approximate, and say so.** A row is marked `≈ estimated` when Cursor's
+  local stores held no exact token counts (it derives them from text length), or when the
+  model has no listed price and is charged at its family default rate. Built-in rates cover
+  current models; the dashboard refreshes them, so a brand-new model is usually only
+  estimated until that first refresh. OpenCode and the VS Code agents report exact tokens
+  and cost themselves, so their rows are never estimated.
 - **`effort` is Claude-specific**, and read from settings at capture time. Other agents
   leave it blank unless they expose it.
 - **`context fill %`** uses the latest request's input size over the known model context

@@ -717,7 +717,12 @@ async function openDrawer(id) {
   if (has("counts") && e.counts) cells.push(
     `<div><div class="k">api calls</div><div class="v">${k.apiCalls} <span class="muted" style="font-size:11px">+${k.subagentCalls} sub</span></div></div>`,
     `<div><div class="k">tools / think</div><div class="v">${k.toolCalls} / ${k.thinkingBlocks}</div></div>`);
-  const estFlag = COST_ESTIMATED(e) ? ` <span class="est-flag" title="Cursor doesn't store exact token counts locally; tokens estimated from text length">≈ estimated</span>` : "";
+  // Approximate for either reason: token counts we derived from text length
+  // (Cursor), or a model with no listed rate, priced at its family default.
+  const estTitle = e.provider === "cursor"
+    ? "Cursor doesn't store exact token counts locally; tokens estimated from text length"
+    : `No listed price for ${e.model || "this model"} — charged at the default rate for its family`;
+  const estFlag = COST_ESTIMATED(e) ? ` <span class="est-flag" title="${esc(estTitle)}">≈ estimated</span>` : "";
   const costSource = c.source || (c.estimated ? "estimated" : "legacy");
   const costBreakdown = has("cost") && e.cost
     ? `<div class="block"><div class="bh"><span>cost breakdown · USD${estFlag}</span></div><pre>input  ${fmtUsd(c.input)}

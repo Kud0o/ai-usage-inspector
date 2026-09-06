@@ -28,7 +28,8 @@ const TABLE = {
 };
 
 // Unknown models default to the Auto pool rate (Cursor's most common mode).
-const FALLBACK = model(1.25, 0.125, 6, 200_000);
+// That rate is a guess, so costs derived from it are labelled "estimated".
+const FALLBACK = { ...model(1.25, 0.125, 6, 200_000), estimated: true };
 
 // Rates fetched from cursor.com's pricing docs (see remote-pricing.mjs),
 // applied at import from the on-disk cache the viewer refreshes.
@@ -79,5 +80,12 @@ export function costOf(modelId, tokens) {
   const input = (Math.max(0, tokens.input || 0) * r.input) / M;
   const cacheRead = (Math.max(0, tokens.cached || 0) * r.cachedInput) / M;
   const output = (Math.max(0, tokens.output || 0) * r.output) / M;
-  return { input, output, cacheRead, cacheWrite: 0, total: input + cacheRead + output, source: "priced" };
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite: 0,
+    total: input + cacheRead + output,
+    source: r.estimated ? "estimated" : "priced",
+  };
 }

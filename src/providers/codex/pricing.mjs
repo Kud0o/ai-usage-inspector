@@ -29,8 +29,9 @@ const TABLE = {
   "chat-latest": model(5, 0.5, 30, 400_000),
 };
 
-// Unknown Codex models default to the codex-tier rate.
-const FALLBACK = model(1.75, 0.175, 14, 400_000);
+// Unknown Codex models default to the codex-tier rate. That rate is a guess, so
+// costs derived from it are labelled "estimated" rather than "priced".
+const FALLBACK = { ...model(1.75, 0.175, 14, 400_000), estimated: true };
 
 // Rates fetched from models.dev (see remote-pricing.mjs), keyed like TABLE.
 // Applied at import from the on-disk cache the viewer refreshes — so newly
@@ -84,5 +85,12 @@ export function costOf(modelId, tokens) {
   const input = (Math.max(0, tokens.input || 0) * r.input) / M;
   const cacheRead = (Math.max(0, tokens.cached || 0) * r.cachedInput) / M;
   const output = (Math.max(0, tokens.output || 0) * r.output) / M;
-  return { input, output, cacheRead, cacheWrite: 0, total: input + cacheRead + output, source: "priced" };
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite: 0,
+    total: input + cacheRead + output,
+    source: r.estimated ? "estimated" : "priced",
+  };
 }

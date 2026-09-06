@@ -33,7 +33,10 @@ const TABLE = {
   "claude-haiku-4-5": model(1, 5, 200_000),
 };
 
-const FALLBACK = model(5, 25, 200_000);
+// Unknown Claude models fall back to the current Opus tier. The rate is a
+// guess, so entries built from it carry `estimated` and any cost derived from
+// them is labelled "estimated" rather than "priced".
+const FALLBACK = { ...model(5, 25, 200_000), estimated: true };
 
 // Rates fetched from the pricing docs, keyed like TABLE. Carry only input/output
 // (the docs don't list context windows), so the context max falls back to the
@@ -102,6 +105,6 @@ export function costOf(modelId, usage) {
     cacheRead,
     cacheWrite,
     total: input + output + cacheRead + cacheWrite,
-    source: "priced",
+    source: r.estimated ? "estimated" : "priced",
   };
 }

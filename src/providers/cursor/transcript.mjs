@@ -163,15 +163,18 @@ function finalizeTurn(t, ctx) {
   const ts = ctx.createdTs;
   const endTs = ctx.last ? ctx.updatedTs || ts : ts;
 
+  // Two independent reasons a cost can be approximate: tokens we derived from
+  // text length, or a model we have no listed rate for (costOf says which).
+  const approx = estimated || cost.source === "estimated";
   const costOut = {
     input: cost.input,
     output: cost.output,
     cacheWrite: 0,
     cacheRead: cost.cacheRead,
     total: cost.total,
-    source: estimated ? "estimated" : "priced",
+    source: approx ? "estimated" : "priced",
   };
-  if (estimated) costOut.estimated = true;
+  if (approx) costOut.estimated = true;
 
   return {
     id: `${ctx.composerId}:${ctx.index}`,

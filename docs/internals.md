@@ -110,7 +110,9 @@ which handles tool loops and multiple model calls inside one response.
 (`state.vscdb`), maps composer conversations back to workspaces via `workspace.json`, and
 orders bubbles by `fullConversationHeadersOnly` rather than insertion order. When Cursor
 has no per-message token counts it estimates from text length (~4 chars/token) and marks
-the cost `estimated`.
+the cost `estimated`. Every table also carries a fallback tier for models it has never
+heard of; a cost derived from that tier is labelled `estimated` too, so a guessed rate is
+never presented as a looked-up one.
 
 **OpenCode** — a `session.idle` plugin is the trigger.
 [`src/providers/opencode/`](../src/providers/opencode/) scans `opencode.db`, segments each
