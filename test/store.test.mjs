@@ -266,3 +266,50 @@ test("a malformed cost is not treated as an equal amount", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Correction is one-way. As the rate cache warms and cools, the same amount can
+// arrive from a looked-up rate one day and a fallback the next; accepting
+// whichever label came last makes the ≈ marker flicker between syncs.
+test("provenance never travels back from estimated to priced", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-mono-"));
+  const file = path.join(dir, "usage.ndjson");
+  const amount = { input: 0.01, output: 0, cacheWrite: 0, cacheRead: 0, total: 0.01 };
+  const write = (source) => upsertSession(file, "s1", [
+    { provider: "claude", sessionId: "s1", id: "a", cost: { ...amount, source } },
+  ]);
+  try {
+    await write("priced");
+    await write("estimated");
+    assert.equal(validRecords(file)[0].cost.source, "estimated", "corrected toward caution");
+    await write("priced");
+    assert.equal(validRecords(file)[0].cost.source, "estimated", "and it stays there");
+    await write("priced");
+    assert.equal(validRecords(file)[0].cost.source, "estimated", "no flapping across syncs");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A row written when the identity fallback produced "undefined:<ts>" has no
+// session to match on, so scoped replacement would leave it beside its own
+// corrected row and double-count the turn.
+test("a session-less legacy row is replaced, not duplicated", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-orphan-"));
+  const file = path.join(dir, "usage.ndjson");
+  try {
+    fs.writeFileSync(file, JSON.stringify({
+      provider: "claude", id: "undefined:2026-01-01T00:00:00.000Z",
+      cost: { total: 1, source: "priced" },
+    }) + "\n");
+    await upsertSession(file, "sess-from-filename", [{
+      provider: "claude", sessionId: "sess-from-filename",
+      id: "sess-from-filename:2026-01-01T00:00:00.000Z:0",
+      cost: { total: 1, source: "priced" },
+    }]);
+    const rows = validRecords(file);
+    assert.equal(rows.length, 1, "the orphan is gone, not sitting beside its replacement");
+    assert.equal(rows[0].sessionId, "sess-from-filename");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

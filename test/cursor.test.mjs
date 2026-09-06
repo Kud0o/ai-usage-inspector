@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { applyRemoteRates as applyCursorRates } from "../src/providers/cursor/pricing.mjs";
 
 // Cursor is read out of real SQLite, so these need node:sqlite (Node >= 22.5) —
 // the same gate the provider itself degrades on.
@@ -98,8 +99,21 @@ test("exact per-bubble token usage is used and not marked estimated", needsSqlit
   assert.equal(turn.usage.input, 900);
   assert.equal(turn.usage.output, 120);
   assert.equal(turn.usage.cacheRead, 40);
-  assert.equal(turn.cost.source, "priced");
-  assert.equal(turn.cost.estimated, undefined, "real counts must not be flagged estimated");
+  // Cursor publishes no cache-read rate, so the machine cache (if any) supplies a
+  // guessed one and the cost is honestly an estimate. Pin a known rate first so
+  // this asserts the token behaviour it is named for, not the ambient cache.
+  applyCursorRates({ "claude-4-sonnet": { input: 3, cachedInput: 0.3, output: 15, cachedGuessed: false } });
+  const priced = (await p.buildTurns(found[0].transcriptPath, found[0].opts))[0];
+  assert.equal(priced.cost.source, "priced");
+  assert.equal(priced.cost.estimated, undefined, "real counts must not be flagged estimated");
+
+  // And with the rate itself a guess, the same exact tokens yield an estimate —
+  // the tokens are still exact, so the reason has to be recorded separately.
+  applyCursorRates({ "claude-4-sonnet": { input: 3, cachedInput: 0.3, output: 15, cachedGuessed: true } });
+  const guessed = (await p.buildTurns(found[0].transcriptPath, found[0].opts))[0];
+  assert.equal(guessed.usage.input, 900, "tokens are still the exact ones");
+  assert.equal(guessed.cost.source, "estimated");
+  assert.equal(guessed.cost.estimatedRate, true, "and it says the RATE was the guess");
 });
 
 test("missing token usage falls back to a flagged estimate", needsSqlite, async (t) => {

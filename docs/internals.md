@@ -111,6 +111,15 @@ it widens no scope. What it changes is timing: history arrives after a turn rath
 someone opens the dashboard. Set `"autoSweep": false` in `~/.ai-usage-inspector/config.json` to go
 back to importing on demand.
 
+A `--local` install means "this project only", so its worker does not sweep at all — the project
+still records its own turns through the hook. The sweep also waits for the spool to go quiet:
+another worker holding a claimed envelope is still writing the very sessions a scan would parse,
+and parsing happens before the write lock is taken.
+
+Pricing caches carry a schema version. Files written before the cache recorded *which* rates were
+guessed are reinterpreted on read — a cache rate exactly equal to 10% of the input rate is the
+synthesis this tool applies when a provider publishes none, so it is marked rather than trusted.
+
 ## What each provider reads
 
 **Claude Code** — three transcript realities make the numbers trustworthy

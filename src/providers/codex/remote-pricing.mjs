@@ -59,9 +59,31 @@ function writeCache(file, data) {
 }
 
 /** Cached rate map or null. Sync, never throws. */
+// Cache format version. Files written before the cache recorded WHICH rates were
+// guessed carry no marker, so a synthesized cache rate in them would read as a
+// looked-up one. Bumped when the entry shape changes meaning.
+export const CACHE_SCHEMA = 2;
+
+/**
+ * Rates from the on-disk cache, with pre-v2 files reinterpreted.
+ *
+ * A v1 file stored the synthesized cache rate (input * 0.1) with nothing to
+ * distinguish it from a published one. Recover that distinction by recognising
+ * the synthesis, rather than discarding the cache and pricing everything at the
+ * built-in fallback until the next refresh.
+ */
 export function readCachedRates(file = CACHE_FILE) {
   const c = readCache(file);
-  return c && c.rates ? c.rates : null;
+  if (!c || !c.rates) return null;
+  if (c.schema >= CACHE_SCHEMA) return c.rates;
+  const out = {};
+  for (const [id, r] of Object.entries(c.rates)) {
+    if (!r || typeof r !== "object") continue;
+    const synthesized = typeof r.input === "number" && typeof r.cachedInput === "number"
+      && Math.abs(r.cachedInput - r.input * 0.1) < 1e-12;
+    out[id] = { ...r, cachedGuessed: synthesized };
+  }
+  return out;
 }
 
 // Content diff — how we know pricing actually changed (no version/ETag to rely on).
@@ -130,9 +152,9 @@ export async function refreshPricing({
 
   const changes = diffRates(cached && cached.rates, rates);
   if (cached && changes.length === 0) {
-    writeCache(file, { ...cached, fetchedAt: now, rates });
+    writeCache(file, { ...cached, schema: CACHE_SCHEMA, fetchedAt: now, rates });
     return { status: "unchanged", rates };
   }
-  writeCache(file, { fetchedAt: now, source: url, rates });
+  writeCache(file, { schema: CACHE_SCHEMA, fetchedAt: now, source: url, rates });
   return { status: "updated", rates, changes };
 }

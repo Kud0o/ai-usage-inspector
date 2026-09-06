@@ -220,7 +220,12 @@ function preserveComputedCost(next, previous) {
   // we now know the same number came from a guessed rate, say so. Without this a
   // row mislabelled by an older version stays mislabelled forever, because the
   // only escape was --reprice, which also restates the amount at today's rates.
-  if (sameAmount(previous.cost, next.cost)) return next;
+  // Only ever toward the more cautious label: a row known to rest on a guess
+  // stays marked, even if a later scan happens to price it exactly.
+  if (sameAmount(previous.cost, next.cost)
+      && previous.cost.source === "priced" && next.cost.source === "estimated") {
+    return next;
+  }
   return { ...next, cost: previous.cost };
 }
 
@@ -250,7 +255,12 @@ export async function upsertSession(file, sessionId, records) {
   const replaces = (r) => {
     if (provider === null) return false; // nothing to replace with
     const rp = r && r.provider ? String(r.provider) : "claude";
-    return rp === provider && r.sessionId === sessionId;
+    if (rp !== provider) return false;
+    if (r.sessionId === sessionId) return true;
+    // Rows an older version wrote with no session at all: their id was built as
+    // "undefined:<timestamp>". Left alone they would sit beside the corrected
+    // row forever, double-counting the same turn.
+    return r.sessionId == null && typeof r.id === "string" && r.id.startsWith("undefined:");
   };
   const result = await mutateNdjson(file, (existing) => {
     // Read while holding usage lock. Viewer writes tombstone before waiting for

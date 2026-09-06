@@ -235,20 +235,44 @@ const SWEEP_THROTTLE_MS = 60 * 1000;
  * Best-effort by design -- a provider that cannot be read leaves its watermark
  * where it was and gets retried next time.
  */
+// Global hook registrations. A hook recorded here means the user installed for
+// the whole machine; a --local install writes into <project>/.claude/ instead.
+const GLOBAL_HOOK_FILES = [
+  path.join(os.homedir(), ".claude", "settings.json"),
+  path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "hooks.json"),
+  path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "config.toml"),
+  path.join(os.homedir(), ".config", "opencode", "plugins", "ai-usage-inspector.js"),
+];
+
+/** Did the user install this tool for the machine, rather than one project? */
+function hasGlobalInstall() {
+  for (const file of GLOBAL_HOOK_FILES) {
+    try {
+      if (fs.readFileSync(file, "utf8").includes("record.mjs")) return true;
+    } catch {}
+  }
+  return false;
+}
+
 /**
  * Providers the automatic sweep may look at.
  *
  * This is the same set `sync.mjs` and the dashboard's scan-on-start already use
- * (every detected agent), so sweeping widens no scope. What it does change is
- * timing: history is imported after a turn instead of only when someone opens
- * the dashboard. Set "autoSweep": false in ~/.ai-usage-inspector/config.json to
- * turn that off and go back to importing on demand.
+ * (every detected agent), so a global install sweeps no wider than before. What
+ * it changes is timing: history is imported after a turn instead of only when
+ * someone opens the dashboard. Set "autoSweep": false in
+ * ~/.ai-usage-inspector/config.json to turn that off.
+ *
+ * A `--local` install means "this project only". Its worker must not go looking
+ * through every other agent's history on the machine, so it does not sweep at
+ * all — the project's own turns still arrive through the hook.
  */
 function installedForSweep() {
   try {
     const raw = JSON.parse(fs.readFileSync(globalConfigPath(), "utf8"));
     if (raw && raw.autoSweep === false) return [];
   } catch {}
+  if (!hasGlobalInstall()) return [];
   return detectInstalled();
 }
 
@@ -273,10 +297,36 @@ export async function sweepProviders({
   return swept;
 }
 
+/** Is another worker still holding a claimed envelope? */
+function spoolBusy(dir = defaultSpoolDir()) {
+  try {
+    return fs.readdirSync(dir).some((name) => name.endsWith(".work"));
+  } catch {
+    return false;
+  }
+}
+
+/** Any envelope left to process? */
+function spoolPending(dir = defaultSpoolDir()) {
+  try {
+    return fs.readdirSync(dir).some((name) => name.endsWith(".event"));
+  } catch {
+    return false;
+  }
+}
+
 async function main() {
-  try { await drainSpool(); } catch {}
-  // Only after the spool is empty: a claimed envelope must not be held open
-  // while this walks other providers' stores.
+  // One pass only enumerates the spool once, so an event that lands mid-drain is
+  // left for the next worker. Loop until the spool is actually quiet — bounded,
+  // because a spool that keeps refilling is another worker's job, not ours.
+  for (let pass = 0; pass < 5; pass++) {
+    try { await drainSpool(); } catch {}
+    if (!spoolPending()) break;
+  }
+  // Only once nothing is in flight. Another worker holding a claimed envelope is
+  // still writing the very sessions a scan would parse, and parsing happens
+  // before the write lock is taken.
+  if (spoolPending() || spoolBusy()) return;
   try { await sweepProviders(); } catch {}
 }
 
