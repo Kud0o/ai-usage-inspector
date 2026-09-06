@@ -34,7 +34,7 @@ src/sync.mjs -> provider.discoverTranscripts() -> ingestTranscript() -> .ai-usag
 ## The spool
 
 A spooled event is not a fire-and-forget gamble. Each entry changes state by atomic
-rename, so exactly one worker can ever claim it, and anything left behind by a crashed
+rename, so only one worker can claim a given entry, and anything left behind by a crashed
 worker is picked up later:
 
 ```mermaid
@@ -71,7 +71,8 @@ the same `0` as a write that legitimately had nothing to do, so a busy lock look
 success and the work was silently dropped. It now throws, which is what makes the retry
 possible.
 
-A lock is only stolen once genuinely stale, and only ever removed by its owner. Lines that
+A lock is stolen only once older than the staleness window — age is the only evidence available
+that its owner died — and is only ever removed by its owner. Lines that
 are not valid JSON are carried through a rewrite rather than discarded. Twelve processes
 writing one file at once lose nothing.
 
@@ -280,6 +281,54 @@ test/                      88 tests: every provider, the store, the spool, the A
 ```sh
 npm test      # Node's built-in runner, no dependencies
 ```
+
+## The numbers behind all this
+
+Values worth knowing before they surprise you. All are constants in the source, not settings.
+
+**Capture** ([`src/record.mjs`](../src/record.mjs))
+
+| | |
+|---|---|
+| stdin ceiling | 1 MiB — a larger payload is truncated and marked, never held |
+| stdin idle cutoff | 150 ms with no new bytes ends the read |
+| stdin hard cutoff | 2 s, whatever the agent is doing |
+| exit code | always 0, so a failure here can never fail your turn |
+
+**Retry** ([`src/worker.mjs`](../src/worker.mjs))
+
+| | |
+|---|---|
+| attempts per entry | 3, then the entry is dropped |
+| entry expiry | 7 days by mtime |
+| envelope that can never succeed | deleted at once, not retried — bad JSON, wrong schema, or an unknown provider |
+| recovery of an orphan | needs a later worker to start; nothing polls |
+
+**Sweeping**
+
+| | |
+|---|---|
+| scope | every detected agent that implements discovery — not only the hookless ones |
+| first window | 24 hours back, then from the provider's own watermark with 5 minutes of overlap |
+| throttle | one sweep per provider per minute |
+| lease | 15 minutes, released by the scan's own result, expiring if the worker dies |
+| starvation escape | after 15 minutes with a provider unswept, a sweep runs even on a busy spool |
+| `autoSweep: false` | stops the automatic sweep only. A Cursor or OpenCode stop hook still triggers that provider's own rescan, because that is how those two capture at all |
+
+**Importing history**
+
+| | |
+|---|---|
+| `sync --days N` | filters on transcript modification time, then imports each qualifying session whole — it does not filter individual turns |
+| dashboard start | spawns a detached `sync --days 7`, only when the globally installed app exists. Disable with `--no-sync` |
+| pricing refresh | on dashboard start, over the network. Disable with `--no-pricing-refresh`. The hook and sweep paths never fetch |
+| first import of old history | priced at today's rates, since no rate is recorded in the transcript |
+
+**Aggregate mode** (`install.mjs --dashboard`)
+
+Pools every project into `~/.ai-usage-inspector/aggregate`, one `<encoded-cwd>.ndjson` per project.
+There is no per-project folder, so that dashboard's own `config.json` governs tracking and fields
+for the whole pool.
 
 ## Known limits
 

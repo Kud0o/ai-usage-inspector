@@ -13,7 +13,8 @@
 
 ---
 
-Your coding agent spends tokens on every prompt. This records what each one actually cost —
+Your coding agent spends tokens on every prompt. This records what each one cost — priced from
+published rates, or taken from the agent when it reports its own —
 locally, in the project it happened in — and gives that project its own dashboard.
 
 It tracks **Claude Code**, **OpenAI Codex**, **Cursor**, **OpenCode**, and the VS Code
@@ -78,7 +79,7 @@ npx -y github:Kud0o/ai-usage-inspector --uninstall   # remove the hooks
 | Claude Code | `~/.claude/projects/.../*.jsonl` | `~/.claude/settings.json` | Exact usage, streamed-message dedupe, subagent attribution, skills |
 | OpenAI Codex | `~/.codex/sessions/.../rollout-*.jsonl` | `~/.codex/hooks.json` | Cumulative token deltas per turn |
 | Cursor | `state.vscdb` SQLite stores | `~/.cursor/hooks.json` | Needs Node >= 22.5. Estimates tokens when Cursor stores no exact counts |
-| OpenCode | `~/.local/share/opencode/opencode.db` | `~/.config/opencode/plugins/` | Needs Node >= 22.5. Exact tokens **and cost from its own database** |
+| OpenCode | `~/.local/share/opencode/opencode.db` | `~/.config/opencode/plugins/` | Needs Node >= 22.5. Tokens **and cost as OpenCode recorded them**; a session whose per-message accounting is incomplete is stored as one rolled-up row |
 | Cline · Roo · Kilo | `<VSCode>/User/globalStorage/<extId>/tasks/` | none — scan only | Tokens and cost as the extension recorded them. VS Code extensions cannot run a turn-end hook, so these arrive on sync or on the sweep any other agent triggers |
 
 **Requirements:** Node >= 18, or >= 22.5 for Cursor and OpenCode (they are read from SQLite
@@ -128,6 +129,8 @@ deleted: a tombstone is kept per record, and sync honours it.
 ```sh
 node .ai-usage/viewer/server.mjs                 # first free port from 4317
 node .ai-usage/viewer/server.mjs --port 8080     # pinned: fails if taken, rather than moving
+node .ai-usage/viewer/server.mjs --no-sync       # do not import the last 7 days on start
+node .ai-usage/viewer/server.mjs --no-pricing-refresh   # do not fetch rates on start
 ```
 
 - **Summary cards** — prompts, tokens, active time, first-response latency, top model, busiest workspace, this-month cost against an optional budget. With more than one agent in view, cost carries a per-agent split and a **by agent** breakdown appears.
@@ -135,10 +138,10 @@ node .ai-usage/viewer/server.mjs --port 8080     # pinned: fails if taken, rathe
 - **Filter bar** — provider, platform, workspace, model, mode, effort, date, minimum context %, and free-text search. Export the filtered view as CSV or JSON.
 - **Table and detail drawer** — grouped by workspace → session → prompt, with rendered Markdown, usage, timing, cost, and metadata per turn.
 - **Settings** — per project: tracking on/off, which field groups to store, monthly budget.
-- **Delete** — remove the filtered records or a single prompt, with confirmation and the disk space freed.
+- **Delete** — remove the filtered records or a single prompt, with confirmation and the space the records freed. A small tombstone is kept for each, so a re-sync cannot resurrect it.
 
 Search matches the **whole stored prompt and response**, not the 280-character preview the
-table shows, and JSON export contains the complete records. The page subscribes to a change
+table shows, and JSON export fetches the full stored records — falling back to those previews, and saying so, if that fetch fails. The page subscribes to a change
 feed and refreshes itself as the worker records new turns.
 
 > The dashboard serves your prompt text and exposes a delete API, so it binds to
@@ -190,8 +193,9 @@ database, and takes no lock — it writes the payload to the spool and returns. 
 Windows it comes back in 160-210 ms depending on the machine, and most of that is Node
 starting up at all (~110-125 ms measured bare), so the tool itself costs roughly 50-80 ms.
 
-Nothing is lost in the handover: spool entries are claimed by atomic rename, and a failed
-write is retried rather than dropped. See [the spool](docs/internals.md#the-spool) and
+The handover is built not to drop work: spool entries are claimed by atomic rename, and a
+failed write is retried rather than dropped. A turn is given up only after three attempts
+or seven days, and a payload over 1 MiB is truncated rather than held. See [the spool](docs/internals.md#the-spool) and
 [the write](docs/internals.md#the-write).
 
 ### Work you delegate to another agent
@@ -203,8 +207,9 @@ Their cost is real and it belongs to the same project.
 So after the worker has drained the spool, it also sweeps every installed provider for work that
 arrived without a hook. That happens in the already-detached worker, off the agent's clock, and is
 throttled so a burst of turns does not re-walk every store. The next turn from any agent pulls in
-whatever the delegated one spent — typically within seconds, without the delegate skill having to
-cooperate.
+whatever the delegated one spent, without the delegate skill having to cooperate. How soon depends
+on the next turn arriving: a provider is swept at most once a minute, and only if its agent was
+detected at all.
 
 Delegated turns land in the project the delegate itself reports as its working directory, so a run
 launched against your repo is filed under your repo, not under wherever the launcher happened to be.
@@ -243,7 +248,9 @@ mixing exact and estimated parts counts as estimated overall, so a guess is neve
 authoritative.
 
 Rates ship built-in and refresh best-effort when the dashboard starts; the hook path never
-touches the network. See [pricing refresh](docs/internals.md#pricing-refresh).
+touches the network. See [pricing refresh](docs/internals.md#pricing-refresh), and
+[the numbers behind all this](docs/internals.md#the-numbers-behind-all-this) for the limits,
+windows and retry bounds these paths run under.
 
 ## Caveats
 
