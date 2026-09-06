@@ -27,26 +27,27 @@ flowchart TD
   R --> S[("spool file")]
   S --> W["worker.mjs<br/>detached"]
   W --> I["ingest<br/>parse + gate"]
-  W -. "then sweeps for<br/>work that fired no hook" .-> V
-  V["Cline / Roo / Kilo<br/>delegated CLI runs"] --> I
-  Y["sync.mjs / dashboard<br/>on demand"] --> I
+  W -. "then sweeps every<br/>detected agent" .-> I
+  V["VS Code agents<br/>nothing to hook"] --> Y["sync.mjs<br/>manual, or 7 days on dashboard start"]
+  Y --> I
   I --> D[("usage.ndjson")]
   D --> P["dashboard<br/>updates live"]
 ```
 
-Two ways in, one way through: a live turn is captured the moment an agent stops, and work
-that fires no hook — a VS Code agent, or a CLI another agent launched — is swept up by the
-same detached worker straight afterwards. Both meet at the same ingest step, and `sync.mjs`
-or opening the dashboard runs that sweep on demand.
+Two ways in, one way through. A live turn is captured the moment an agent stops. Anything
+that fired no hook — a VS Code agent, or a CLI another agent launched — is picked up by the
+sweep the same detached worker runs straight afterwards, or by `sync.mjs`, which the
+dashboard also starts in the background over the last seven days. Everything meets at the
+same ingest step.
 
 ## Features
 
 - **Multi-agent, one table** — seven agents side by side, with provider filters, badges, charts, and cost/token splits.
 - **Per-prompt detail** — prompt and response text, input/output/cache/reasoning tokens, model, permission mode, context fill %, USD cost, duration, first-response latency, skills, and tool/subagent counts where the agent exposes them.
-- **Never blocks your agent** — the hook spools the payload and exits; a detached worker does the parsing and writing.
+- **Stays out of your agent’s way** — the hook writes the payload to a spool file and exits; a detached worker does the parsing and writing. It reads stdin with a 150 ms idle cutoff and a two-second ceiling, so it returns even if the agent leaves the pipe open.
 - **Yours, locally** — records live in your project, tracking can be turned off per project, and whole field groups (including the prompt text) can be stripped before anything is written.
 - **Live dashboard** — the page follows the data as it is recorded, with full-text search, CSV/JSON export, and an optional monthly budget.
-- **Zero dependencies, zero build** — pure Node built-ins and vanilla browser JS, covered by 88 tests.
+- **Zero dependencies, zero build** — pure Node built-ins and vanilla browser JS, covered by 129 tests.
 
 ## Quick start
 
@@ -54,7 +55,7 @@ or opening the dashboard runs that sweep on demand.
 npx -y github:Kud0o/ai-usage-inspector
 ```
 
-That auto-detects the agents you have installed and registers each hook it can. Then just
+That looks for each agent’s own data directory, and registers a hook wherever one can run. Then just
 use your agent — each project becomes self-contained, with its data, its own copy of the
 viewer, and your saved view settings in `<project>/.ai-usage/`. To look:
 
@@ -78,7 +79,7 @@ npx -y github:Kud0o/ai-usage-inspector --uninstall   # remove the hooks
 | OpenAI Codex | `~/.codex/sessions/.../rollout-*.jsonl` | `~/.codex/hooks.json` | Cumulative token deltas per turn |
 | Cursor | `state.vscdb` SQLite stores | `~/.cursor/hooks.json` | Needs Node >= 22.5. Estimates tokens when Cursor stores no exact counts |
 | OpenCode | `~/.local/share/opencode/opencode.db` | `~/.config/opencode/plugins/` | Needs Node >= 22.5. Exact tokens **and cost from its own database** |
-| Cline · Roo · Kilo | `<VSCode>/User/globalStorage/<extId>/tasks/` | none — scan only | Exact tokens + cost. VS Code extensions cannot run a turn-end hook, so these are captured on sync |
+| Cline · Roo · Kilo | `<VSCode>/User/globalStorage/<extId>/tasks/` | none — scan only | Tokens and cost as the extension recorded them. VS Code extensions cannot run a turn-end hook, so these arrive on sync or on the sweep any other agent triggers |
 
 **Requirements:** Node >= 18, or >= 22.5 for Cursor and OpenCode (they are read from SQLite
 via the built-in `node:sqlite`).
@@ -109,13 +110,13 @@ deliberately skips new or changed command hooks until their definition is review
 
 ### Importing history you already have
 
-Hooks only record from install time forward. To import what the agents already have on disk:
+A hook reparses the session it fires on, so its earlier turns arrive too, and the automatic sweep looks back a day on first run. To import everything the agents already have on disk:
 
 ```sh
 node ~/.ai-usage-inspector/app/src/sync.mjs                      # everything
 node ~/.ai-usage-inspector/app/src/sync.mjs --provider codex --days 30
 node ~/.ai-usage-inspector/app/src/sync.mjs --reprice            # recompute stored costs
-node ~/.ai-usage-inspector/app/src/sync.mjs --relabel            # fix provenance, keep the amounts
+node ~/.ai-usage-inspector/app/src/sync.mjs --relabel            # refresh provenance where the amount is unchanged
 ```
 
 Sync is idempotent — records upsert per session, so re-running never duplicates — and it
@@ -126,12 +127,12 @@ deleted: a tombstone is kept per record, and sync honours it.
 
 ```sh
 node .ai-usage/viewer/server.mjs                 # first free port from 4317
-node .ai-usage/viewer/server.mjs --port 8080
+node .ai-usage/viewer/server.mjs --port 8080     # pinned: fails if taken, rather than moving
 ```
 
 - **Summary cards** — prompts, tokens, active time, first-response latency, top model, busiest workspace, this-month cost against an optional budget. With more than one agent in view, cost carries a per-agent split and a **by agent** breakdown appears.
 - **Charts** — tokens over time, context-fill distribution, permission mode, turns by model, skills invoked, cost per day, and per-agent splits.
-- **Filter bar** — provider, workspace, model, mode, effort, date, minimum context %, and free-text search. Export the filtered view as CSV or JSON.
+- **Filter bar** — provider, platform, workspace, model, mode, effort, date, minimum context %, and free-text search. Export the filtered view as CSV or JSON.
 - **Table and detail drawer** — grouped by workspace → session → prompt, with rendered Markdown, usage, timing, cost, and metadata per turn.
 - **Settings** — per project: tracking on/off, which field groups to store, monthly budget.
 - **Delete** — remove the filtered records or a single prompt, with confirmation and the disk space freed.
