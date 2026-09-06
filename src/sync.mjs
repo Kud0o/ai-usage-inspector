@@ -7,6 +7,7 @@
 //   node sync.mjs --provider codex     # one provider
 //   node sync.mjs --days 30            # only transcripts modified in the last N days
 //   node sync.mjs --reprice            # recompute stored costs at today's rates
+//   node sync.mjs --relabel            # refresh cost provenance, keep the amounts
 //
 // Idempotent: records upsert per sessionId, so re-running never duplicates.
 // Re-syncing also does NOT rewrite costs this tool computed for old turns —
@@ -33,11 +34,13 @@ function help() {
     node src/sync.mjs --provider claude|codex|cursor|opencode|cline|roo|kilo
     node src/sync.mjs --days 30
     node src/sync.mjs --reprice
+    node src/sync.mjs --relabel
 
   Imports existing provider history into per-project .ai-usage records.
 
   Costs this tool computed for turns already recorded are kept as-is on a
-  re-sync; pass --reprice to recompute them at today's rates.
+  re-sync; pass --reprice to recompute them at today's rates, or
+  --relabel to refresh only their provenance and leave the amounts as recorded.
 `);
 }
 
@@ -45,7 +48,7 @@ function validateArgs() {
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--help" || a === "-h" || a === "--reprice") continue;
+    if (a === "--help" || a === "-h" || a === "--reprice" || a === "--relabel") continue;
     if (a === "--provider" || a === "--days") {
       if (!argv[i + 1] || argv[i + 1].startsWith("-")) {
         throw new Error(`${a} requires a value`);
@@ -83,6 +86,11 @@ async function main() {
   if (reprice) {
     process.env.AI_USAGE_REPRICE = "1";
     console.log("  repricing: stored costs will be recomputed at today's rates");
+  }
+  // Correct provenance without touching the amounts.
+  if (process.argv.includes("--relabel")) {
+    process.env.AI_USAGE_RELABEL = "1";
+    console.log("  relabelling: cost provenance refreshed, amounts left as recorded");
   }
 
   const providers = wanted

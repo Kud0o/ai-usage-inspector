@@ -220,10 +220,18 @@ function preserveComputedCost(next, previous) {
   // we now know the same number came from a guessed rate, say so. Without this a
   // row mislabelled by an older version stays mislabelled forever, because the
   // only escape was --reprice, which also restates the amount at today's rates.
-  // Only ever toward the more cautious label: a row known to rest on a guess
-  // stays marked, even if a later scan happens to price it exactly.
+  // Automatic correction only ever moves toward the more cautious label: a row
+  // known to rest on a guess stays marked, even if a later scan happens to price
+  // it exactly. Otherwise the marker flickers as the rate cache warms and cools.
   if (sameAmount(previous.cost, next.cost)
       && previous.cost.source === "priced" && next.cost.source === "estimated") {
+    return next;
+  }
+  // Asked for explicitly (sync --relabel): take the new provenance whenever the
+  // amount is unchanged, in either direction. This is the escape hatch for a row
+  // left estimated after the real rate became known — --reprice would fix the
+  // label too, but only by restating what the turn cost at today's rates.
+  if (process.env.AI_USAGE_RELABEL === "1" && sameAmount(previous.cost, next.cost)) {
     return next;
   }
   return { ...next, cost: previous.cost };

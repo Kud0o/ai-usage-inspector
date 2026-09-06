@@ -230,7 +230,9 @@ from — and that decides what a re-sync may do with it:
 | `estimated` | this tool, but something in the number was a guess — token counts derived from text length (Cursor with no local counts), or a model with no listed rate, charged at its family default | **kept as recorded** |
 
 A cost this tool worked out is a fact about the day the turn ran, so re-importing history
-does not quietly restate it at today's rates — pass `--reprice` when you want that. A turn
+does not quietly restate it at today's rates — pass `--reprice` when you want that. If a row is
+labelled `estimated` and you now know the real rate, `--relabel` refreshes the provenance and
+leaves the amount exactly as recorded. A turn
 mixing exact and estimated parts counts as estimated overall, so a guess is never shown as
 authoritative.
 

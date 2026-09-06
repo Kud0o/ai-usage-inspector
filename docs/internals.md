@@ -127,6 +127,14 @@ turn could take the lock afterwards and replace the session with its older snaps
 `ingestTranscript()` therefore stamps the transcript before parsing and again before writing, and
 abandons the pass if it moved. The scan mark does not advance, so the next sweep re-reads it whole.
 
+A sweep prefers a quiet spool, but a continuously busy machine never offers one — so once nothing
+has scanned for fifteen minutes it sweeps regardless. Overlapping a writer is survivable now that a
+moved transcript abandons its pass and `claimScan()` keeps two sweeps off one provider.
+
+Automatic provenance correction is one-way, which can leave a row `estimated` after the real rate
+becomes known. `sync --relabel` is the escape hatch: it accepts new provenance whenever the amount is
+unchanged, in either direction, and still refuses a different amount — that is what `--reprice` is for.
+
 ## What each provider reads
 
 **Claude Code** — three transcript realities make the numbers trustworthy

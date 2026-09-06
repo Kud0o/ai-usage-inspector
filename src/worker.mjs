@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { ingest, ingestTranscript } from "./lib/ingest.mjs";
 import { globalConfigPath } from "./lib/config.mjs";
 import { getProvider, detectInstalled } from "./providers/index.mjs";
-import { scanWindow, recordScanResult, claimScan } from "./lib/scan-state.mjs";
+import { scanWindow, recordScanResult, claimScan, readScanState } from "./lib/scan-state.mjs";
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -323,6 +323,38 @@ function spoolPending(dir = defaultSpoolDir()) {
   }
 }
 
+// How long a machine may go without a sweep before one runs regardless of spool
+// activity. A continuously busy machine never presents a quiet instant, and
+// waiting for one forever means delegated work is never imported.
+const SWEEP_STARVATION_MS = 15 * 60 * 1000;
+
+/** Milliseconds since any provider was last scanned, or Infinity if never. */
+function msSinceLastScan(now = Date.now()) {
+  let newest = 0;
+  try {
+    const state = readScanState();
+    for (const entry of Object.values((state && state.providers) || {})) {
+      const at = Number(entry && entry.lastScanAtMs);
+      if (Number.isFinite(at) && at > newest) newest = at;
+    }
+  } catch {}
+  return newest > 0 ? now - newest : Infinity;
+}
+
+/**
+ * May this worker sweep right now?
+ *
+ * Quiet spool: yes. Busy spool: normally no — another worker is writing the very
+ * sessions a scan would parse. But a continuously busy machine never presents a
+ * quiet instant, so once nothing has scanned for a long while, sweep anyway.
+ * Overlapping a writer is survivable: ingestTranscript abandons a pass whose
+ * transcript moved, and claimScan keeps two sweeps off the same provider.
+ */
+export function shouldSweepNow({ now = Date.now(), starvationMs = SWEEP_STARVATION_MS } = {}) {
+  if (!spoolPending() && !spoolBusy()) return true;
+  return msSinceLastScan(now) >= starvationMs;
+}
+
 async function main() {
   // One pass only enumerates the spool once, so an event that lands mid-drain is
   // left for the next worker. Loop until the spool is actually quiet — bounded,
@@ -331,10 +363,13 @@ async function main() {
     try { await drainSpool(); } catch {}
     if (!spoolPending()) break;
   }
-  // Only once nothing is in flight. Another worker holding a claimed envelope is
-  // still writing the very sessions a scan would parse, and parsing happens
-  // before the write lock is taken.
-  if (spoolPending() || spoolBusy()) return;
+  // Prefer a quiet spool: another worker holding a claimed envelope is writing
+  // the very sessions a scan would parse. But a busy machine never goes quiet,
+  // and skipping forever means never importing delegated work — so once the
+  // machine has gone long enough without any scan, sweep anyway. Overlapping a
+  // writer is safe: ingestTranscript abandons a pass whose transcript moved, and
+  // claimScan keeps two sweeps off the same provider.
+  if (!shouldSweepNow()) return;
   try { await sweepProviders(); } catch {}
 }
 

@@ -340,3 +340,60 @@ test("replacing one orphan leaves other orphans alone", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Automatic correction is one-way, so a row can stay estimated after the real
+// rate becomes known. --reprice would fix the label but only by restating the
+// amount at today's rates; --relabel is the escape hatch that does not.
+test("--relabel takes new provenance and leaves the amount alone", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-relabel-"));
+  const file = path.join(dir, "usage.ndjson");
+  const saved = process.env.AI_USAGE_RELABEL;
+  t.after(() => {
+    if (saved === undefined) delete process.env.AI_USAGE_RELABEL;
+    else process.env.AI_USAGE_RELABEL = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const amount = { input: 0.01, output: 0, cacheWrite: 0, cacheRead: 0, total: 0.01 };
+  const write = (source) => upsertSession(file, "s1", [
+    { provider: "claude", sessionId: "s1", id: "a", cost: { ...amount, source } },
+  ]);
+  try {
+    await write("estimated");
+    await write("priced");
+    assert.equal(validRecords(file)[0].cost.source, "estimated", "a normal sync will not walk it back");
+
+    process.env.AI_USAGE_RELABEL = "1";
+    await write("priced");
+    const [row] = validRecords(file);
+    assert.equal(row.cost.source, "priced", "asked for explicitly, the label is corrected");
+    assert.equal(row.cost.total, 0.01, "and the amount is still what the turn cost");
+  } finally {
+    delete process.env.AI_USAGE_RELABEL;
+  }
+});
+
+// --relabel must not become a back door for changing what a turn cost.
+test("--relabel still refuses a different amount", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-relabel2-"));
+  const file = path.join(dir, "usage.ndjson");
+  const saved = process.env.AI_USAGE_RELABEL;
+  t.after(() => {
+    if (saved === undefined) delete process.env.AI_USAGE_RELABEL;
+    else process.env.AI_USAGE_RELABEL = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  try {
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "a", cost: { input: 0.01, output: 0, cacheWrite: 0, cacheRead: 0, total: 0.01, source: "estimated" } },
+    ]);
+    process.env.AI_USAGE_RELABEL = "1";
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "a", cost: { input: 0.09, output: 0, cacheWrite: 0, cacheRead: 0, total: 0.09, source: "priced" } },
+    ]);
+    const [row] = validRecords(file);
+    assert.equal(row.cost.total, 0.01, "the amount is preserved; --reprice is the tool for that");
+    assert.equal(row.cost.source, "estimated");
+  } finally {
+    delete process.env.AI_USAGE_RELABEL;
+  }
+});

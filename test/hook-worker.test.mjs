@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { runLauncher } from "../src/record.mjs";
-import { drainSpool, sweepProviders } from "../src/worker.mjs";
+import { drainSpool, sweepProviders, shouldSweepNow } from "../src/worker.mjs";
 
 // Point scan bookkeeping at a throwaway file: these tests must never touch the
 // real ~/.ai-usage-inspector/scan-state.json.
@@ -311,4 +311,33 @@ test("autoSweep:false turns sweeping off even with a global hook", async (t) => 
     }));
     writeHook(home, ".ai-usage-inspector/config.json", JSON.stringify({ schema: 2, autoSweep: false }));
   }), false);
+});
+
+// A busy machine never presents a quiet spool. Waiting for one forever means
+// delegated work is never imported, so starvation has an escape.
+test("sweeping waits for a quiet spool, but not forever", async (t) => {
+  const dir = withScanState(t);
+  const statePath = process.env.AI_USAGE_SCAN_STATE_FILE;
+  const spool = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-spool-"));
+  const savedSpool = process.env.AI_USAGE_SPOOL_DIR;
+  process.env.AI_USAGE_SPOOL_DIR = spool;
+  t.after(() => {
+    if (savedSpool === undefined) delete process.env.AI_USAGE_SPOOL_DIR;
+    else process.env.AI_USAGE_SPOOL_DIR = savedSpool;
+    fs.rmSync(spool, { recursive: true, force: true });
+  });
+
+  const now = 9_000_000;
+  const setLastScan = (ms) => fs.writeFileSync(statePath, JSON.stringify({
+    schema: 1, providers: { codex: { lastScanAtMs: ms } },
+  }));
+
+  setLastScan(now - 1000);
+  assert.equal(shouldSweepNow({ now }), true, "quiet spool sweeps");
+
+  fs.writeFileSync(path.join(spool, "pending.event"), "{}");
+  assert.equal(shouldSweepNow({ now, starvationMs: 60_000 }), false, "a busy spool defers");
+
+  setLastScan(now - 120_000);
+  assert.equal(shouldSweepNow({ now, starvationMs: 60_000 }), true, "starved long enough, sweep anyway");
 });
