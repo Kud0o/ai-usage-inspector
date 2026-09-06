@@ -27,14 +27,17 @@ flowchart TD
   R --> S[("spool file")]
   S --> W["worker.mjs<br/>detached"]
   W --> I["ingest<br/>parse + gate"]
-  V["Cline / Roo / Kilo<br/>no hook"] --> Y["sync.mjs"]
-  Y --> I
+  W -. "then sweeps for<br/>work that fired no hook" .-> V
+  V["Cline / Roo / Kilo<br/>delegated CLI runs"] --> I
+  Y["sync.mjs / dashboard<br/>on demand"] --> I
   I --> D[("usage.ndjson")]
   D --> P["dashboard<br/>updates live"]
 ```
 
-Two ways in, one way through: a live turn is captured the moment an agent stops, history
-already on disk is imported by sync, and both meet at the same ingest step.
+Two ways in, one way through: a live turn is captured the moment an agent stops, and work
+that fires no hook — a VS Code agent, or a CLI another agent launched — is swept up by the
+same detached worker straight afterwards. Both meet at the same ingest step, and `sync.mjs`
+or opening the dashboard runs that sweep on demand.
 
 ## Features
 
@@ -111,6 +114,7 @@ Hooks only record from install time forward. To import what the agents already h
 node ~/.ai-usage-inspector/app/src/sync.mjs                      # everything
 node ~/.ai-usage-inspector/app/src/sync.mjs --provider codex --days 30
 node ~/.ai-usage-inspector/app/src/sync.mjs --reprice            # recompute stored costs
+node ~/.ai-usage-inspector/app/src/sync.mjs --relabel            # fix provenance, keep the amounts
 ```
 
 Sync is idempotent — records upsert per session, so re-running never duplicates — and it
@@ -124,8 +128,8 @@ node .ai-usage/viewer/server.mjs                 # first free port from 4317
 node .ai-usage/viewer/server.mjs --port 8080
 ```
 
-- **Summary cards** — prompts, tokens, active time, first-response latency, top model, busiest workspace, this-month cost against an optional budget.
-- **Charts** — tokens over time, context-fill distribution, permission mode, prompts by model, skills invoked, cost per day, and per-provider splits.
+- **Summary cards** — prompts, tokens, active time, first-response latency, top model, busiest workspace, this-month cost against an optional budget. With more than one agent in view, cost carries a per-agent split and a **by agent** breakdown appears.
+- **Charts** — tokens over time, context-fill distribution, permission mode, turns by model, skills invoked, cost per day, and per-agent splits.
 - **Filter bar** — provider, workspace, model, mode, effort, date, minimum context %, and free-text search. Export the filtered view as CSV or JSON.
 - **Table and detail drawer** — grouped by workspace → session → prompt, with rendered Markdown, usage, timing, cost, and metadata per turn.
 - **Settings** — per project: tracking on/off, which field groups to store, monthly budget.
@@ -181,8 +185,8 @@ flowchart TD
 
 Only the boxed step is time the agent pays for. `record.mjs` imports no provider, opens no
 database, and takes no lock — it writes the payload to the spool and returns. Measured on
-Windows it comes back in ~158 ms, of which ~110 ms is Node starting up at all, so the tool
-itself costs roughly 50 ms.
+Windows it comes back in 160-210 ms depending on the machine, and most of that is Node
+starting up at all (~110-125 ms measured bare), so the tool itself costs roughly 50-80 ms.
 
 Nothing is lost in the handover: spool entries are claimed by atomic rename, and a failed
 write is retried rather than dropped. See [the spool](docs/internals.md#the-spool) and
