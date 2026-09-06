@@ -86,6 +86,22 @@ found. A locked database, a schema the reader does not recognise, or a single fa
 leaves it where it was — and the scan status (`ok`, `locked`, `unsupported-schema`,
 `missing`) is recorded, so stale capture is visible rather than looking like an idle day.
 
+## Sweeping for hookless work
+
+Not every run announces itself. An agent launched non-interactively by another agent — a delegate
+skill shelling out to `codex exec`, say — writes its transcript but fires no stop hook.
+
+After [drainSpool()](../src/worker.mjs) empties the spool, the worker calls `sweepProviders()`,
+which walks every installed provider that implements `discoverTranscripts` and ingests anything
+newer than that provider scan mark. It runs only once the spool is empty, so no envelope is held
+claimed while it works, and it skips any provider scanned within the last minute so a burst of turns
+does not re-walk every store. It never touches the network and never refreshes pricing.
+
+The cost is small because the watermark bounds it: a sweep across four installed providers with
+nothing new to import takes about 140 ms, entirely inside the detached worker.
+
+A provider that throws is skipped, leaving its watermark where it was, so the next sweep retries it.
+
 ## What each provider reads
 
 **Claude Code** — three transcript realities make the numbers trustworthy

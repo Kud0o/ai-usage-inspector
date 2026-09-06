@@ -106,5 +106,6 @@ export function costOf(modelId, usage) {
     cacheWrite,
     total: input + output + cacheRead + cacheWrite,
     source: r.estimated ? "estimated" : "priced",
+    ...(r.estimated ? { estimatedRate: true } : {}),
   };
 }

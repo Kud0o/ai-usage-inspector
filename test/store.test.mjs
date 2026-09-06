@@ -94,3 +94,75 @@ test("composite tombstone survives re-upsert and deduplicates", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Session ids are only unique within a provider. Replacing on the id alone let
+// one provider's upsert delete another's rows — silently, since the write itself
+// succeeded. Every other identity check in this file is composite; this one was not.
+test("upserting one provider's session leaves another provider's identical id alone", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-scope-"));
+  const file = path.join(dir, "usage.ndjson");
+  try {
+    await upsertSession(file, "shared-id", [
+      { provider: "codex", sessionId: "shared-id", id: "cx-1", cost: { total: 1 } },
+    ]);
+    await upsertSession(file, "shared-id", [
+      { provider: "claude", sessionId: "shared-id", id: "cl-1", cost: { total: 2 } },
+    ]);
+
+    const rows = validRecords(file);
+    assert.deepEqual(
+      rows.map((r) => `${r.provider}:${r.id}`).sort(),
+      ["claude:cl-1", "codex:cx-1"],
+      "the Codex row must survive a Claude upsert of the same session id",
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("re-upserting the same provider's session still replaces it", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-replace-"));
+  const file = path.join(dir, "usage.ndjson");
+  try {
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "a", cost: { total: 1 } },
+      { provider: "claude", sessionId: "s1", id: "b", cost: { total: 1 } },
+    ]);
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "a", cost: { total: 1 } },
+    ]);
+    assert.deepEqual(validRecords(file).map((r) => r.id), ["a"], "stale turn b is gone");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Legacy rows predate the provider field; tombstoneKey() reads them as "claude",
+// so replacement has to agree or old Claude rows become unreplaceable.
+test("a provider-less legacy row is replaced by a Claude upsert", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-legacy-"));
+  const file = path.join(dir, "usage.ndjson");
+  try {
+    fs.writeFileSync(file, JSON.stringify({ sessionId: "s1", id: "old", cost: { total: 9 } }) + "\n");
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "new", cost: { total: 1 } },
+    ]);
+    assert.deepEqual(validRecords(file).map((r) => r.id), ["new"]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a batch carrying the same turn twice stores it once", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-dupe-"));
+  const file = path.join(dir, "usage.ndjson");
+  try {
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "a", cost: { total: 1 } },
+      { provider: "claude", sessionId: "s1", id: "a", cost: { total: 1 } },
+    ]);
+    assert.equal(validRecords(file).length, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

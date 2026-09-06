@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { runLauncher } from "../src/record.mjs";
-import { drainSpool } from "../src/worker.mjs";
+import { drainSpool, sweepProviders } from "../src/worker.mjs";
 
 function writeJsonl(file, records) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -122,4 +122,66 @@ test("worker recovers orphan and bounds poison retries", async () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// The failure this exists for: a delegated CLI run (e.g. "codex exec" behind a
+// delegate skill) writes its transcript but fires no Stop hook, so its cost stays
+// invisible until something scans. The next hook from any agent has to pull it in.
+test("sweepProviders scans a provider that has never been scanned", async () => {
+  const seen = [];
+  const providers = [
+    { id: "codex", discoverTranscripts: () => [] },
+    { id: "cursor", discoverTranscripts: () => [] },
+  ];
+  const swept = await sweepProviders({
+    providers,
+    scan: async (p) => { seen.push(p.id); },
+  });
+  assert.deepEqual(swept, ["codex", "cursor"]);
+  assert.deepEqual(seen, ["codex", "cursor"], "each provider actually scanned");
+});
+
+test("a provider without discovery is left alone", async () => {
+  const swept = await sweepProviders({
+    providers: [{ id: "hook-only" }],
+    scan: async () => { throw new Error("must not scan"); },
+  });
+  assert.deepEqual(swept, []);
+});
+
+// A burst of turns must not re-walk every store once per turn.
+test("sweepProviders throttles a provider scanned moments ago", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-sweep-"));
+  const statePath = path.join(dir, "scan-state.json");
+  const saved = process.env.AI_USAGE_SCAN_STATE_FILE;
+  process.env.AI_USAGE_SCAN_STATE_FILE = statePath;
+  t.after(() => {
+    if (saved === undefined) delete process.env.AI_USAGE_SCAN_STATE_FILE;
+    else process.env.AI_USAGE_SCAN_STATE_FILE = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const now = 1_000_000;
+  fs.writeFileSync(statePath, JSON.stringify({
+    schema: 1,
+    providers: { codex: { lastScanAtMs: now - 5_000, lastSuccessfulScanMs: now - 5_000 } },
+  }));
+
+  const providers = [{ id: "codex", discoverTranscripts: () => [] }];
+  const fresh = await sweepProviders({ now, throttleMs: 60_000, providers, scan: async () => {} });
+  assert.deepEqual(fresh, [], "scanned 5s ago, so skipped");
+
+  const later = await sweepProviders({ now: now + 120_000, throttleMs: 60_000, providers, scan: async () => {} });
+  assert.deepEqual(later, ["codex"], "past the throttle, scanned again");
+});
+
+// One unreadable store must not stop the others from being imported.
+test("a provider that throws does not abort the sweep", async () => {
+  const swept = await sweepProviders({
+    providers: [
+      { id: "broken", discoverTranscripts: () => [] },
+      { id: "fine", discoverTranscripts: () => [] },
+    ],
+    scan: async (p) => { if (p.id === "broken") throw new Error("store locked"); },
+  });
+  assert.deepEqual(swept, ["fine"]);
 });

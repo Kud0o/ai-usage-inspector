@@ -175,6 +175,7 @@ function finalizeTurn(t, ctx) {
     source: approx ? "estimated" : "priced",
   };
   if (approx) costOut.estimated = true;
+  if (cost.estimatedRate) costOut.estimatedRate = true;
 
   return {
     id: `${ctx.composerId}:${ctx.index}`,

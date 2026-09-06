@@ -198,11 +198,23 @@ export async function addTombstones(file, values) {
 // AI_USAGE_REPRICE=1 (sync --reprice) to deliberately recompute.
 const COMPUTED_COST_SOURCES = new Set(["priced", "estimated"]);
 
+const COST_AMOUNT_FIELDS = ["input", "output", "cacheWrite", "cacheRead", "total"];
+
+/** Do two cost objects claim the same money? Provenance is ignored. */
+function sameAmount(a, b) {
+  return COST_AMOUNT_FIELDS.every((k) => (a[k] || 0) === (b[k] || 0));
+}
+
 function preserveComputedCost(next, previous) {
   if (process.env.AI_USAGE_REPRICE === "1") return next;
   if (!previous || !previous.cost || !next || !next.cost) return next;
   if (!COMPUTED_COST_SOURCES.has(previous.cost.source)) return next;
   if (!COMPUTED_COST_SOURCES.has(next.cost.source)) return next;
+  // The amount is preserved, but its provenance is not part of that promise: if
+  // we now know the same number came from a guessed rate, say so. Without this a
+  // row mislabelled by an older version stays mislabelled forever, because the
+  // only escape was --reprice, which also restates the amount at today's rates.
+  if (sameAmount(previous.cost, next.cost)) return next;
   return { ...next, cost: previous.cost };
 }
 
@@ -225,16 +237,33 @@ export class LockTimeoutError extends Error {
  * acquired, so the caller can retry instead of recording a phantom success.
  */
 export async function upsertSession(file, sessionId, records) {
+  // Which provider this batch replaces. Session ids are only unique within a
+  // provider, so replacing on the id alone would let one provider delete
+  // another's rows — the same composite identity tombstoneKey() uses.
+  const provider = records.length ? (records[0].provider ? String(records[0].provider) : "claude") : null;
+  const replaces = (r) => {
+    if (provider === null) return false; // nothing to replace with
+    const rp = r && r.provider ? String(r.provider) : "claude";
+    return rp === provider && r.sessionId === sessionId;
+  };
   const result = await mutateNdjson(file, (existing) => {
     // Read while holding usage lock. Viewer writes tombstone before waiting for
     // this lock, closing delete-vs-upsert resurrection races.
     const blocked = loadTombstoneKeys(tombstonePath(file));
     const priorByKey = new Map(existing.map((r) => [tombstoneKey(r), r]));
+    const seen = new Set();
     const accepted = records
       .filter((r) => !blocked.has(tombstoneKey(r)))
+      // A malformed batch can carry the same turn twice; keep the last one.
+      .filter((r) => {
+        const k = tombstoneKey(r);
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      })
       .map((r) => preserveComputedCost(r, priorByKey.get(tombstoneKey(r))));
     return {
-      records: existing.filter((r) => r.sessionId !== sessionId).concat(accepted),
+      records: existing.filter((r) => !replaces(r)).concat(accepted),
       value: accepted.length,
     };
   });

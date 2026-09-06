@@ -344,6 +344,7 @@ function finalizeTurn(t, ctx) {
       cacheRead: cost.cacheRead,
       total: cost.total,
       source: cost.source || "priced",
+      ...(cost.estimatedRate ? { estimatedRate: true } : {}),
     },
     schema: 2,
   };

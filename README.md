@@ -188,6 +188,21 @@ Nothing is lost in the handover: spool entries are claimed by atomic rename, and
 write is retried rather than dropped. See [the spool](docs/internals.md#the-spool) and
 [the write](docs/internals.md#the-write).
 
+### Work you delegate to another agent
+
+Agents launched non-interactively by another agent — a delegate skill running `codex exec`, for
+example — write their own transcript but fire no stop hook, so nothing tells this tool they ran.
+Their cost is real and it belongs to the same project.
+
+So after the worker has drained the spool, it also sweeps every installed provider for work that
+arrived without a hook. That happens in the already-detached worker, off the agent's clock, and is
+throttled so a burst of turns does not re-walk every store. The next turn from any agent pulls in
+whatever the delegated one spent — typically within seconds, without the delegate skill having to
+cooperate.
+
+Delegated turns land in the project the delegate itself reports as its working directory, so a run
+launched against your repo is filed under your repo, not under wherever the launcher happened to be.
+
 ## How much to trust a cost
 
 Not every dollar figure is equally trustworthy, so each record says where its number came
@@ -215,6 +230,10 @@ touches the network. See [pricing refresh](docs/internals.md#pricing-refresh).
   current models; the dashboard refreshes them, so a brand-new model is usually only
   estimated until that first refresh. OpenCode and the VS Code agents report exact tokens
   and cost themselves, so their rows are never estimated.
+- **Auto-continued turns are not prompts.** When a session runs out of context it is compacted, and
+  the continuation is written as if the user had typed it. Those turns are marked `⟳` and counted
+  separately from prompts — the work they did is real and its cost is included, but nobody asked for
+  it in those words.
 - **`effort` is Claude-specific**, and read from settings at capture time. Other agents
   leave it blank unless they expose it.
 - **`context fill %`** uses the latest request's input size over the known model context

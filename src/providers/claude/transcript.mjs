@@ -11,6 +11,7 @@
 //  - Subagents may run a different model -> cost is computed per message.
 
 import fs from "node:fs";
+import path from "node:path";
 import { costOf, contextMax, zeroCost, addCost } from "./pricing.mjs";
 import { subagentsDir } from "../../lib/paths.mjs";
 
@@ -211,11 +212,17 @@ export function buildTurns(transcriptPath, opts = {}) {
   const turns = [];
   let cur = null;
   const consumed = new Set();
+  // The transcript is named for its session, which is the one identifier both
+  // the hook path and the backfill scan can always see — entry-level sessionId
+  // is not guaranteed to be present.
+  const fileSession = path.basename(String(transcriptPath || ""), ".jsonl") || null;
   for (const e of entries) {
     if (isHumanPrompt(e)) {
       cur = {
         promptEntry: e,
         promptId: e.promptId || null,
+        session: e.sessionId || fileSession,
+        index: turns.length,
         main: [],
       };
       turns.push(cur);
@@ -273,9 +280,15 @@ function finalizeTurn(t, subByPrompt, opts) {
     startTs && firstAsstTs ? Math.max(0, Date.parse(firstAsstTs) - Date.parse(startTs)) : 0;
 
   return {
-    id: e.uuid || `${e.sessionId}:${e.promptId || startTs}`,
+    id: e.uuid || `${t.session || "unknown"}:${e.promptId || startTs}:${t.index}`,
     provider: "claude",
-    sessionId: e.sessionId,
+    // A compaction summary is written as a user turn ("This session is being
+    // continued from a previous conversation...") but nobody typed it. It still
+    // opens a real turn — the work that follows has to hang off something — so
+    // keep the segment and mark it, rather than folding its usage into whatever
+    // the human happened to type before the compaction.
+    synthetic: e.isCompactSummary ? "compact-summary" : undefined,
+    sessionId: e.sessionId || t.session || null,
     cwd: e.cwd,
     slug: e.slug || null,
     gitBranch: e.gitBranch || null,
@@ -312,6 +325,7 @@ function finalizeTurn(t, subByPrompt, opts) {
       cacheRead: cost.cacheRead,
       total: cost.total,
       source: cost.source || "priced",
+      ...(cost.estimatedRate ? { estimatedRate: true } : {}),
     },
     schema: 2,
   };

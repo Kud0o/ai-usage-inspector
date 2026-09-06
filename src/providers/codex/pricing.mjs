@@ -43,12 +43,13 @@ export function applyRemoteRates(rates) {
   if (!rates) return;
   for (const [id, r] of Object.entries(rates)) {
     if (!r || !(r.input >= 0) || !(r.output >= 0)) continue;
-    const cached = r.cachedInput >= 0 ? r.cachedInput : r.input * 0.1;
+    const cachedKnown = r.cachedInput >= 0;
+    const cached = cachedKnown ? r.cachedInput : r.input * 0.1;
     const ctx =
       r.contextMax > 0
         ? r.contextMax
         : (TABLE[id] && TABLE[id].contextMax) || FALLBACK.contextMax;
-    OVERRIDES[id] = model(r.input, cached, r.output, ctx);
+    OVERRIDES[id] = { ...model(r.input, cached, r.output, ctx), cachedGuessed: !cachedKnown };
   }
 }
 
@@ -85,12 +86,14 @@ export function costOf(modelId, tokens) {
   const input = (Math.max(0, tokens.input || 0) * r.input) / M;
   const cacheRead = (Math.max(0, tokens.cached || 0) * r.cachedInput) / M;
   const output = (Math.max(0, tokens.output || 0) * r.output) / M;
+  const guessedRate = !!r.estimated || (!!r.cachedGuessed && cacheRead > 0);
   return {
     input,
     output,
     cacheRead,
     cacheWrite: 0,
     total: input + cacheRead + output,
-    source: r.estimated ? "estimated" : "priced",
+    source: guessedRate ? "estimated" : "priced",
+    ...(guessedRate ? { estimatedRate: true } : {}),
   };
 }

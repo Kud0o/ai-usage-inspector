@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ingest, ingestTranscript } from "./lib/ingest.mjs";
-import { getProvider } from "./providers/index.mjs";
-import { scanWindow, recordScanResult } from "./lib/scan-state.mjs";
+import { getProvider, detectInstalled } from "./providers/index.mjs";
+import { scanWindow, recordScanResult, readScanState } from "./lib/scan-state.mjs";
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -219,8 +219,48 @@ export async function drainSpool({
   return { processed, failed };
 }
 
+// How recently another sweep must have run for this one to skip a provider.
+// Long enough that a burst of turns does not re-walk every store, short enough
+// that a delegated run shows up while the user is still looking at it.
+const SWEEP_THROTTLE_MS = 60 * 1000;
+
+/**
+ * Import work done by agents that never fired a hook.
+ *
+ * A delegated CLI run -- "codex exec" behind a delegate skill, say -- writes its
+ * own transcript but triggers no Stop hook, so its cost stays invisible until
+ * something scans. This runs after the spool is drained, in the already-detached
+ * worker, so the hook path is untouched: still spool-and-exit, still offline.
+ * Best-effort by design -- a provider that cannot be read leaves its watermark
+ * where it was and gets retried next time.
+ */
+export async function sweepProviders({
+  now = Date.now(),
+  throttleMs = SWEEP_THROTTLE_MS,
+  providers = null,
+  scan = rescan,
+} = {}) {
+  let state = {};
+  try { state = readScanState(); } catch {}
+  const swept = [];
+  for (const provider of providers || detectInstalled()) {
+    if (typeof provider.discoverTranscripts !== "function") continue;
+    const entry = state.providers && state.providers[provider.id];
+    const last = Number(entry && entry.lastScanAtMs);
+    if (Number.isFinite(last) && now - last < throttleMs) continue;
+    try {
+      await scan(provider, {});
+      swept.push(provider.id);
+    } catch {}
+  }
+  return swept;
+}
+
 async function main() {
   try { await drainSpool(); } catch {}
+  // Only after the spool is empty: a claimed envelope must not be held open
+  // while this walks other providers' stores.
+  try { await sweepProviders(); } catch {}
 }
 
 const isDirect = process.argv[1]

@@ -130,6 +130,10 @@ const T_OUT = (e) => (e.usage && e.usage.output) || 0;
 const T_TOTAL = (e) => { const u = e.usage; return u ? (u.input || 0) + (u.output || 0) + (u.cacheCreate || 0) + (u.cacheRead || 0) : 0; };
 const COST = (e) => (e.cost && e.cost.total) || 0;
 const COST_ESTIMATED = (e) => !!(e.cost && (e.cost.estimated || e.cost.source === "estimated"));
+// Two different reasons a cost can be approximate; a Cursor row can have either.
+const estReason = (e) => e.cost && e.cost.estimatedRate
+  ? `No listed price for ${e.model || "this model"} — charged at the default rate for its family`
+  : "Cursor doesn't store exact token counts locally; tokens estimated from text length";
 const PROV = (e) => e.provider || "claude";
 // Provider → its brand color (shared with badges via CSS vars).
 const provColor = (p) => cssv(`--prov-${p}`) || cssv("--faint");
@@ -315,7 +319,10 @@ function apply() {
 // ---------- stats ----------
 function renderStats() {
   const v = state.view;
-  const prompts = v.length;
+  // Compaction summaries open real turns but nobody typed them, so they are not
+  // prompts. Their cost still counts — it was really spent.
+  const synthetic = v.reduce((a, e) => a + (e.synthetic ? 1 : 0), 0);
+  const prompts = v.length - synthetic;
   const tin = v.reduce((a, e) => a + T_IN(e), 0);
   const tout = v.reduce((a, e) => a + T_OUT(e), 0);
   const ttot = v.reduce((a, e) => a + T_TOTAL(e), 0);
@@ -339,7 +346,10 @@ function renderStats() {
   // Cards for disabled field-groups are omitted.
   const cards = [];
   if (has("tokens")) cards.push({ label: "tokens · total", val: fmtTok(ttot), sub: `${fmtTok(tin)} in · ${fmtTok(tout)} out`, cls: "accent" });
-  cards.push({ label: "prompts", val: fmtInt(prompts), sub: `${subs} subagent calls`, cls: "" });
+  const promptSub = synthetic
+    ? `${subs} subagent calls · ${fmtInt(synthetic)} auto-continued`
+    : `${subs} subagent calls`;
+  cards.push({ label: "prompts", val: fmtInt(prompts), sub: promptSub, cls: "" });
   if (has("context")) cards.push({ label: "avg context", val: avgCtx.toFixed(1) + "<small>%</small>", sub: "of window filled", cls: "amber", bar: avgCtx });
   if (has("timing")) cards.push({ label: "active time", val: fmtDur(dur), sub: "summed turn duration", cls: "" });
   if (has("timing") && respRecs.length) cards.push({ label: "avg first response", val: fmtDur(avgResp), sub: "prompt → first reply", cls: "" });
@@ -562,6 +572,9 @@ function ctxBar(pct) {
 function rowHtml(e) {
   const chip = has("skills") && e.skills && e.skills.length
     ? `<span class="skill-chip" title="skills: ${esc(e.skills.join(", "))}">▸ ${e.skills.length}</span> ` : "";
+  const auto = e.synthetic
+    ? `<span class="skill-chip" title="Auto-continued after a context compaction — not a prompt anyone typed">⟳</span> `
+    : "";
   const prov = e.provider || "claude";
   return `<tr class="row" data-id="${esc(e.id)}">
     <td class="mono muted col-when">${fmtWhen(e.ts)}</td>
@@ -572,8 +585,8 @@ function rowHtml(e) {
     <td class="num col-in">${fmtTok(T_IN(e))}</td>
     <td class="num col-out">${fmtTok(T_OUT(e))}</td>
     <td class="num col-context">${ctxBar(e.contextFillPct)}</td>
-    <td class="num cost-cell col-cost">${fmtUsd(COST(e))}</td>
-    <td class="prompt-cell col-prompt">${chip}${esc(e.promptPreview)}</td>
+    <td class="num cost-cell col-cost">${COST_ESTIMATED(e) ? `<span class="est-mark" title="${esc(estReason(e))}">≈</span>` : ""}${fmtUsd(COST(e))}</td>
+    <td class="prompt-cell col-prompt">${auto}${chip}${esc(e.promptPreview)}</td>
   </tr>`;
 }
 
@@ -719,9 +732,7 @@ async function openDrawer(id) {
     `<div><div class="k">tools / think</div><div class="v">${k.toolCalls} / ${k.thinkingBlocks}</div></div>`);
   // Approximate for either reason: token counts we derived from text length
   // (Cursor), or a model with no listed rate, priced at its family default.
-  const estTitle = e.provider === "cursor"
-    ? "Cursor doesn't store exact token counts locally; tokens estimated from text length"
-    : `No listed price for ${e.model || "this model"} — charged at the default rate for its family`;
+  const estTitle = estReason(e);
   const estFlag = COST_ESTIMATED(e) ? ` <span class="est-flag" title="${esc(estTitle)}">≈ estimated</span>` : "";
   const costSource = c.source || (c.estimated ? "estimated" : "legacy");
   const costBreakdown = has("cost") && e.cost

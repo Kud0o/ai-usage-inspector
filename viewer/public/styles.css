@@ -261,6 +261,8 @@ svg { display: block; width: 100%; overflow: visible; }
 .stat.danger .val { color: var(--red); }
 /* estimated-cost marker in the detail drawer */
 .est-flag { color: var(--amber); font-family: var(--mono); font-size: 11px; }
+/* Same signal in the table, where space allows only the sign itself. */
+.est-mark { color: var(--amber); font-family: var(--mono); margin-right: 2px; cursor: help; }
 
 /* context mini-bar */
 .ctxbar { display: inline-flex; align-items: center; gap: 7px; justify-content: flex-end; }

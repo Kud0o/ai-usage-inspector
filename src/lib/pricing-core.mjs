@@ -24,5 +24,7 @@ export function addCost(a, b) {
       : b.source || a.source;
   if (source) out.source = source;
   if (a.estimated || b.estimated) out.estimated = true;
+  // Which part was the guess — the rate or the token counts — so the UI can say.
+  if (a.estimatedRate || b.estimatedRate) out.estimatedRate = true;
   return out;
 }
