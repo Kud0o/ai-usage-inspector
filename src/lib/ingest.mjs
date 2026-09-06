@@ -85,9 +85,25 @@ export async function ingest(provider, raw) {
  * per-project tracking config gates ingestion, so disabled projects are
  * skipped exactly like on the hook path. Returns the number of turns written.
  */
-function transcriptStamp(transcriptPath) {
+/**
+ * A marker that changes when the source behind a transcript changes.
+ *
+ * Only Claude and Codex hand us a file path; Cursor, OpenCode and the Cline
+ * family pass an opaque reference to a row in their own store, so they supply
+ * their own stamp. A provider that offers none gets no protection — that is
+ * visible here rather than silently true.
+ */
+function transcriptStamp(provider, transcriptPath) {
+  if (provider && typeof provider.stampTranscript === "function") {
+    try {
+      return provider.stampTranscript(transcriptPath);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof transcriptPath !== "string") return null;
   try {
-    const st = fs.statSync(typeof transcriptPath === "string" ? transcriptPath : transcriptPath.file);
+    const st = fs.statSync(transcriptPath);
     return `${st.mtimeMs}:${st.size}`;
   } catch {
     return null;
@@ -100,10 +116,10 @@ export async function ingestTranscript(provider, { transcriptPath, cwd, sessionI
   // agent appended its newest turn would take the lock afterwards and replace
   // the session with its older snapshot. If the file moved under us, drop this
   // pass: the scan mark does not advance, so the next sweep re-reads it whole.
-  const before = transcriptStamp(transcriptPath);
+  const before = transcriptStamp(provider, transcriptPath);
   const turns = await provider.buildTurns(transcriptPath, opts || {});
   if (!turns.length) return 0;
-  if (before !== null && transcriptStamp(transcriptPath) !== before) {
+  if (before !== null && transcriptStamp(provider, transcriptPath) !== before) {
     const err = new Error("transcript changed while being parsed");
     err.scanStatus = "locked";
     throw err;
@@ -126,5 +142,5 @@ export async function ingestTranscript(provider, { transcriptPath, cwd, sessionI
   // Checked again under the write lock: config work and the lock queue both take
   // time, and the agent may have appended a turn in the meantime.
   return storeTurns(turns, effCwd, cfg, sessionId, () =>
-    before === null || transcriptStamp(transcriptPath) === before);
+    before === null || transcriptStamp(provider, transcriptPath) === before);
 }

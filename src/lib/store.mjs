@@ -276,8 +276,10 @@ export async function upsertSession(file, sessionId, records, { precondition = n
   // "undefined:<startTs>". The turn now arriving with that same timestamp IS that
   // row, so it may replace it — but only that one. Matching the prefix alone
   // would delete every unrelated orphan in the file on any write.
+  // The parser knows exactly which legacy id a turn used to carry; inferring it
+  // from ts guessed wrong whenever the old id was built from a promptId.
   const supersededOrphanIds = new Set(
-    records.map((r) => (r && r.ts ? `undefined:${r.ts}` : null)).filter(Boolean),
+    records.map((r) => (r && r.legacyId ? String(r.legacyId) : null)).filter(Boolean),
   );
   const replaces = (r) => {
     if (provider === null) return false; // nothing to replace with

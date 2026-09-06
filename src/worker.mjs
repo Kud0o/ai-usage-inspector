@@ -73,7 +73,7 @@ function restoreEnv(name, previous) {
  * — a locked DB, an unsupported schema, or a single failed ingest leaves the
  * mark where it was so the next run picks the work back up.
  */
-export async function rescan(provider, norm) {
+export async function rescan(provider, norm, leaseId = null) {
   const { sinceMs, scanStartedAtMs } = scanWindow(provider.id);
   const effectiveSince = Number.isFinite(norm.sinceMs) ? norm.sinceMs : sinceMs;
 
@@ -109,7 +109,7 @@ export async function rescan(provider, norm) {
     completed = false;
   }
   try {
-    await recordScanResult(provider.id, { scanStartedAtMs, status, detail, completed });
+    await recordScanResult(provider.id, { scanStartedAtMs, status, detail, completed, leaseId });
   } catch {}
 }
 
@@ -294,11 +294,11 @@ export async function sweepProviders({
   for (const provider of providers || installedForSweep()) {
     if (typeof provider.discoverTranscripts !== "function") continue;
     // Claim before scanning: two workers starting together must not both scan.
-    let mine = false;
-    try { mine = await claimScan(provider.id, { throttleMs, now }); } catch { mine = false; }
-    if (!mine) continue;
+    let lease = false;
+    try { lease = await claimScan(provider.id, { throttleMs, now }); } catch { lease = false; }
+    if (!lease) continue;
     try {
-      await scan(provider, {});
+      await scan(provider, {}, lease);
       swept.push(provider.id);
     } catch {}
   }
@@ -328,17 +328,29 @@ function spoolPending(dir = defaultSpoolDir()) {
 // waiting for one forever means delegated work is never imported.
 const SWEEP_STARVATION_MS = 15 * 60 * 1000;
 
-/** Milliseconds since any provider was last scanned, or Infinity if never. */
-function msSinceLastScan(now = Date.now()) {
-  let newest = 0;
+/**
+ * How long the provider that has waited longest has been waiting.
+ *
+ * Taking the newest scan across all providers let a chatty one mask a starving
+ * one, so this takes the OLDEST. A provider never scanned counts as starving
+ * only once the machine itself has been up long enough to have tried — with no
+ * state at all there is nothing to be starved of yet.
+ */
+export function msSinceLastScan(now = Date.now(), providers = null) {
+  let longestWait = 0;
+  let seen = 0;
   try {
     const state = readScanState();
-    for (const entry of Object.values((state && state.providers) || {})) {
-      const at = Number(entry && entry.lastScanAtMs);
-      if (Number.isFinite(at) && at > newest) newest = at;
+    for (const provider of providers || detectInstalled()) {
+      seen += 1;
+      const entry = (state && state.providers && state.providers[provider.id]) || null;
+      const at = entry == null ? null : Number(entry.lastScanAtMs);
+      // Never scanned at all: nothing of this provider has ever been imported.
+      if (at === null || !Number.isFinite(at) || at <= 0) return Infinity;
+      longestWait = Math.max(longestWait, now - at);
     }
   } catch {}
-  return newest > 0 ? now - newest : Infinity;
+  return seen > 0 ? longestWait : 0;
 }
 
 /**
@@ -350,9 +362,9 @@ function msSinceLastScan(now = Date.now()) {
  * Overlapping a writer is survivable: ingestTranscript abandons a pass whose
  * transcript moved, and claimScan keeps two sweeps off the same provider.
  */
-export function shouldSweepNow({ now = Date.now(), starvationMs = SWEEP_STARVATION_MS } = {}) {
+export function shouldSweepNow({ now = Date.now(), starvationMs = SWEEP_STARVATION_MS, providers = null } = {}) {
   if (!spoolPending() && !spoolBusy()) return true;
-  return msSinceLastScan(now) >= starvationMs;
+  return msSinceLastScan(now, providers) >= starvationMs;
 }
 
 async function main() {

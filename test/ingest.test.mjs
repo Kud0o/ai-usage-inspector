@@ -83,3 +83,37 @@ test("a transcript that changes while waiting for the lock is not written", asyn
     (err) => err && err.scanStatus === "locked",
   );
 });
+
+// Only Claude and Codex hand over a file path. Cursor, OpenCode and the Cline
+// family pass an opaque reference into their own store, so the guard was a no-op
+// for them: statSync of an object returned null and the check passed always.
+test("a provider's own stamp protects an opaque transcript reference", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-opaque-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  let revision = 1;
+  const provider = {
+    id: "cursor",
+    stampTranscript: () => `rev-${revision}`,
+    buildTurns: () => {
+      revision += 1; // the store moved while we were reading it
+      return [{ provider: "cursor", sessionId: "s1", id: "a", cwd: dir, ts: "2026-01-01T00:00:00.000Z", cost: { total: 1 } }];
+    },
+  };
+
+  await assert.rejects(
+    () => ingestTranscript(provider, { transcriptPath: { composerId: "c1", cwd: dir }, sessionId: "s1" }),
+    (err) => err && err.scanStatus === "locked",
+  );
+});
+
+test("a stable opaque reference ingests normally", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-opaque2-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const provider = {
+    id: "cursor",
+    stampTranscript: () => "rev-1",
+    buildTurns: () => [{ provider: "cursor", sessionId: "s1", id: "a", cwd: dir, ts: "2026-01-01T00:00:00.000Z", cost: { total: 1 } }],
+  };
+  assert.equal(await ingestTranscript(provider, { transcriptPath: { composerId: "c1", cwd: dir }, sessionId: "s1" }), 1);
+});

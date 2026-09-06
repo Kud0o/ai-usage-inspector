@@ -5,7 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { runLauncher } from "../src/record.mjs";
-import { drainSpool, sweepProviders, shouldSweepNow } from "../src/worker.mjs";
+import { drainSpool, sweepProviders, shouldSweepNow, msSinceLastScan } from "../src/worker.mjs";
+import { claimScan, recordScanResult } from "../src/lib/scan-state.mjs";
 
 // Point scan bookkeeping at a throwaway file: these tests must never touch the
 // real ~/.ai-usage-inspector/scan-state.json.
@@ -332,12 +333,45 @@ test("sweeping waits for a quiet spool, but not forever", async (t) => {
     schema: 1, providers: { codex: { lastScanAtMs: ms } },
   }));
 
+  const only = [{ id: "codex" }];
   setLastScan(now - 1000);
-  assert.equal(shouldSweepNow({ now }), true, "quiet spool sweeps");
+  assert.equal(shouldSweepNow({ now, providers: only }), true, "quiet spool sweeps");
 
   fs.writeFileSync(path.join(spool, "pending.event"), "{}");
-  assert.equal(shouldSweepNow({ now, starvationMs: 60_000 }), false, "a busy spool defers");
+  assert.equal(shouldSweepNow({ now, starvationMs: 60_000, providers: only }), false, "a busy spool defers");
 
   setLastScan(now - 120_000);
-  assert.equal(shouldSweepNow({ now, starvationMs: 60_000 }), true, "starved long enough, sweep anyway");
+  assert.equal(shouldSweepNow({ now, starvationMs: 60_000, providers: only }), true, "starved long enough, sweep anyway");
+});
+
+// A lease with no owner could be released by anyone: a scan finishing after its
+// lease expired and was re-taken would free the NEW holder's claim and admit a
+// third overlapping scan.
+test("only the lease holder can release it", async (t) => {
+  withScanState(t);
+  const first = await claimScan("codex", { throttleMs: 0, leaseMs: 60_000 });
+  assert.ok(first, "first worker takes the lease");
+  assert.equal(await claimScan("codex", { throttleMs: 0, leaseMs: 60_000 }), false, "second is refused");
+
+  // A different worker's result must not free the held lease.
+  await recordScanResult("codex", { scanStartedAtMs: Date.now(), status: "ok", completed: true, leaseId: "someone-else" });
+  assert.equal(await claimScan("codex", { throttleMs: 0, leaseMs: 60_000 }), false, "still held");
+
+  await recordScanResult("codex", { scanStartedAtMs: Date.now(), status: "ok", completed: true, leaseId: first });
+  assert.ok(await claimScan("codex", { throttleMs: 0, leaseMs: 60_000 }), "the holder released it");
+});
+
+// Taking the NEWEST scan across providers let a chatty provider mask a starving
+// one, so a provider whose work never arrived could wait forever.
+test("starvation is measured per provider, not across them", async (t) => {
+  const dir = withScanState(t);
+  const statePath = process.env.AI_USAGE_SCAN_STATE_FILE;
+  const now = 9_000_000;
+  // codex scanned seconds ago, claude not for an hour: the machine IS starving.
+  fs.writeFileSync(statePath, JSON.stringify({
+    schema: 1,
+    providers: { codex: { lastScanAtMs: now - 1000 }, claude: { lastScanAtMs: now - 3_600_000 } },
+  }));
+  const both = [{ id: "codex" }, { id: "claude" }];
+  assert.equal(msSinceLastScan(now, both), 3_600_000, "reports the provider that has waited longest");
 });

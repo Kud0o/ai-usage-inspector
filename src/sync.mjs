@@ -83,12 +83,18 @@ async function main() {
   const sinceMs = days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : 0;
   // Opt in to recomputing costs we already stored (see upsertSession).
   const reprice = process.argv.includes("--reprice");
+  const relabel = process.argv.includes("--relabel");
+  // Opposite instructions about the same field; accepting both printed a promise
+  // about amounts that repricing then broke.
+  if (reprice && relabel) {
+    console.error("  --reprice and --relabel do opposite things; pass one");
+    process.exit(2);
+  }
   if (reprice) {
     process.env.AI_USAGE_REPRICE = "1";
     console.log("  repricing: stored costs will be recomputed at today's rates");
   }
-  // Correct provenance without touching the amounts.
-  if (process.argv.includes("--relabel")) {
+    if (relabel) {
     process.env.AI_USAGE_RELABEL = "1";
     console.log("  relabelling: cost provenance refreshed, amounts left as recorded");
   }

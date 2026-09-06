@@ -124,6 +124,20 @@ function hookCmd(appPath) {
   return `node "${path.join(appPath, "src", "record.mjs")}" --provider ${id}`;
 }
 
+/**
+ * A revision marker for one conversation, used to detect that the store moved
+ * while we were parsing. Cursor keeps conversations in SQLite, so the DB file's
+ * own mtime/size is the closest thing to a revision available without a query.
+ */
+export function stampTranscript() {
+  try {
+    const st = fs.statSync(globalDbPath());
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return null;
+  }
+}
+
 export function install({ appPath }) {
   // Refuse loudly on old Node rather than installing a hook that reads nothing.
   if (!nodeSupported()) {

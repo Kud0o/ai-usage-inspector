@@ -51,6 +51,7 @@ export async function claimScan(providerId, {
   throttleMs = 0,
   leaseMs = SCAN_LEASE_MS,
   now = Date.now(),
+  leaseId = `${process.pid}-${Math.random().toString(36).slice(2, 10)}`,
 } = {}) {
   return mutateJson(file, (state) => {
     const next = state && typeof state === "object" ? { ...state } : {};
@@ -76,14 +77,16 @@ export async function claimScan(providerId, {
       lastScanAtMs: now,
       lastScanAt: new Date(now).toISOString(),
       scanLeaseUntilMs: now + Math.max(0, leaseMs),
+      scanLeaseId: leaseId,
     };
-    return { data: next, value: true };
+    return { data: next, value: leaseId };
   });
 }
 
 export async function recordScanResult(providerId, {
   file = scanStatePath(),
   scanStartedAtMs,
+  leaseId = null,
   status = "ok",
   completed = false,
   detail = null,
@@ -99,9 +102,12 @@ export async function recordScanResult(providerId, {
     const previous = next.providers[providerId] && typeof next.providers[providerId] === "object"
       ? next.providers[providerId]
       : {};
+    const holdsLease = leaseId != null && previous.scanLeaseId === leaseId;
+    const releasing = holdsLease || previous.scanLeaseId == null;
     const entry = {
       ...previous,
-      scanLeaseUntilMs: undefined,
+      scanLeaseUntilMs: releasing ? undefined : previous.scanLeaseUntilMs,
+      scanLeaseId: releasing ? undefined : previous.scanLeaseId,
       lastScanAt: new Date(recordedAtMs).toISOString(),
       lastScanAtMs: recordedAtMs,
       lastScanStatus: cleanStatus,

@@ -304,7 +304,7 @@ test("a session-less legacy row is replaced, not duplicated", async () => {
     }) + "\n");
     await upsertSession(file, "sess-from-filename", [{
       provider: "claude", sessionId: "sess-from-filename", ts,
-      id: `sess-from-filename:${ts}:0`,
+      id: `sess-from-filename:${ts}:0`, legacyId: `undefined:${ts}`,
       cost: { total: 1, source: "priced" },
     }]);
     const rows = validRecords(file);
@@ -329,7 +329,7 @@ test("replacing one orphan leaves other orphans alone", async () => {
     ].join("\n") + "\n");
 
     await upsertSession(file, "s-new", [
-      { provider: "claude", sessionId: "s-new", ts: mine, id: `s-new:${mine}:0`, cost: { total: 1 } },
+      { provider: "claude", sessionId: "s-new", ts: mine, id: `s-new:${mine}:0`, legacyId: `undefined:${mine}`, cost: { total: 1 } },
     ]);
 
     const rows = validRecords(file);

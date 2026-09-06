@@ -169,3 +169,23 @@ test("torn trailing lines are skipped without losing earlier turns", (t) => {
   assert.equal(turns.length, 1);
   assert.equal(turns[0].prompt, "keep me");
 });
+
+// Only turns an older version could not identify carry a legacy id: no uuid and
+// no entry-level session, which it stored as "undefined:<promptId or ts>".
+// Everything else must not gain the field.
+test("a turn the old identity scheme could not name carries its legacy id", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-legacyid-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "sess-x.jsonl");
+  fs.writeFileSync(file, [
+    JSON.stringify({ type: "user", promptId: "p1", timestamp: "2026-01-01T00:00:00.000Z", message: { role: "user", content: "no uuid, no session" } }),
+    JSON.stringify({ type: "assistant", timestamp: "2026-01-01T00:00:05.000Z", message: { id: "m1", role: "assistant", model: "claude-opus-4-5", stop_reason: "end_turn", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 10, output_tokens: 1 } } }),
+    JSON.stringify({ type: "user", uuid: "u2", sessionId: "s1", timestamp: "2026-01-01T00:01:00.000Z", message: { role: "user", content: "normal turn" } }),
+    JSON.stringify({ type: "assistant", uuid: "a2", sessionId: "s1", timestamp: "2026-01-01T00:01:05.000Z", message: { id: "m2", role: "assistant", model: "claude-opus-4-5", stop_reason: "end_turn", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 10, output_tokens: 1 } } }),
+  ].join("\n") + "\n");
+
+  const turns = buildTurns(file, {});
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0].legacyId, "undefined:p1", "built from promptId, as the old scheme did");
+  assert.equal(turns[1].legacyId, undefined, "a turn with a uuid never had a legacy id");
+});

@@ -7,6 +7,8 @@
 // there is no live hook. They are captured by sync.mjs and the viewer's autoSync
 // (every launch), exactly like backfill for the other providers. Pure Node — no
 // node:sqlite, so no Node >= 22.5 requirement.
+import fs from "node:fs";
+import path from "node:path";
 import { listExtensionTasks } from "../../lib/vscode.mjs";
 import { buildTurns as buildClineTurns } from "./transcript.mjs";
 
@@ -22,6 +24,22 @@ function makeProvider({ id, displayName, extId }) {
         return listExtensionTasks(extId).length > 0;
       } catch {
         return false;
+      }
+    },
+
+    /**
+     * A revision marker for one task, so a scan can tell that the task moved
+     * while it was being parsed. These tasks are plain files, so the file the
+     * parser actually reads is the stamp.
+     */
+    stampTranscript(ref) {
+      try {
+        const dir = ref && ref.dir;
+        if (!dir) return null;
+        const st = fs.statSync(path.join(dir, "ui_messages.json"));
+        return `${st.mtimeMs}:${st.size}`;
+      } catch {
+        return null;
       }
     },
 
@@ -52,3 +70,4 @@ function makeProvider({ id, displayName, extId }) {
 export const cline = makeProvider({ id: "cline", displayName: "Cline", extId: "saoudrizwan.claude-dev" });
 export const roo = makeProvider({ id: "roo", displayName: "Roo Code", extId: "rooveterinary.roo-cline" });
 export const kilo = makeProvider({ id: "kilo", displayName: "Kilo Code", extId: "kilocode.kilo-code" });
+

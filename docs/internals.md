@@ -128,7 +128,12 @@ turn could take the lock afterwards and replace the session with its older snaps
 abandons the pass if it moved. The scan mark does not advance, so the next sweep re-reads it whole. The
 same stamp is checked once more inside the write lock, since the config read and the queue for the
 lock are themselves time in which the agent can append — under the lock is the only place the
-question can be answered without a window.
+question can be answered without a window. Only Claude and Codex hand over a file path;
+Cursor, OpenCode and the Cline family pass an opaque reference into their own store and supply their
+own `stampTranscript()`, so the guard is not silently inert for them.
+
+A scan claim carries an owner token. Without one, any result could release whichever lease happened
+to be held — including a scan that overran its own lease and returned after another worker took it.
 
 A sweep prefers a quiet spool, but a continuously busy machine never offers one — so once nothing
 has scanned for fifteen minutes it sweeps regardless. Overlapping a writer is survivable now that a

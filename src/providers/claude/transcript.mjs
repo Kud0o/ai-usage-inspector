@@ -284,6 +284,10 @@ function finalizeTurn(t, subByPrompt, opts) {
       e.uuid
       || (e.sessionId ? `${e.sessionId}:${e.promptId || startTs}` : null)
       || `${t.session || "unknown"}:${e.promptId || startTs}:${t.index}`,
+    // Only for the one shape an older version could not identify: no uuid and no
+    // entry-level session, which it stored as "undefined:<promptId or ts>". The
+    // store uses this to replace that row instead of leaving it beside this one.
+    ...(!e.uuid && !e.sessionId ? { legacyId: `undefined:${e.promptId || startTs}` } : {}),
     provider: "claude",
     // A compaction summary is written as a user turn ("This session is being
     // continued from a previous conversation...") but nobody typed it. It still

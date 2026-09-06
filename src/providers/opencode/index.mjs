@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { nodeSupported } from "../../lib/sqlite.mjs";
 import { buildTurns as buildOpencodeTurns } from "./transcript.mjs";
-import { detect, scanSessions } from "./store.mjs";
+import { detect, scanSessions, dbPath } from "./store.mjs";
 
 export { detect, nodeSupported };
 export const id = "opencode";
@@ -83,6 +83,19 @@ export const AiUsageInspector = async () => ({
   },
 });
 `;
+}
+
+/**
+ * A revision marker for one session. OpenCode keeps sessions in SQLite, so the
+ * DB file's mtime/size stands in for a per-session revision.
+ */
+export function stampTranscript() {
+  try {
+    const st = fs.statSync(dbPath());
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return null;
+  }
 }
 
 export function install({ appPath }) {

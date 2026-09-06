@@ -1,8 +1,9 @@
 // Dynamic Cursor model pricing, scraped from cursor.com's public docs — which
 // serve raw markdown at the .md suffix. Table shape (verified 2026-07):
 //   | Model | Provider | $<input> | $<output> |
-// Bare dollar cells, no per-MTok suffix, no cache column (cachedInput = 10% of
-// input). Same architecture as the other providers' refreshers: the viewer
+// Bare dollar cells, no per-MTok suffix. The page now publishes a cache-read
+// column; where it does not, cachedInput falls back to 10% of input and is
+// flagged. Same architecture as the other providers' refreshers: the viewer
 // refreshes the on-disk cache (content-diffed); the hook/sync path reads the
 // cache synchronously and never touches the network.
 //
@@ -133,7 +134,7 @@ export async function refreshPricing({
 
   let res;
   try {
-    res = await fetchImpl(url, { headers: { accept: "text/markdown, text/plain, */*" } });
+    res = await fetchImpl(url, { headers: { accept: "text/plain, */*" } });
   } catch {
     return { status: "offline", rates: cached ? cached.rates : null };
   }
