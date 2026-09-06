@@ -116,9 +116,16 @@ still records its own turns through the hook. The sweep also waits for the spool
 another worker holding a claimed envelope is still writing the very sessions a scan would parse,
 and parsing happens before the write lock is taken.
 
-Pricing caches carry a schema version. Files written before the cache recorded *which* rates were
-guessed are reinterpreted on read — a cache rate exactly equal to 10% of the input rate is the
-synthesis this tool applies when a provider publishes none, so it is marked rather than trusted.
+Pricing caches carry a schema version. A file written before the cache recorded *which* rates were
+guessed cannot be interpreted after the fact — a published rate that happens to be a tenth of the
+input rate is indistinguishable from the synthesis this tool applies when a provider publishes none
+— so such a file is treated as absent. The built-in table prices until the next refresh writes a
+cache that records what it knows.
+
+Parsing happens outside the usage lock, so a scan that started before the agent appended its newest
+turn could take the lock afterwards and replace the session with its older snapshot.
+`ingestTranscript()` therefore stamps the transcript before parsing and again before writing, and
+abandons the pass if it moved. The scan mark does not advance, so the next sweep re-reads it whole.
 
 ## What each provider reads
 

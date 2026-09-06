@@ -80,10 +80,29 @@ export async function ingest(provider, raw) {
  * per-project tracking config gates ingestion, so disabled projects are
  * skipped exactly like on the hook path. Returns the number of turns written.
  */
+function transcriptStamp(transcriptPath) {
+  try {
+    const st = fs.statSync(typeof transcriptPath === "string" ? transcriptPath : transcriptPath.file);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return null;
+  }
+}
+
 export async function ingestTranscript(provider, { transcriptPath, cwd, sessionId, opts } = {}) {
   if (!transcriptPath) return 0;
+  // Parsing happens outside the usage lock, so a scan that started before the
+  // agent appended its newest turn would take the lock afterwards and replace
+  // the session with its older snapshot. If the file moved under us, drop this
+  // pass: the scan mark does not advance, so the next sweep re-reads it whole.
+  const before = transcriptStamp(transcriptPath);
   const turns = await provider.buildTurns(transcriptPath, opts || {});
   if (!turns.length) return 0;
+  if (before !== null && transcriptStamp(transcriptPath) !== before) {
+    const err = new Error("transcript changed while being parsed");
+    err.scanStatus = "locked";
+    throw err;
+  }
 
   const effCwd = cwd || turns[0].cwd;
   if (!effCwd) return 0;

@@ -46,7 +46,14 @@ export function parseModelsDev(json) {
 
 function readCache(file) {
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    // Pre-v2 files stored a synthesized cache rate with nothing to distinguish it
+    // from a published one, and a genuine rate that happens to be a tenth of the
+    // input rate is common enough that guessing from the number is wrong either
+    // way. Treat such a file as absent: the built-in table prices the current
+    // models until the next refresh writes a cache that records what it knows.
+    if (!parsed || parsed.schema !== CACHE_SCHEMA) return null;
+    return parsed;
   } catch {
     return null;
   }
@@ -64,26 +71,10 @@ function writeCache(file, data) {
 // looked-up one. Bumped when the entry shape changes meaning.
 export const CACHE_SCHEMA = 2;
 
-/**
- * Rates from the on-disk cache, with pre-v2 files reinterpreted.
- *
- * A v1 file stored the synthesized cache rate (input * 0.1) with nothing to
- * distinguish it from a published one. Recover that distinction by recognising
- * the synthesis, rather than discarding the cache and pricing everything at the
- * built-in fallback until the next refresh.
- */
+/** Rates from the on-disk cache, or null if there is no usable one. */
 export function readCachedRates(file = CACHE_FILE) {
   const c = readCache(file);
-  if (!c || !c.rates) return null;
-  if (c.schema >= CACHE_SCHEMA) return c.rates;
-  const out = {};
-  for (const [id, r] of Object.entries(c.rates)) {
-    if (!r || typeof r !== "object") continue;
-    const synthesized = typeof r.input === "number" && typeof r.cachedInput === "number"
-      && Math.abs(r.cachedInput - r.input * 0.1) < 1e-12;
-    out[id] = { ...r, cachedGuessed: synthesized };
-  }
-  return out;
+  return c && c.rates ? c.rates : null;
 }
 
 // Content diff — how we know pricing actually changed (no version/ETag to rely on).

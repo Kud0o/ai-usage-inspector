@@ -252,15 +252,19 @@ export async function upsertSession(file, sessionId, records) {
   // provider, so replacing on the id alone would let one provider delete
   // another's rows — the same composite identity tombstoneKey() uses.
   const provider = records.length ? (records[0].provider ? String(records[0].provider) : "claude") : null;
+  // Rows an older version wrote with no session at all got the id
+  // "undefined:<startTs>". The turn now arriving with that same timestamp IS that
+  // row, so it may replace it — but only that one. Matching the prefix alone
+  // would delete every unrelated orphan in the file on any write.
+  const supersededOrphanIds = new Set(
+    records.map((r) => (r && r.ts ? `undefined:${r.ts}` : null)).filter(Boolean),
+  );
   const replaces = (r) => {
     if (provider === null) return false; // nothing to replace with
     const rp = r && r.provider ? String(r.provider) : "claude";
     if (rp !== provider) return false;
     if (r.sessionId === sessionId) return true;
-    // Rows an older version wrote with no session at all: their id was built as
-    // "undefined:<timestamp>". Left alone they would sit beside the corrected
-    // row forever, double-counting the same turn.
-    return r.sessionId == null && typeof r.id === "string" && r.id.startsWith("undefined:");
+    return r.sessionId == null && typeof r.id === "string" && supersededOrphanIds.has(r.id);
   };
   const result = await mutateNdjson(file, (existing) => {
     // Read while holding usage lock. Viewer writes tombstone before waiting for

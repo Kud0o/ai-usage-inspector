@@ -297,18 +297,45 @@ test("a session-less legacy row is replaced, not duplicated", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-orphan-"));
   const file = path.join(dir, "usage.ndjson");
   try {
+    const ts = "2026-01-01T00:00:00.000Z";
     fs.writeFileSync(file, JSON.stringify({
-      provider: "claude", id: "undefined:2026-01-01T00:00:00.000Z",
+      provider: "claude", id: `undefined:${ts}`, ts,
       cost: { total: 1, source: "priced" },
     }) + "\n");
     await upsertSession(file, "sess-from-filename", [{
-      provider: "claude", sessionId: "sess-from-filename",
-      id: "sess-from-filename:2026-01-01T00:00:00.000Z:0",
+      provider: "claude", sessionId: "sess-from-filename", ts,
+      id: `sess-from-filename:${ts}:0`,
       cost: { total: 1, source: "priced" },
     }]);
     const rows = validRecords(file);
     assert.equal(rows.length, 1, "the orphan is gone, not sitting beside its replacement");
     assert.equal(rows[0].sessionId, "sess-from-filename");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The orphan rule must identify ONE turn, not a shape. Matching the "undefined:"
+// prefix alone meant any write deleted every unrelated sessionless row in the file.
+test("replacing one orphan leaves other orphans alone", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-orphan2-"));
+  const file = path.join(dir, "usage.ndjson");
+  try {
+    const mine = "2026-01-01T00:00:00.000Z";
+    const theirs = "2026-02-02T00:00:00.000Z";
+    fs.writeFileSync(file, [
+      JSON.stringify({ provider: "claude", id: `undefined:${mine}`, ts: mine, cost: { total: 1 } }),
+      JSON.stringify({ provider: "claude", id: `undefined:${theirs}`, ts: theirs, cost: { total: 2 } }),
+    ].join("\n") + "\n");
+
+    await upsertSession(file, "s-new", [
+      { provider: "claude", sessionId: "s-new", ts: mine, id: `s-new:${mine}:0`, cost: { total: 1 } },
+    ]);
+
+    const rows = validRecords(file);
+    assert.equal(rows.length, 2, "one orphan replaced, one untouched");
+    assert.ok(rows.some((r) => r.id === `undefined:${theirs}`), "the unrelated orphan survives");
+    assert.ok(rows.some((r) => r.id === `s-new:${mine}:0`), "the matching turn was replaced");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

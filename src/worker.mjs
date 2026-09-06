@@ -241,14 +241,19 @@ const GLOBAL_HOOK_FILES = [
   path.join(os.homedir(), ".claude", "settings.json"),
   path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "hooks.json"),
   path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "config.toml"),
+  path.join(os.homedir(), ".cursor", "hooks.json"),
   path.join(os.homedir(), ".config", "opencode", "plugins", "ai-usage-inspector.js"),
 ];
+
+// The hook we write, not merely a mention of the file. A comment or an unrelated
+// command naming record.mjs must not be read as an installation.
+const HOOK_COMMAND = /record\.mjs\S*\s+--provider\s+\w/;
 
 /** Did the user install this tool for the machine, rather than one project? */
 function hasGlobalInstall() {
   for (const file of GLOBAL_HOOK_FILES) {
     try {
-      if (fs.readFileSync(file, "utf8").includes("record.mjs")) return true;
+      if (HOOK_COMMAND.test(fs.readFileSync(file, "utf8"))) return true;
     } catch {}
   }
   return false;
@@ -267,13 +272,16 @@ function hasGlobalInstall() {
  * through every other agent's history on the machine, so it does not sweep at
  * all — the project's own turns still arrive through the hook.
  */
-function installedForSweep() {
+export function sweepAllowed() {
   try {
     const raw = JSON.parse(fs.readFileSync(globalConfigPath(), "utf8"));
-    if (raw && raw.autoSweep === false) return [];
+    if (raw && raw.autoSweep === false) return false;
   } catch {}
-  if (!hasGlobalInstall()) return [];
-  return detectInstalled();
+  return hasGlobalInstall();
+}
+
+function installedForSweep() {
+  return sweepAllowed() ? detectInstalled() : [];
 }
 
 export async function sweepProviders({

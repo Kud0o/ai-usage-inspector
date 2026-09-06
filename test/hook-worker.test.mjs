@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { runLauncher } from "../src/record.mjs";
 import { drainSpool, sweepProviders } from "../src/worker.mjs";
 
@@ -230,17 +231,84 @@ test("concurrent sweeps do not both scan the same provider", async (t) => {
   assert.equal(winners, 1, "and exactly one reported it swept");
 });
 
-test("autoSweep:false in the global config disables sweeping", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-optout-"));
-  const savedHome = process.env.AI_USAGE_HOME;
-  process.env.AI_USAGE_HOME = dir;
+
+// installedForSweep() is not exported, so drive it the way the worker does: by
+// running the real module with HOME pointed at a fixture. These cover the gate
+// that decides whether a machine sweeps at all.
+async function workerWithHome(t, home) {
+  const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
   t.after(() => {
-    if (savedHome === undefined) delete process.env.AI_USAGE_HOME;
-    else process.env.AI_USAGE_HOME = savedHome;
-    fs.rmSync(dir, { recursive: true, force: true });
+    if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    if (savedProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedProfile;
   });
-  // Sweeping with an explicit provider list bypasses the opt-out by design (that
-  // is the injectable seam); the opt-out governs the detected-provider default.
-  const swept = await sweepProviders({ providers: [], scan: async () => {} });
-  assert.deepEqual(swept, []);
+  // Fresh module instance so os.homedir() is read under the fixture HOME.
+  return import(`${pathToFileURL(path.join(process.cwd(), "src", "worker.mjs")).href}?home=${encodeURIComponent(home)}`);
+}
+
+
+
+// Whether a machine sweeps at all is a gate of its own, so test it directly:
+// asserting through sweepProviders() under a fixture HOME proves nothing, because
+// no agents are detected there and the result is [] either way.
+async function gateUnderHome(t, build) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-gate-"));
+  build(home);
+  const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  t.after(() => {
+    if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    if (savedProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedProfile;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  const w = await import(
+    `${pathToFileURL(path.join(process.cwd(), "src", "worker.mjs")).href}?home=${encodeURIComponent(home)}`
+  );
+  return w.sweepAllowed();
+}
+
+const writeHook = (home, rel, body) => {
+  fs.mkdirSync(path.join(home, path.dirname(rel)), { recursive: true });
+  fs.writeFileSync(path.join(home, rel), body);
+};
+
+test("no global hook means no sweeping — a --local install stays put", async (t) => {
+  assert.equal(await gateUnderHome(t, () => {}), false);
+});
+
+test("a global Claude hook enables sweeping", async (t) => {
+  assert.equal(await gateUnderHome(t, (home) => {
+    writeHook(home, ".claude/settings.json", JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: "command", command: `node "${home}/.ai-usage-inspector/app/src/record.mjs" --provider claude` }] }] },
+    }));
+  }), true);
+});
+
+// Cursor's global hook lives in ~/.cursor/hooks.json; leaving it out silently
+// disabled sweeping for anyone who installed Cursor only.
+test("a global Cursor hook also enables sweeping", async (t) => {
+  assert.equal(await gateUnderHome(t, (home) => {
+    writeHook(home, ".cursor/hooks.json", JSON.stringify({
+      hooks: { Stop: [{ command: `node "${home}/app/src/record.mjs" --provider cursor` }] },
+    }));
+  }), true);
+});
+
+test("a passing mention of record.mjs is not an installation", async (t) => {
+  assert.equal(await gateUnderHome(t, (home) => {
+    writeHook(home, ".claude/settings.json", JSON.stringify({ note: "we used to run src/record.mjs here" }));
+  }), false);
+});
+
+test("autoSweep:false turns sweeping off even with a global hook", async (t) => {
+  assert.equal(await gateUnderHome(t, (home) => {
+    writeHook(home, ".claude/settings.json", JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: "command", command: `node "x/record.mjs" --provider claude` }] }] },
+    }));
+    writeHook(home, ".ai-usage-inspector/config.json", JSON.stringify({ schema: 2, autoSweep: false }));
+  }), false);
 });

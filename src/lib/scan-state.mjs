@@ -44,9 +44,12 @@ export function scanWindow(providerId, { file = scanStatePath(), now = Date.now(
  *
  * Returns true if this caller may scan. A caller that loses simply skips.
  */
+export const SCAN_LEASE_MS = 15 * 60 * 1000;
+
 export async function claimScan(providerId, {
   file = scanStatePath(),
   throttleMs = 0,
+  leaseMs = SCAN_LEASE_MS,
   now = Date.now(),
 } = {}) {
   return mutateJson(file, (state) => {
@@ -56,13 +59,24 @@ export async function claimScan(providerId, {
     const previous = next.providers[providerId] && typeof next.providers[providerId] === "object"
       ? next.providers[providerId]
       : {};
+    // A scan that outruns the throttle would otherwise be claimable by a second
+    // worker mid-flight, which is the very overlap this exists to prevent. The
+    // lease covers the scan itself and expires so a crashed worker frees it.
+    const lease = Number(previous.scanLeaseUntilMs);
+    if (Number.isFinite(lease) && now < lease) return { data: next, value: false };
+
     const last = Number(previous.lastScanAtMs);
     if (throttleMs > 0 && Number.isFinite(last) && now - last < throttleMs) {
       return { data: next, value: false };
     }
     // Stamp the attempt now so a concurrent worker sees it and stands down. The
     // successful-scan watermark is untouched; only a completed scan moves that.
-    next.providers[providerId] = { ...previous, lastScanAtMs: now, lastScanAt: new Date(now).toISOString() };
+    next.providers[providerId] = {
+      ...previous,
+      lastScanAtMs: now,
+      lastScanAt: new Date(now).toISOString(),
+      scanLeaseUntilMs: now + Math.max(0, leaseMs),
+    };
     return { data: next, value: true };
   });
 }
@@ -87,6 +101,7 @@ export async function recordScanResult(providerId, {
       : {};
     const entry = {
       ...previous,
+      scanLeaseUntilMs: undefined,
       lastScanAt: new Date(recordedAtMs).toISOString(),
       lastScanAtMs: recordedAtMs,
       lastScanStatus: cleanStatus,

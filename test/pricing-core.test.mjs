@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseModelsDev } from "../src/providers/codex/remote-pricing.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { parseModelsDev, readCachedRates, CACHE_SCHEMA } from "../src/providers/codex/remote-pricing.mjs";
 import { applyRemoteRates, costOf as codexCostOf } from "../src/providers/codex/pricing.mjs";
 import { M, addCost, zeroCost } from "../src/lib/pricing-core.mjs";
 
@@ -107,4 +110,28 @@ test("a guessed cache rate does not taint a turn with no cached tokens", () => {
   const c = codexCostOf("no-cache-rate-2", { input: 1_000_000, cached: 0, output: 0 });
   assert.equal(c.source, "priced", "nothing about this number was guessed");
   assert.equal(c.estimatedRate, undefined);
+});
+
+// Caches written before the file recorded WHICH rates were guessed cannot be
+// interpreted: a published rate that happens to be a tenth of the input rate is
+// indistinguishable from this tool's own synthesis. Such a file is treated as
+// absent so the built-in table prices until the next refresh.
+test("a pre-v2 pricing cache is ignored rather than guessed at", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-cache-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "pricing-codex.json");
+  const rates = { "some-model": { input: 5, cachedInput: 0.5, output: 30 } };
+
+  fs.writeFileSync(file, JSON.stringify({ fetchedAt: Date.now(), rates }));
+  assert.equal(readCachedRates(file), null, "no schema: unusable, not reinterpreted");
+
+  fs.writeFileSync(file, JSON.stringify({ schema: 1, fetchedAt: Date.now(), rates }));
+  assert.equal(readCachedRates(file), null, "schema 1 predates the marker");
+
+  fs.writeFileSync(file, JSON.stringify({
+    schema: CACHE_SCHEMA, fetchedAt: Date.now(),
+    rates: { "some-model": { input: 5, cachedInput: 0.5, output: 30, cachedGuessed: false } },
+  }));
+  const current = readCachedRates(file);
+  assert.equal(current["some-model"].cachedGuessed, false, "a current cache says what it knows");
 });
