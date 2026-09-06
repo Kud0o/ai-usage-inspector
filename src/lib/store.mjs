@@ -127,10 +127,22 @@ function encodeNdjson(records, malformed) {
  * the callback and are carried through unchanged at the end of the file.
  * Callback returns either records[] or { records, value }.
  */
+export const ABORT = Symbol("abort-mutation");
+
 export async function mutateNdjson(file, fn) {
   return withFileLock(file, () => {
     const current = readNdjson(file);
     const changed = fn(current.records.slice());
+    // A caller can only decide "is this still worth writing?" while holding the
+    // lock; checking beforehand leaves a window for the file to move.
+    if (changed === ABORT) {
+      return {
+        value: ABORT,
+        beforeBytes: Buffer.byteLength(current.text),
+        afterBytes: Buffer.byteLength(current.text),
+        malformed: current.malformed.length,
+      };
+    }
     const nextRecords = Array.isArray(changed) ? changed : changed.records;
     const value = Array.isArray(changed) ? undefined : changed.value;
     const out = encodeNdjson(nextRecords, current.malformed);
@@ -255,7 +267,7 @@ export class LockTimeoutError extends Error {
  * many records were accepted; THROWS LockTimeoutError if the lock was never
  * acquired, so the caller can retry instead of recording a phantom success.
  */
-export async function upsertSession(file, sessionId, records) {
+export async function upsertSession(file, sessionId, records, { precondition = null } = {}) {
   // Which provider this batch replaces. Session ids are only unique within a
   // provider, so replacing on the id alone would let one provider delete
   // another's rows — the same composite identity tombstoneKey() uses.
@@ -275,6 +287,9 @@ export async function upsertSession(file, sessionId, records) {
     return r.sessionId == null && typeof r.id === "string" && supersededOrphanIds.has(r.id);
   };
   const result = await mutateNdjson(file, (existing) => {
+    // Re-checked under the lock: whatever these records were parsed from may have
+    // moved on while we queued for it.
+    if (precondition && precondition() === false) return ABORT;
     // Read while holding usage lock. Viewer writes tombstone before waiting for
     // this lock, closing delete-vs-upsert resurrection races.
     const blocked = loadTombstoneKeys(tombstonePath(file));
@@ -294,5 +309,6 @@ export async function upsertSession(file, sessionId, records) {
     };
   });
   if (result === false) throw new LockTimeoutError(file);
+  if (result.value === ABORT) return ABORT;
   return result.value;
 }

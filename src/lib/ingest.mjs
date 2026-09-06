@@ -4,7 +4,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { upsertSession } from "./store.mjs";
+import { upsertSession, ABORT } from "./store.mjs";
 import { workspaceFile, workspaceLabel } from "./paths.mjs";
 import { ensureProjectConfig, isEnabled, applyFieldSelection } from "./config.mjs";
 
@@ -43,7 +43,7 @@ function ensureBundle(cwd) {
 }
 
 // Shared tail: tag, field-select, upsert, bundle. Returns turns written.
-async function storeTurns(turns, cwd, cfg, sessionId) {
+async function storeTurns(turns, cwd, cfg, sessionId, precondition = null) {
   const label = workspaceLabel(cwd);
   for (const t of turns) t.workspace = label;
 
@@ -51,7 +51,12 @@ async function storeTurns(turns, cwd, cfg, sessionId) {
   if (!sid) return 0;
 
   const slim = turns.map((t) => applyFieldSelection(t, cfg.fields));
-  const written = await upsertSession(workspaceFile(cwd), sid, slim);
+  const written = await upsertSession(workspaceFile(cwd), sid, slim, { precondition });
+  if (written === ABORT) {
+    const err = new Error("transcript changed before the write");
+    err.scanStatus = "locked";
+    throw err;
+  }
   ensureBundle(cwd);
   return written;
 }
@@ -118,5 +123,8 @@ export async function ingestTranscript(provider, { transcriptPath, cwd, sessionI
 
   const cfg = await ensureProjectConfig(effCwd);
   if (!isEnabled(cfg)) return 0;
-  return storeTurns(turns, effCwd, cfg, sessionId);
+  // Checked again under the write lock: config work and the lock queue both take
+  // time, and the agent may have appended a turn in the meantime.
+  return storeTurns(turns, effCwd, cfg, sessionId, () =>
+    before === null || transcriptStamp(transcriptPath) === before);
 }

@@ -45,3 +45,41 @@ test("an unchanged transcript ingests normally", async (t) => {
   const written = await ingestTranscript(provider, { transcriptPath, cwd: dir, sessionId: "s1" });
   assert.equal(written, 1);
 });
+
+// The pre-write stamp still left a window: config work and the queue for the
+// write lock both take time. This asserts the check that runs INSIDE the lock,
+// by moving the file after parsing has finished.
+test("a transcript that changes while waiting for the lock is not written", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-lockrace-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const transcriptPath = path.join(dir, "sess.jsonl");
+  fs.writeFileSync(transcriptPath, "first\n");
+
+  let parsed = false;
+  const provider = {
+    id: "claude",
+    buildTurns: () => {
+      parsed = true;
+      return [{ provider: "claude", sessionId: "s1", id: "a", cwd: dir, ts: "2026-01-01T00:00:00.000Z", cost: { total: 1 } }];
+    },
+  };
+
+  // Land the new turn after parsing and its stamp check, in the window before
+  // the write lock is taken.
+  const original = fs.statSync;
+  let armed = false;
+  t.after(() => { fs.statSync = original; });
+  fs.statSync = (...args) => {
+    const out = original.apply(fs, args);
+    if (parsed && !armed && String(args[0]) === transcriptPath) {
+      armed = true;
+      fs.appendFileSync(transcriptPath, "second\n");
+    }
+    return out;
+  };
+
+  await assert.rejects(
+    () => ingestTranscript(provider, { transcriptPath, cwd: dir, sessionId: "s1" }),
+    (err) => err && err.scanStatus === "locked",
+  );
+});

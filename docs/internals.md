@@ -125,7 +125,10 @@ cache that records what it knows.
 Parsing happens outside the usage lock, so a scan that started before the agent appended its newest
 turn could take the lock afterwards and replace the session with its older snapshot.
 `ingestTranscript()` therefore stamps the transcript before parsing and again before writing, and
-abandons the pass if it moved. The scan mark does not advance, so the next sweep re-reads it whole.
+abandons the pass if it moved. The scan mark does not advance, so the next sweep re-reads it whole. The
+same stamp is checked once more inside the write lock, since the config read and the queue for the
+lock are themselves time in which the agent can append — under the lock is the only place the
+question can be answered without a window.
 
 A sweep prefers a quiet spool, but a continuously busy machine never offers one — so once nothing
 has scanned for fifteen minutes it sweeps regardless. Overlapping a writer is survivable now that a
