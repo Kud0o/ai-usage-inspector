@@ -83,9 +83,10 @@ npx -y github:Kud0o/ai-usage-inspector --uninstall   # remove the hooks
 **Requirements:** Node >= 18, or >= 22.5 for Cursor and OpenCode (they are read from SQLite
 via the built-in `node:sqlite`).
 
-> **Antigravity** and **GitHub Copilot** are detected but not supported: both keep usage
-> server-side, and Antigravity encrypts its local conversations, so there is nothing on
-> disk to read.
+> **Antigravity** is detected and reported as unsupported: it encrypts its local
+> conversations, so there is nothing on disk to read. **GitHub Copilot** is not supported
+> either and is not detected — VS Code records the model it used but no token counts, so a
+> row would carry a name and nothing to weigh it by.
 
 ## Installing
 
