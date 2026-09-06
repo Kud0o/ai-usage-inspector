@@ -166,3 +166,103 @@ test("a batch carrying the same turn twice stores it once", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// preserveComputedCost lets NEW PROVENANCE through when the amount is unchanged,
+// so a row mislabelled by an older version can be corrected without --reprice.
+// The amount itself stays a fact about the day the turn ran; these pin both halves.
+test("provenance is corrected when the amount is identical", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-prov-"));
+  const file = path.join(dir, "usage.ndjson");
+  const amount = { input: 0.01, output: 0.02, cacheWrite: 0, cacheRead: 0, total: 0.03 };
+  try {
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "a", cost: { ...amount, source: "priced" } },
+    ]);
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "a", cost: { ...amount, source: "estimated", estimatedRate: true } },
+    ]);
+    const [row] = validRecords(file);
+    assert.equal(row.cost.source, "estimated", "the label was wrong and is now right");
+    assert.equal(row.cost.estimatedRate, true, "and it says which half was the guess");
+    assert.equal(row.cost.total, 0.03, "while the amount is untouched");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a different amount is still refused, label and all", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-prov2-"));
+  const file = path.join(dir, "usage.ndjson");
+  try {
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "a", cost: { input: 0.01, output: 0, cacheWrite: 0, cacheRead: 0, total: 0.01, source: "priced" } },
+    ]);
+    // Today's rates are higher. Re-scanning history must not restate what it cost.
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "a", cost: { input: 0.05, output: 0, cacheWrite: 0, cacheRead: 0, total: 0.05, source: "estimated" } },
+    ]);
+    const [row] = validRecords(file);
+    assert.equal(row.cost.total, 0.01, "the original amount survives");
+    assert.equal(row.cost.source, "priced", "and so does the provenance that goes with it");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Re-syncing must not make a row flap between labels as the rate cache warms.
+test("repeated identical re-syncs leave provenance stable", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-prov3-"));
+  const file = path.join(dir, "usage.ndjson");
+  const rec = (source) => ({
+    provider: "claude", sessionId: "s1", id: "a",
+    cost: { input: 0.01, output: 0, cacheWrite: 0, cacheRead: 0, total: 0.01, source },
+  });
+  try {
+    await upsertSession(file, "s1", [rec("priced")]);
+    for (let i = 0; i < 5; i++) await upsertSession(file, "s1", [rec("priced")]);
+    const rows = validRecords(file);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].cost.source, "priced");
+    assert.equal(rows[0].cost.total, 0.01);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the later copy of a duplicated turn wins", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-dupe2-"));
+  const file = path.join(dir, "usage.ndjson");
+  try {
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "a", prompt: "partial", cost: { total: 1 } },
+      { provider: "claude", sessionId: "s1", id: "a", prompt: "complete", cost: { total: 1 } },
+    ]);
+    const rows = validRecords(file);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].prompt, "complete", "a re-parse appends the fuller record");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// sameAmount decides whether a stored cost may be relabelled. A missing or NaN
+// field means we do not know the amounts match, so it must refuse.
+test("a malformed cost is not treated as an equal amount", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-nan-"));
+  const file = path.join(dir, "usage.ndjson");
+  const good = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total: 0.01, source: "priced" };
+  try {
+    await upsertSession(file, "s1", [{ provider: "claude", sessionId: "s1", id: "a", cost: good }]);
+    // Same numbers except total is absent — previously coerced to 0 on both sides
+    // for the missing field and accepted as "identical".
+    await upsertSession(file, "s1", [{
+      provider: "claude", sessionId: "s1", id: "a",
+      cost: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, source: "estimated" },
+    }]);
+    const [row] = validRecords(file);
+    assert.equal(row.cost.source, "priced", "an unknown amount cannot license a relabel");
+    assert.equal(row.cost.total, 0.01);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

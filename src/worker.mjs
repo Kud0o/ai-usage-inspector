@@ -5,8 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ingest, ingestTranscript } from "./lib/ingest.mjs";
+import { globalConfigPath } from "./lib/config.mjs";
 import { getProvider, detectInstalled } from "./providers/index.mjs";
-import { scanWindow, recordScanResult, readScanState } from "./lib/scan-state.mjs";
+import { scanWindow, recordScanResult, claimScan } from "./lib/scan-state.mjs";
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -234,20 +235,36 @@ const SWEEP_THROTTLE_MS = 60 * 1000;
  * Best-effort by design -- a provider that cannot be read leaves its watermark
  * where it was and gets retried next time.
  */
+/**
+ * Providers the automatic sweep may look at.
+ *
+ * This is the same set `sync.mjs` and the dashboard's scan-on-start already use
+ * (every detected agent), so sweeping widens no scope. What it does change is
+ * timing: history is imported after a turn instead of only when someone opens
+ * the dashboard. Set "autoSweep": false in ~/.ai-usage-inspector/config.json to
+ * turn that off and go back to importing on demand.
+ */
+function installedForSweep() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(globalConfigPath(), "utf8"));
+    if (raw && raw.autoSweep === false) return [];
+  } catch {}
+  return detectInstalled();
+}
+
 export async function sweepProviders({
   now = Date.now(),
   throttleMs = SWEEP_THROTTLE_MS,
   providers = null,
   scan = rescan,
 } = {}) {
-  let state = {};
-  try { state = readScanState(); } catch {}
   const swept = [];
-  for (const provider of providers || detectInstalled()) {
+  for (const provider of providers || installedForSweep()) {
     if (typeof provider.discoverTranscripts !== "function") continue;
-    const entry = state.providers && state.providers[provider.id];
-    const last = Number(entry && entry.lastScanAtMs);
-    if (Number.isFinite(last) && now - last < throttleMs) continue;
+    // Claim before scanning: two workers starting together must not both scan.
+    let mine = false;
+    try { mine = await claimScan(provider.id, { throttleMs, now }); } catch { mine = false; }
+    if (!mine) continue;
     try {
       await scan(provider, {});
       swept.push(provider.id);

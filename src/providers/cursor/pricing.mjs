@@ -40,7 +40,7 @@ export function applyRemoteRates(rates) {
   if (!rates) return;
   for (const [id, r] of Object.entries(rates)) {
     if (!r || !(r.input >= 0) || !(r.output >= 0)) continue;
-    const cachedKnown = r.cachedInput >= 0;
+    const cachedKnown = r.cachedInput >= 0 && !r.cachedGuessed;
     const cached = cachedKnown ? r.cachedInput : r.input * 0.1;
     const ctx = (TABLE[id] && TABLE[id].contextMax) || FALLBACK.contextMax;
     OVERRIDES[id] = { ...model(r.input, cached, r.output, ctx), cachedGuessed: !cachedKnown };

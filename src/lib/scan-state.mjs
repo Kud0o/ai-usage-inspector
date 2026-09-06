@@ -34,6 +34,39 @@ export function scanWindow(providerId, { file = scanStatePath(), now = Date.now(
   };
 }
 
+/**
+ * Take the right to scan a provider, or report that someone else already has.
+ *
+ * Sweeps run in detached workers that can start at the same moment, so reading
+ * the throttle and then acting on it is a race: both read a stale mark, both
+ * scan, both ingest. The check and the stamp happen together inside the same
+ * locked mutation, so exactly one caller wins.
+ *
+ * Returns true if this caller may scan. A caller that loses simply skips.
+ */
+export async function claimScan(providerId, {
+  file = scanStatePath(),
+  throttleMs = 0,
+  now = Date.now(),
+} = {}) {
+  return mutateJson(file, (state) => {
+    const next = state && typeof state === "object" ? { ...state } : {};
+    next.schema = 1;
+    next.providers = next.providers && typeof next.providers === "object" ? { ...next.providers } : {};
+    const previous = next.providers[providerId] && typeof next.providers[providerId] === "object"
+      ? next.providers[providerId]
+      : {};
+    const last = Number(previous.lastScanAtMs);
+    if (throttleMs > 0 && Number.isFinite(last) && now - last < throttleMs) {
+      return { data: next, value: false };
+    }
+    // Stamp the attempt now so a concurrent worker sees it and stands down. The
+    // successful-scan watermark is untouched; only a completed scan moves that.
+    next.providers[providerId] = { ...previous, lastScanAtMs: now, lastScanAt: new Date(now).toISOString() };
+    return { data: next, value: true };
+  });
+}
+
 export async function recordScanResult(providerId, {
   file = scanStatePath(),
   scanStartedAtMs,

@@ -6,6 +6,21 @@ import test from "node:test";
 import { runLauncher } from "../src/record.mjs";
 import { drainSpool, sweepProviders } from "../src/worker.mjs";
 
+// Point scan bookkeeping at a throwaway file: these tests must never touch the
+// real ~/.ai-usage-inspector/scan-state.json.
+function withScanState(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-state-"));
+  const saved = process.env.AI_USAGE_SCAN_STATE_FILE;
+  process.env.AI_USAGE_SCAN_STATE_FILE = path.join(dir, "scan-state.json");
+  t.after(() => {
+    if (saved === undefined) delete process.env.AI_USAGE_SCAN_STATE_FILE;
+    else process.env.AI_USAGE_SCAN_STATE_FILE = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  return dir;
+}
+
+
 function writeJsonl(file, records) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
@@ -127,7 +142,8 @@ test("worker recovers orphan and bounds poison retries", async () => {
 // The failure this exists for: a delegated CLI run (e.g. "codex exec" behind a
 // delegate skill) writes its transcript but fires no Stop hook, so its cost stays
 // invisible until something scans. The next hook from any agent has to pull it in.
-test("sweepProviders scans a provider that has never been scanned", async () => {
+test("sweepProviders scans a provider that has never been scanned", async (t) => {
+  withScanState(t);
   const seen = [];
   const providers = [
     { id: "codex", discoverTranscripts: () => [] },
@@ -141,7 +157,8 @@ test("sweepProviders scans a provider that has never been scanned", async () => 
   assert.deepEqual(seen, ["codex", "cursor"], "each provider actually scanned");
 });
 
-test("a provider without discovery is left alone", async () => {
+test("a provider without discovery is left alone", async (t) => {
+  withScanState(t);
   const swept = await sweepProviders({
     providers: [{ id: "hook-only" }],
     scan: async () => { throw new Error("must not scan"); },
@@ -175,7 +192,8 @@ test("sweepProviders throttles a provider scanned moments ago", async (t) => {
 });
 
 // One unreadable store must not stop the others from being imported.
-test("a provider that throws does not abort the sweep", async () => {
+test("a provider that throws does not abort the sweep", async (t) => {
+  withScanState(t);
   const swept = await sweepProviders({
     providers: [
       { id: "broken", discoverTranscripts: () => [] },
@@ -184,4 +202,45 @@ test("a provider that throws does not abort the sweep", async () => {
     scan: async (p) => { if (p.id === "broken") throw new Error("store locked"); },
   });
   assert.deepEqual(swept, ["fine"]);
+});
+
+// Two detached workers can start in the same instant. Reading the throttle and
+// then acting on it is a race — both see a stale mark, both scan, both ingest.
+// The claim has to be atomic, so exactly one wins.
+test("concurrent sweeps do not both scan the same provider", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-claim-"));
+  const saved = process.env.AI_USAGE_SCAN_STATE_FILE;
+  process.env.AI_USAGE_SCAN_STATE_FILE = path.join(dir, "scan-state.json");
+  t.after(() => {
+    if (saved === undefined) delete process.env.AI_USAGE_SCAN_STATE_FILE;
+    else process.env.AI_USAGE_SCAN_STATE_FILE = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const providers = [{ id: "codex", discoverTranscripts: () => [] }];
+  let scans = 0;
+  const now = 5_000_000;
+  const results = await Promise.all(
+    Array.from({ length: 8 }, () =>
+      sweepProviders({ now, throttleMs: 60_000, providers, scan: async () => { scans += 1; } })),
+  );
+
+  const winners = results.filter((r) => r.length === 1).length;
+  assert.equal(scans, 1, "exactly one worker scanned");
+  assert.equal(winners, 1, "and exactly one reported it swept");
+});
+
+test("autoSweep:false in the global config disables sweeping", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-optout-"));
+  const savedHome = process.env.AI_USAGE_HOME;
+  process.env.AI_USAGE_HOME = dir;
+  t.after(() => {
+    if (savedHome === undefined) delete process.env.AI_USAGE_HOME;
+    else process.env.AI_USAGE_HOME = savedHome;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  // Sweeping with an explicit provider list bypasses the opt-out by design (that
+  // is the injectable seam); the opt-out governs the detected-provider default.
+  const swept = await sweepProviders({ providers: [], scan: async () => {} });
+  assert.deepEqual(swept, []);
 });

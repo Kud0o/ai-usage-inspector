@@ -280,7 +280,10 @@ function finalizeTurn(t, subByPrompt, opts) {
     startTs && firstAsstTs ? Math.max(0, Date.parse(firstAsstTs) - Date.parse(startTs)) : 0;
 
   return {
-    id: e.uuid || `${t.session || "unknown"}:${e.promptId || startTs}:${t.index}`,
+    id:
+      e.uuid
+      || (e.sessionId ? `${e.sessionId}:${e.promptId || startTs}` : null)
+      || `${t.session || "unknown"}:${e.promptId || startTs}:${t.index}`,
     provider: "claude",
     // A compaction summary is written as a user turn ("This session is being
     // continued from a previous conversation...") but nobody typed it. It still

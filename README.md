@@ -203,6 +203,10 @@ cooperate.
 Delegated turns land in the project the delegate itself reports as its working directory, so a run
 launched against your repo is filed under your repo, not under wherever the launcher happened to be.
 
+This covers the same agents the dashboard already scans, just sooner. If you would rather history
+only arrive when you open the dashboard, set `"autoSweep": false` in
+`~/.ai-usage-inspector/config.json`.
+
 The dashboard then splits the numbers by agent, so delegated spend is visible rather than folded
 into one total:
 

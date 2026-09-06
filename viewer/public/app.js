@@ -111,12 +111,13 @@ async function exportRecords(kind) {
     if (!Array.isArray(full) || !full.length) toast("full text unavailable — exported previews");
     download(`ai-usage-${stamp}.json`, JSON.stringify(out, null, 2), "application/json");
   } else {
-    const cols = ["ts", "provider", "platform", "workspace", "sessionId", "model", "permissionMode", "promptChars", "responseChars", "input", "output", "reasoning", "cacheRead", "cacheWrite", "costTotal", "costSource", "estimated", "durationMs", "contextFillPct"];
+    const cols = ["ts", "provider", "platform", "workspace", "sessionId", "model", "permissionMode", "promptChars", "responseChars", "input", "output", "reasoning", "cacheRead", "cacheWrite", "costTotal", "costSource", "estimated", "estimatedRate", "durationMs", "contextFillPct"];
     const line = (e) => [
       e.ts, PROV(e), e.entrypoint || "", e.workspace, e.sessionId, e.model, e.permissionMode,
       e.promptChars, e.responseChars,
       T_IN(e), T_OUT(e), (e.usage && e.usage.reasoning) || 0, (e.usage && e.usage.cacheRead) || 0, (e.usage && e.usage.cacheCreate) || 0,
-      COST(e), (e.cost && e.cost.source) || "", COST_ESTIMATED(e) ? 1 : 0, e.durationMs || 0, e.contextFillPct || 0,
+      COST(e), (e.cost && e.cost.source) || "", COST_ESTIMATED(e) ? 1 : 0,
+      e.cost && e.cost.estimatedRate ? 1 : 0, e.durationMs || 0, e.contextFillPct || 0,
     ].map(csvCell).join(",");
     const csv = [cols.join(","), ...rows.map(line)].join("\r\n");
     download(`ai-usage-${stamp}.csv`, csv, "text/csv");
@@ -310,7 +311,7 @@ function apply() {
   renderCharts();
   renderTable();
   const r = state.all.length ? `${fmtWhen(state.all[state.all.length - 1].ts)} → ${fmtWhen(state.all[0].ts)}` : "no data";
-  $("#meta-range").textContent = `${state.view.length}/${state.all.length} prompts · ${r}`;
+  $("#meta-range").textContent = `${state.view.length}/${state.all.length} turns · ${r}`;
   const del = $("#f-del");
   if (del) { del.textContent = `delete shown (${state.view.length})`; del.disabled = state.view.length === 0; }
   persist();
@@ -353,8 +354,8 @@ function renderStats() {
   if (has("context")) cards.push({ label: "avg context", val: avgCtx.toFixed(1) + "<small>%</small>", sub: "of window filled", cls: "amber", bar: avgCtx });
   if (has("timing")) cards.push({ label: "active time", val: fmtDur(dur), sub: "summed turn duration", cls: "" });
   if (has("timing") && respRecs.length) cards.push({ label: "avg first response", val: fmtDur(avgResp), sub: "prompt → first reply", cls: "" });
-  cards.push({ label: "top model", val: esc(shortModel(topModel)), sub: topModel ? byModel[topModel] + " prompts" : "—", cls: "" });
-  cards.push({ label: "busiest workspace", val: esc(topWs || "—"), sub: topWs ? byWs[topWs] + " prompts" : "—", cls: "" });
+  cards.push({ label: "top model", val: esc(shortModel(topModel)), sub: topModel ? byModel[topModel] + " turns" : "—", cls: "" });
+  cards.push({ label: "busiest workspace", val: esc(topWs || "—"), sub: topWs ? byWs[topWs] + " turns" : "—", cls: "" });
   if (has("cost")) {
     // With more than one agent in view, which agent spent it matters more than
     // the per-prompt average — delegated work is otherwise invisible up here.
@@ -390,13 +391,6 @@ function renderStats() {
       sub = `${fmtUsd(monthCost)} of ${fmtUsd(b)} budget · ${Math.round(pct * 100)}%`;
     }
     cards.push({ label: "this month", val: fmtUsd(monthCost), sub: b ? sub : sub, cls });
-  }
-  // Cost by provider — only meaningful when the filtered view spans >1 provider.
-  const provs = provsIn(v);
-  if (has("cost") && provs.length > 1) {
-    const byProv = provs.map((p) => [p, v.reduce((a, e) => (PROV(e) === p ? a + COST(e) : a), 0)]).sort((a, b) => b[1] - a[1]);
-    const sub = byProv.map(([p, c]) => `${p} ${fmtUsd(c)}`).join(" · ");
-    cards.push({ label: "cost · by provider", val: fmtUsd(cost), sub, cls: "cost" });
   }
   $("#stats").innerHTML = cards
     .map(
@@ -453,8 +447,8 @@ function renderCharts() {
       ${areaChart(keys, tok, cssv("--accent"))}
     </div>`);
   if (has("context")) cards.push(`<div class="card"><h3>context fill distribution</h3>${histogram(buckets)}</div>`);
-  cards.push(`<div class="card"><h3>permission mode</h3>${donut(modeCount, (x) => x + " prompts")}</div>`);
-  cards.push(`<div class="card"><h3>prompts by model</h3>${donut(modelCount, (x) => x + " prompts")}</div>`);
+  cards.push(`<div class="card"><h3>permission mode</h3>${donut(modeCount, (x) => x + " turns")}</div>`);
+  cards.push(`<div class="card"><h3>turns by model</h3>${donut(modelCount, (x) => x + " turns")}</div>`);
   if (has("skills") && skillsUsed) cards.push(`<div class="card"><h3>skills invoked <b>${skillsUsed}</b></h3>${donut(skillCount, (x) => x + "×")}</div>`);
   if (has("cost")) cards.push(`<div class="card"><h3>cost / day <b class="cost-b">${fmtUsd(cost.reduce((a, b) => a + b, 0))}</b></h3>${barChart(keys, cost, cssv("--faint"), (x) => fmtUsd(x))}</div>`);
   // Per-provider breakdowns — only when the view spans more than one provider.
@@ -668,7 +662,7 @@ function renderTable() {
     const costPart = has("cost") ? `${fmtUsd(cost)} · ` : "";
     html += `<tr class="group"><td colspan="99">
       <b>${esc(head.workspace)}</b> · ${esc(head.slug || sid.slice(0, 8))}
-      <span class="gstats">${items.length} prompts · ${costPart}session ${esc(sid.slice(0, 8))}</span>
+      <span class="gstats">${items.length} turns · ${costPart}session ${esc(sid.slice(0, 8))}</span>
     </td></tr>`;
     html += items.map(rowHtml).join("");
   }

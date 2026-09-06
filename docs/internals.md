@@ -102,6 +102,15 @@ nothing new to import takes about 140 ms, entirely inside the detached worker.
 
 A provider that throws is skipped, leaving its watermark where it was, so the next sweep retries it.
 
+Several workers can finish at the same moment, so the throttle is a claim rather than a check:
+`claimScan()` tests the mark and stamps it inside one locked mutation, and only the caller that
+wins may scan. Losing callers stand down instead of scanning the same store in parallel.
+
+The sweep covers every detected agent — the same set `sync.mjs` and the dashboard already scan, so
+it widens no scope. What it changes is timing: history arrives after a turn rather than only when
+someone opens the dashboard. Set `"autoSweep": false` in `~/.ai-usage-inspector/config.json` to go
+back to importing on demand.
+
 ## What each provider reads
 
 **Claude Code** — three transcript realities make the numbers trustworthy

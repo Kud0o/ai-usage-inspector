@@ -34,6 +34,9 @@ export function parseModelsDev(json) {
     rates[id] = {
       input: c.input,
       cachedInput: c.cache_read >= 0 ? c.cache_read : c.input * 0.1,
+      // No published cache rate: the 10% is our guess, and the cost built from
+      // it has to say so rather than pass as a looked-up rate.
+      cachedGuessed: !(c.cache_read >= 0),
       output: c.output,
       contextMax: (m.limit && m.limit.context) || null,
     };

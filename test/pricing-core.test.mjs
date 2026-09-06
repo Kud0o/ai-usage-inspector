@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { parseModelsDev } from "../src/providers/codex/remote-pricing.mjs";
+import { applyRemoteRates, costOf as codexCostOf } from "../src/providers/codex/pricing.mjs";
 import { M, addCost, zeroCost } from "../src/lib/pricing-core.mjs";
 
 const cost = (n, extra = {}) => ({ input: n, output: n, cacheRead: n, cacheWrite: n, total: n * 4, ...extra });
@@ -67,4 +69,42 @@ test("summing many messages accumulates like a turn does", () => {
   assert.equal(total.total, 16);
   assert.equal(total.input, 4);
   assert.equal(total.source, "priced");
+});
+
+// The 10% cache-rate guess is made inside the remote PARSER, not in
+// applyRemoteRates. A test that calls applyRemoteRates directly will therefore
+// pass while production still labels the guess "priced" — so drive the real
+// parser path here.
+test("a model with no published cache rate is priced as an estimate", () => {
+  const rates = parseModelsDev({
+    openai: {
+      models: {
+        "has-cache-rate": { cost: { input: 2, output: 10, cache_read: 0.25 } },
+        "no-cache-rate": { cost: { input: 2, output: 10 } },
+      },
+    },
+  });
+  assert.equal(rates["has-cache-rate"].cachedGuessed, false);
+  assert.equal(rates["no-cache-rate"].cachedGuessed, true, "the parser records that it guessed");
+
+  applyRemoteRates(rates);
+
+  const known = codexCostOf("has-cache-rate", { input: 0, cached: 1_000_000, output: 0 });
+  assert.equal(known.source, "priced");
+  assert.equal(known.cacheRead, 0.25);
+
+  const guessed = codexCostOf("no-cache-rate", { input: 0, cached: 1_000_000, output: 0 });
+  assert.equal(guessed.source, "estimated", "the cache rate was invented, so the cost is an estimate");
+  assert.equal(guessed.estimatedRate, true);
+  assert.equal(guessed.cacheRead, 0.2, "still charged at the 10% guess");
+});
+
+// A turn that never touched the cache is unaffected by a guessed cache rate.
+test("a guessed cache rate does not taint a turn with no cached tokens", () => {
+  applyRemoteRates(parseModelsDev({
+    openai: { models: { "no-cache-rate-2": { cost: { input: 2, output: 10 } } } },
+  }));
+  const c = codexCostOf("no-cache-rate-2", { input: 1_000_000, cached: 0, output: 0 });
+  assert.equal(c.source, "priced", "nothing about this number was guessed");
+  assert.equal(c.estimatedRate, undefined);
 });

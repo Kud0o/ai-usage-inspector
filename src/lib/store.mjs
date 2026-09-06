@@ -202,7 +202,13 @@ const COST_AMOUNT_FIELDS = ["input", "output", "cacheWrite", "cacheRead", "total
 
 /** Do two cost objects claim the same money? Provenance is ignored. */
 function sameAmount(a, b) {
-  return COST_AMOUNT_FIELDS.every((k) => (a[k] || 0) === (b[k] || 0));
+  return COST_AMOUNT_FIELDS.every((k) => {
+    const x = a[k], y = b[k];
+    // Only real numbers compare: a missing or NaN field means we do not know the
+    // amounts match, and must not treat that as licence to relabel.
+    return typeof x === "number" && typeof y === "number"
+      && Number.isFinite(x) && Number.isFinite(y) && x === y;
+  });
 }
 
 function preserveComputedCost(next, previous) {
@@ -251,17 +257,15 @@ export async function upsertSession(file, sessionId, records) {
     // this lock, closing delete-vs-upsert resurrection races.
     const blocked = loadTombstoneKeys(tombstonePath(file));
     const priorByKey = new Map(existing.map((r) => [tombstoneKey(r), r]));
-    const seen = new Set();
-    const accepted = records
-      .filter((r) => !blocked.has(tombstoneKey(r)))
-      // A malformed batch can carry the same turn twice; keep the last one.
-      .filter((r) => {
-        const k = tombstoneKey(r);
-        if (seen.has(k)) return false;
-        seen.add(k);
-        return true;
-      })
-      .map((r) => preserveComputedCost(r, priorByKey.get(tombstoneKey(r))));
+    // A batch can carry the same turn twice. Keep the LAST copy: a re-parse
+    // appends the more complete version, so the later record wins.
+    const byKey = new Map();
+    for (const r of records) {
+      if (blocked.has(tombstoneKey(r))) continue;
+      byKey.set(tombstoneKey(r), r);
+    }
+    const accepted = [...byKey.values()].map((r) =>
+      preserveComputedCost(r, priorByKey.get(tombstoneKey(r))));
     return {
       records: existing.filter((r) => !replaces(r)).concat(accepted),
       value: accepted.length,

@@ -54,7 +54,9 @@ export function parsePricingMarkdown(md) {
     const output = parsePrice(cells[COL.output]);
     if (!id || id in rates || input == null || output == null) continue;
     const cr = parsePrice(cells[COL.cacheRead]);
-    rates[id] = { input, cachedInput: cr != null ? cr : input * 0.1, output };
+    // cr == null means the page published no cache rate; the 10% below is our
+    // guess, flagged so costs derived from it are labelled estimated.
+    rates[id] = { input, cachedInput: cr != null ? cr : input * 0.1, output, cachedGuessed: cr == null };
   }
   return rates;
 }
