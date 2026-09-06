@@ -173,6 +173,24 @@ body > *:not(.grain):not(.drawer) { position: relative; z-index: 1; }
 }
 .card h3 b { font-family: var(--display); font-size: 16px; color: var(--text); font-weight: 600; }
 .card.span2 { grid-column: 1 / -1; }
+/* Per-agent breakdown: which agent spent what on this project. */
+.card.span2 { min-width: 0; }
+.agent-wrap { overflow-x: auto; max-width: 100%; }
+.agent-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.agent-table th, .agent-table td { padding: 9px 14px; white-space: nowrap; }
+.agent-table th:first-child, .agent-table td:first-child { padding-left: 0; }
+.agent-table th:last-child, .agent-table td:last-child { padding-right: 0; }
+.agent-table th {
+  text-align: right; font-weight: 500; color: var(--muted); font-size: 11px;
+  text-transform: uppercase; letter-spacing: .04em; padding-top: 0; border-bottom: 1px solid var(--line);
+}
+.agent-table th:first-child { text-align: left; }
+.agent-table td { border-bottom: 1px solid var(--line); }
+.agent-table tr:last-child td { border-bottom: 0; }
+.agent-table td.num { text-align: right; font-family: var(--mono); }
+.agent-table td.cost-b { color: var(--text); }
+.agent-name { display: inline-flex; align-items: center; gap: 8px; }
+.prov-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .charts .stack { display: grid; gap: 16px; }
 svg { display: block; width: 100%; overflow: visible; }

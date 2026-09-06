@@ -355,7 +355,22 @@ function renderStats() {
   if (has("timing") && respRecs.length) cards.push({ label: "avg first response", val: fmtDur(avgResp), sub: "prompt → first reply", cls: "" });
   cards.push({ label: "top model", val: esc(shortModel(topModel)), sub: topModel ? byModel[topModel] + " prompts" : "—", cls: "" });
   cards.push({ label: "busiest workspace", val: esc(topWs || "—"), sub: topWs ? byWs[topWs] + " prompts" : "—", cls: "" });
-  if (has("cost")) cards.push({ label: "cost", val: fmtUsd(cost), sub: prompts ? `${fmtUsd(cost / prompts)} / prompt` : "—", cls: "cost" });
+  if (has("cost")) {
+    // With more than one agent in view, which agent spent it matters more than
+    // the per-prompt average — delegated work is otherwise invisible up here.
+    const costProvs = provsIn(v);
+    let costSub = prompts ? `${fmtUsd(cost / prompts)} / prompt` : "—";
+    if (costProvs.length > 1) {
+      const byProv = {};
+      for (const e of v) byProv[PROV(e)] = (byProv[PROV(e)] || 0) + COST(e);
+      costSub = costProvs
+        .slice()
+        .sort((a, b) => byProv[b] - byProv[a])
+        .map((p) => `${esc(p)} ${fmtUsd(byProv[p])}`)
+        .join(" · ");
+    }
+    cards.push({ label: "cost", val: fmtUsd(cost), sub: costSub, cls: "cost" });
+  }
   // This month's spend (computed across ALL records, independent of filters) +
   // optional monthly budget with warn/danger accents.
   if (has("cost")) {
@@ -447,6 +462,7 @@ function renderCharts() {
   if (provs.length > 1) {
     const tokByProv = {}, costByProv = {};
     for (const e of v) { const p = PROV(e); tokByProv[p] = (tokByProv[p] || 0) + T_TOTAL(e); costByProv[p] = (costByProv[p] || 0) + COST(e); }
+    cards.push(`<div class="card span2"><h3>by agent</h3>${agentTable(v)}</div>`);
     if (has("tokens")) cards.push(`<div class="card"><h3>tokens by provider</h3>${provDonut(tokByProv, (x) => fmtTok(x))}</div>`);
     if (has("cost")) cards.push(`<div class="card"><h3>cost by provider</h3>${provDonut(costByProv, (x) => fmtUsd(x))}</div>`);
   }
@@ -516,6 +532,49 @@ function donut(map, fmt) {
 }
 
 // Donut keyed by provider, so each slice uses that provider's brand color.
+// Per-agent breakdown. Work delegated to another agent — a delegate skill
+// shelling out to another CLI — is spend on this project like any other, but it
+// lands under a different provider and would otherwise disappear into one total.
+function agentTable(rows) {
+  const provs = provsIn(rows);
+  if (!provs.length) return emptyChart();
+  const stat = {};
+  for (const p of provs) stat[p] = { turns: 0, prompts: 0, tok: 0, cost: 0, ms: 0 };
+  for (const e of rows) {
+    const s = stat[PROV(e)];
+    if (!s) continue;
+    s.turns += 1;
+    if (!e.synthetic) s.prompts += 1;
+    s.tok += T_TOTAL(e);
+    s.cost += COST(e);
+    s.ms += e.durationMs || 0;
+  }
+  const total = provs.reduce((a, p) => a + stat[p].cost, 0);
+  const ordered = provs.slice().sort((a, b) => stat[b].cost - stat[a].cost);
+  const body = ordered.map((p) => {
+    const s = stat[p];
+    const share = total > 0 ? (s.cost / total) * 100 : 0;
+    return `<tr>
+      <td><span class="agent-name"><span class="prov-dot" style="background:${provColor(p)}"></span>${esc(p)}</span></td>
+      <td class="num">${fmtInt(s.prompts)}</td>
+      ${has("tokens") ? `<td class="num">${fmtTok(s.tok)}</td>` : ""}
+      ${has("timing") ? `<td class="num">${fmtDur(s.ms)}</td>` : ""}
+      ${has("cost") ? `<td class="num cost-b">${fmtUsd(s.cost)}</td>` : ""}
+      ${has("cost") ? `<td class="num muted">${total > 0 ? share.toFixed(0) + "%" : "—"}</td>` : ""}
+    </tr>`;
+  }).join("");
+  return `<div class="agent-wrap"><table class="agent-table">
+    <thead><tr>
+      <th>agent</th><th class="num">prompts</th>
+      ${has("tokens") ? `<th class="num">tokens</th>` : ""}
+      ${has("timing") ? `<th class="num">active</th>` : ""}
+      ${has("cost") ? `<th class="num">cost</th>` : ""}
+      ${has("cost") ? `<th class="num">share</th>` : ""}
+    </tr></thead>
+    <tbody>${body}</tbody>
+  </table></div>`;
+}
+
 function provDonut(map, fmt) {
   const entries = Object.entries(map).sort((a, b) => b[1] - a[1]);
   const total = entries.reduce((a, [, v]) => a + v, 0);

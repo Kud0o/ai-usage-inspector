@@ -203,6 +203,17 @@ cooperate.
 Delegated turns land in the project the delegate itself reports as its working directory, so a run
 launched against your repo is filed under your repo, not under wherever the launcher happened to be.
 
+The dashboard then splits the numbers by agent, so delegated spend is visible rather than folded
+into one total:
+
+```text
+cost  $695.50
+      claude $655.14 · codex $40.36
+```
+
+The **by agent** card breaks that down further — prompts, tokens, active time, cost and share of
+spend per agent. It appears whenever the view holds more than one agent.
+
 ## How much to trust a cost
 
 Not every dollar figure is equally trustworthy, so each record says where its number came
