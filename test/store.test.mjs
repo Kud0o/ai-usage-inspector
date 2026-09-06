@@ -397,3 +397,51 @@ test("--relabel still refuses a different amount", async (t) => {
     delete process.env.AI_USAGE_RELABEL;
   }
 });
+
+// Turning a field group off means "stop recording this", not "delete what is
+// already recorded". Without this, any later reparse of the session — a following
+// turn, or a sweep — rewrote its rows with the group stripped, so collected
+// history vanished as a side effect of a settings change.
+test("a field turned off does not erase what is already stored", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-fields-"));
+  const file = path.join(dir, "usage.ndjson");
+  try {
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "a", prompt: "already collected", cost: { total: 1 } },
+    ]);
+    // The reparse arrives stripped, as applyFieldSelection would deliver it.
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "a", cost: { total: 1 } },
+    ], {
+      preserveFields: (r, prior) => (prior && r.prompt === undefined && prior.prompt !== undefined
+        ? { ...r, prompt: prior.prompt }
+        : r),
+    });
+    assert.equal(validRecords(file)[0].prompt, "already collected");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a turn that never had the field does not gain one", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-fields2-"));
+  const file = path.join(dir, "usage.ndjson");
+  try {
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "a", prompt: "old turn", cost: { total: 1 } },
+    ]);
+    await upsertSession(file, "s1", [
+      { provider: "claude", sessionId: "s1", id: "a", prompt: "old turn", cost: { total: 1 } },
+      { provider: "claude", sessionId: "s1", id: "b", cost: { total: 1 } },
+    ], {
+      preserveFields: (r, prior) => (prior && r.prompt === undefined && prior.prompt !== undefined
+        ? { ...r, prompt: prior.prompt }
+        : r),
+    });
+    const rows = validRecords(file);
+    assert.equal(rows.find((r) => r.id === "a").prompt, "old turn");
+    assert.equal(rows.find((r) => r.id === "b").prompt, undefined, "new turn stays stripped");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

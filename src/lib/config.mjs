@@ -61,6 +61,17 @@ export function projectConfigPath(cwd) {
   return path.join(cwd, ".ai-usage", "config.json");
 }
 
+/**
+ * The one config governing aggregate mode, where every project pools into a
+ * single directory and there is no per-project folder to hold settings. The
+ * dashboard writes it; capture has to read it, or its switches do nothing.
+ */
+export function aggregateConfigPath() {
+  return process.env.AI_USAGE_DIR
+    ? path.join(process.env.AI_USAGE_DIR, "config.json")
+    : null;
+}
+
 export function isEnabled(cfg) {
   return !(cfg && cfg.tracking) || cfg.tracking.enabled !== false;
 }
@@ -72,7 +83,19 @@ export function isEnabled(cfg) {
 export async function ensureProjectConfig(cwd) {
   const def = loadGlobalDefaults();
   const file = projectConfigPath(cwd);
-  if (!file) return { tracking: { enabled: def.enabledDefault }, fields: { ...def.fields } };
+  if (!file) {
+    // Aggregate mode: honour the dashboard's own switches, falling back to the
+    // global defaults for anything it has not set.
+    const agg = loadJson(aggregateConfigPath() || "");
+    const fields = { ...def.fields };
+    if (agg.fields && typeof agg.fields === "object") {
+      for (const g of FIELD_GROUPS) if (typeof agg.fields[g] === "boolean") fields[g] = agg.fields[g];
+    }
+    const enabled = agg.tracking && typeof agg.tracking.enabled === "boolean"
+      ? agg.tracking.enabled
+      : def.enabledDefault;
+    return { tracking: { enabled }, fields };
+  }
 
   const cur = loadJson(file);
   const complete =
@@ -181,6 +204,28 @@ export function applyFieldSelection(record, fields) {
   const out = { ...record };
   for (const g of FIELD_GROUPS) {
     if (fields && fields[g] === false) for (const k of GROUP_KEYS[g]) delete out[k];
+  }
+  return out;
+}
+
+/**
+ * Carry already-stored values through a reparse of the same turn.
+ *
+ * Turning a field group off means "stop recording this", not "delete what you
+ * already recorded". Without this, any later reparse of a session — a following
+ * turn, or a sweep — rewrote its rows with the group stripped, so history the
+ * user had already collected disappeared as a side effect of a settings change.
+ * Only groups that are currently OFF are restored, and only from the row that
+ * was already on disk.
+ */
+export function preserveStoredFields(next, previous, fields) {
+  if (!previous) return next;
+  const out = { ...next };
+  for (const g of FIELD_GROUPS) {
+    if (!fields || fields[g] !== false) continue;
+    for (const k of GROUP_KEYS[g]) {
+      if (out[k] === undefined && previous[k] !== undefined) out[k] = previous[k];
+    }
   }
   return out;
 }

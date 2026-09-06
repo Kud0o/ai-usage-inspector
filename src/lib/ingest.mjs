@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { upsertSession, ABORT } from "./store.mjs";
 import { workspaceFile, workspaceLabel } from "./paths.mjs";
-import { ensureProjectConfig, isEnabled, applyFieldSelection } from "./config.mjs";
+import { ensureProjectConfig, isEnabled, applyFieldSelection, preserveStoredFields } from "./config.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -51,7 +51,11 @@ async function storeTurns(turns, cwd, cfg, sessionId, precondition = null) {
   if (!sid) return 0;
 
   const slim = turns.map((t) => applyFieldSelection(t, cfg.fields));
-  const written = await upsertSession(workspaceFile(cwd), sid, slim, { precondition });
+  const written = await upsertSession(workspaceFile(cwd), sid, slim, {
+    precondition,
+    // A field turned off stops new recording; it does not erase what is stored.
+    preserveFields: (r, prior) => preserveStoredFields(r, prior, cfg.fields),
+  });
   if (written === ABORT) {
     const err = new Error("transcript changed before the write");
     err.scanStatus = "locked";

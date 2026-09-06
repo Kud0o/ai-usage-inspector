@@ -267,7 +267,7 @@ export class LockTimeoutError extends Error {
  * many records were accepted; THROWS LockTimeoutError if the lock was never
  * acquired, so the caller can retry instead of recording a phantom success.
  */
-export async function upsertSession(file, sessionId, records, { precondition = null } = {}) {
+export async function upsertSession(file, sessionId, records, { precondition = null, preserveFields = (r) => r } = {}) {
   // Which provider this batch replaces. Session ids are only unique within a
   // provider, so replacing on the id alone would let one provider delete
   // another's rows — the same composite identity tombstoneKey() uses.
@@ -303,8 +303,10 @@ export async function upsertSession(file, sessionId, records, { precondition = n
       if (blocked.has(tombstoneKey(r))) continue;
       byKey.set(tombstoneKey(r), r);
     }
-    const accepted = [...byKey.values()].map((r) =>
-      preserveComputedCost(r, priorByKey.get(tombstoneKey(r))));
+    const accepted = [...byKey.values()].map((r) => {
+      const prior = priorByKey.get(tombstoneKey(r));
+      return preserveComputedCost(preserveFields(r, prior), prior);
+    });
     return {
       records: existing.filter((r) => !replaces(r)).concat(accepted),
       value: accepted.length,

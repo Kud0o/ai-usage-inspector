@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
+import fs from "node:fs";
+import os from "node:os";
+import { ensureProjectConfig, isEnabled } from "../src/lib/config.mjs";
 import {
   PROJECT_DIRNAME,
   encCwd,
@@ -72,4 +75,28 @@ test("subagentsDir derives the sidechain folder from a transcript path", () => {
   );
   assert.equal(subagentsDir(null), null);
   assert.equal(subagentsDir(""), null);
+});
+
+// Aggregate mode pools every project into one directory, so there is no
+// per-project folder to hold settings — the dashboard writes one config there.
+// Capture has to read it, or its switches are decoration.
+test("aggregate mode reads the dashboard's own config", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-aggcfg-"));
+  const saved = process.env.AI_USAGE_DIR;
+  process.env.AI_USAGE_DIR = dir;
+  t.after(() => {
+    if (saved === undefined) delete process.env.AI_USAGE_DIR;
+    else process.env.AI_USAGE_DIR = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({
+    tracking: { enabled: false },
+    fields: { text: false },
+  }));
+
+  const cfg = await ensureProjectConfig("/any/project");
+  assert.equal(isEnabled(cfg), false, "tracking off in the aggregate config is honoured");
+  assert.equal(cfg.fields.text, false, "and so are its field toggles");
+  assert.equal(cfg.fields.tokens, true, "anything it does not set falls back to the global default");
 });

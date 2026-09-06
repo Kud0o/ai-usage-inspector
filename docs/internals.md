@@ -191,6 +191,15 @@ also covers forks like Cursor, Windsurf and VSCodium, is in
 
 ## Configuration in depth
 
+A field group turned off is applied on the way in, so new rows omit it. Rows already written keep
+what they have: a reparse of the same session restores the stored value rather than rewriting the
+row without it, because "stop recording this" is not "delete what you recorded".
+
+In aggregate mode there is no per-project folder, so the dashboard writes one `config.json` beside
+the pooled data and capture reads it — tracking and field switches there govern every project in the
+pool, falling back to the global defaults for anything they do not set.
+
+
 A **global defaults template** lives at `~/.ai-usage-inspector/config.json`
 (`{ "enabledDefault": true, "fields": { ... } }`). It is *only* a template:
 
