@@ -313,6 +313,20 @@ the SSE clients the page holds open. Closing the tab is therefore the way to sto
 share one process, and a crashed browser leaves a short-lived stray rather than a permanent one. A
 server started from a terminal has none of this: no nonce, no runtime file, no self-exit.
 
+### Where the runtime state lives
+
+Windows and macOS give every user a private temp directory, so a per-project folder under it is
+already unreachable by anyone else. Linux does not: `/tmp` is shared and world-writable, and a
+predictable path under it belongs to whoever creates it first. That is enough to plant a startup
+lock, or to plant a runtime record naming a server of the attacker's own — the launcher would verify
+that server, find the fields it expected, and open a browser on their page.
+
+So the root is per-user: `XDG_RUNTIME_DIR` when the OS provides one, otherwise a uid-qualified name
+under the temp directory. Before use, the directory is checked rather than assumed — `mkdir`'s mode
+only applies to directories it actually creates, so an existing one proves nothing. A symlink, or
+another user's directory, is refused; one of ours that is merely too open is tightened. The runtime
+file itself is written with `O_NOFOLLOW` so a planted symlink cannot redirect the write.
+
 ## The numbers behind all this
 
 Values worth knowing before they surprise you. All are constants in the source, not settings.

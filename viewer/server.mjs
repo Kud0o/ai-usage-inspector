@@ -22,7 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { runtimePaths } from "./runtime.mjs";
+import { ensureOwnedDir, runtimePaths } from "./runtime.mjs";
 import { createSseRegistry } from "./sse.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -429,10 +429,20 @@ const { dir: RUNTIME_DIR, runtimeFile: RUNTIME_FILE } = runtimePaths(DATA_DIR);
 function writeRuntimeFile(port) {
   if (!LAUNCHER_MODE) return;
   try {
-    fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(RUNTIME_FILE, JSON.stringify({
+    ensureOwnedDir(RUNTIME_DIR);
+    const body = JSON.stringify({
       nonce: LAUNCH_NONCE, port, pid: process.pid, dataDir: DATA_DIR, startedAt: Date.now(),
-    }, null, 2));
+    }, null, 2);
+    // O_NOFOLLOW so a symlink planted at this path cannot redirect the write
+    // into a file we did not mean to touch. Windows has no equivalent and no
+    // shared temp directory, so it takes the plain path.
+    if (process.platform === "win32") {
+      fs.writeFileSync(RUNTIME_FILE, body);
+    } else {
+      const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW;
+      const fd = fs.openSync(RUNTIME_FILE, flags, 0o600);
+      try { fs.writeFileSync(fd, body); } finally { fs.closeSync(fd); }
+    }
   } catch {}
 }
 

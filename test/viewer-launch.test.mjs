@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { openBrowser } from "../viewer/launch.mjs";
-import { coordinateStartup, runtimePaths } from "../viewer/runtime.mjs";
+import { coordinateStartup, refuseReason, runtimePaths } from "../viewer/runtime.mjs";
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -96,4 +96,50 @@ test("browser opening reports failure when the fallback emits an error", async (
     spawnImpl() { return fakeChild(outcomes.shift()); },
   });
   assert.equal(opened, false);
+});
+
+// Windows and macOS give each user a private temp directory; Linux's /tmp is
+// shared and world-writable. A predictable path under it is somebody else's to
+// create first — they could plant a lock, or plant a runtime record naming a
+// server of their own, and the launcher would verify it and open a browser on
+// their page believing it was the user's dashboard.
+test("the runtime root is per-user, not a shared path", () => {
+  const { dir } = runtimePaths("/some/project/.ai-usage");
+  if (process.platform === "win32") {
+    assert.match(dir, /Temp/i, "Windows temp is already per-user");
+    return;
+  }
+  const uid = process.getuid();
+  const perUser = dir.includes(String(uid)) || dir.startsWith(process.env.XDG_RUNTIME_DIR || "\u0000");
+  assert.ok(perUser, `expected a per-user root, got ${dir}`);
+});
+
+// These checks only bite on Linux, where /tmp is shared — which is precisely
+// where they would otherwise never be exercised. Driving the decision directly
+// runs them on every platform.
+test("a directory another user owns is refused", () => {
+  const stat = { isDirectory: () => true, uid: 1000, mode: 0o700 };
+  assert.equal(refuseReason(stat, { uid: 1001 }), "belongs to another user");
+});
+
+test("a world-writable directory is refused", () => {
+  const stat = { isDirectory: () => true, uid: 1000, mode: 0o777 };
+  assert.equal(refuseReason(stat, { uid: 1000 }), "is accessible to other users");
+});
+
+test("a symlink standing in for the directory is refused", () => {
+  // lstat does not follow, so a planted symlink reports as a link, not a dir.
+  const stat = { isDirectory: () => false, uid: 1000, mode: 0o777 };
+  assert.equal(refuseReason(stat, { uid: 1000 }), "is not a directory");
+});
+
+test("our own private directory is accepted", () => {
+  const stat = { isDirectory: () => true, uid: 1000, mode: 0o700 };
+  assert.equal(refuseReason(stat, { uid: 1000 }), null);
+});
+
+// Windows has no uid and a per-user temp directory, so ownership is not checked.
+test("a directory is still accepted where the platform has no uid", () => {
+  const stat = { isDirectory: () => true, uid: undefined, mode: 0o700 };
+  assert.equal(refuseReason(stat, { uid: null }), null);
 });
