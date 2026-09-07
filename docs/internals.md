@@ -209,8 +209,8 @@ A **global defaults template** lives at `~/.ai-usage-inspector/config.json`
   disable or tune a project from *its own* dashboard without affecting others.
 - **Local install** (`node install.mjs --local`) — the project's `config.json` is written at
   install time, fully self-contained, with no reliance on the global file.
-- **Aggregate mode** (`AI_USAGE_DIR`) is the one exception: with everything pooled in one
-  folder there is no per-project file, so the global defaults govern directly.
+- **Aggregate mode** (`AI_USAGE_DIR`) is the one exception: the aggregate directory's own
+  `config.json` governs the pool, with global defaults filling only fields it does not set.
 
 **Field groups** are `text` (prompt/response), `tokens`, `cost`, `context`, `timing`
 (duration + first-response latency), `skills`, `counts`, and `meta` (git branch, cli
@@ -248,6 +248,7 @@ The viewer is a small HTTP service, so the data is scriptable without the UI:
 
 | Route | Purpose |
 |---|---|
+| `GET /api/status` | process identity: `app`, launcher `nonce`, `dataDir`, and connected-client count |
 | `GET /api/events` | every record as list items (280-char previews, no full text) |
 | `GET /api/search?q=` | full-text match over the stored prompt/response; returns matching record keys |
 | `POST /api/export` | `{keys:[...]}` -> the complete records, prompt and response included |
@@ -273,9 +274,11 @@ src/lib/vscode.mjs         VS Code globalStorage locator, across forks
 src/providers/index.mjs    provider registry + install detection
 src/providers/<id>/        one folder per agent
 viewer/server.mjs          zero-dep HTTP API + static host
+viewer/runtime.mjs         machine-local runtime paths + serialized launcher startup
+viewer/sse.mjs             one lifecycle for every SSE client removal
 viewer/public/             the dashboard SPA
 install.mjs                installer + uninstaller
-test/                      88 tests: every provider, the store, the spool, the API, the installer
+test/                      regression tests for every provider, store, spool, API, and installer
 ```
 
 ```sh
@@ -284,17 +287,26 @@ npm test      # Node's built-in runner, no dependencies
 
 ## Opening it without a terminal
 
-`ensureBundle` writes a launcher beside each project's data — `Open dashboard.cmd` on Windows,
-`Open dashboard.command` on macOS, `open-dashboard.sh` elsewhere. It is deliberately two lines: it
-runs [`viewer/launch.mjs`](../viewer/launch.mjs), which holds the logic and is refreshed with the
-bundle. Its paths are relative to itself, so moving or renaming the project keeps it working.
+After a successful non-aggregate store, `ensureBundle` writes a launcher beside the project's data
+— `Open dashboard.cmd` on Windows, `Open dashboard.command` on macOS, `open-dashboard.sh` elsewhere.
+Disabled, empty, and aggregate projects do not get one. It is deliberately two lines: it runs
+[`viewer/launch.mjs`](../viewer/launch.mjs), which holds the logic and is refreshed with the bundle.
+Its paths are relative to itself, so moving or renaming the project keeps it working. It relies on
+`node` being resolvable from the GUI process's `PATH`; otherwise the shell shows a command-not-found
+message and no dashboard opens (the Windows shim pauses on that error).
 
-The launcher spawns the server detached, with `windowsHide`, so no console window is left behind,
-and passes it an instance nonce. The server records that nonce, its port and its pid in
-`.ai-usage/.viewer-runtime.json` and serves them on `/api/status`; the launcher polls that file and
-then verifies over HTTP before opening a browser. Waiting for the real `listen()` rather than
-sleeping is what stops it opening a dead page, and checking the nonce is what stops it adopting some
-other process that happens to hold the port — a pid alone cannot, since the OS reuses them.
+The launcher takes an atomic per-project startup lock, then spawns the server detached with
+`windowsHide` and passes it an instance nonce. The server records that nonce, its port, pid, and
+absolute data path in an OS-temporary runtime directory keyed by a hash of the canonical project
+path. Keeping coordination machine-local prevents a synced project's state from one machine being
+mistaken for another's. A crashed launcher's lock becomes stale and can be reclaimed; contenders
+wait and verify the winner instead of deleting its runtime record.
+
+The launcher polls that runtime file and then verifies over HTTP before opening a browser.
+`/api/status` itself returns only `app`, `nonce`, `dataDir`, and `clients`; the port and pid exist
+only in the machine-local runtime file. Waiting for the real `listen()` rather than sleeping is what
+stops it opening a dead page, and checking the nonce is what stops it adopting some other process
+that happens to hold the port — a pid alone cannot, since the OS reuses them.
 
 A server started this way exits about five minutes after its last dashboard disconnects, tracked by
 the SSE clients the page holds open. Closing the tab is therefore the way to stop it, several tabs

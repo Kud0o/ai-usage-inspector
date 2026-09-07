@@ -4,7 +4,8 @@
 // (the same file the viewer uses for title/port/ui). On a project's first sight
 // it is SEEDED from the global defaults template at ~/.ai-usage-inspector/
 // config.json, then it is authoritative for that project. Aggregate mode
-// (AI_USAGE_DIR) has no per-project folder, so the global defaults govern.
+// (AI_USAGE_DIR) uses the aggregate directory's config, with those defaults as
+// its fallback.
 //
 // IMPORTANT: this file must stay SELF-CONTAINED — node builtins only, inline
 // `encCwd`. install.mjs copies it next to the viewer (app/viewer/config.mjs) so
@@ -78,8 +79,8 @@ export function isEnabled(cfg) {
 
 // Ensure a project has tracking+fields, seeding from the global defaults the
 // first time (merged into any existing {title,port,ui} without clobbering).
-// Returns the effective config. In aggregate mode returns the global defaults
-// (no file written).
+// Returns the effective config. In aggregate mode merges its own config over
+// the global defaults (no file written).
 export async function ensureProjectConfig(cwd) {
   const def = loadGlobalDefaults();
   const file = projectConfigPath(cwd);

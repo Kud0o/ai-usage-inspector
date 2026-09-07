@@ -48,7 +48,7 @@ same ingest step.
 - **Stays out of your agent’s way** — the hook writes the payload to a spool file and exits; a detached worker does the parsing and writing. It reads stdin with a 150 ms idle cutoff and a two-second ceiling, so it returns even if the agent leaves the pipe open.
 - **Yours, locally** — records live in your project, tracking can be turned off per project, and whole field groups (including the prompt text) can be stripped before anything is written. Turning a group off stops new recording; rows you already collected keep what they have.
 - **Live dashboard** — the page follows the data as it is recorded, with full-text search, CSV/JSON export, and an optional monthly budget.
-- **Zero dependencies, zero build** — pure Node built-ins and vanilla browser JS, covered by 129 tests.
+- **Zero dependencies, zero build** — pure Node built-ins and vanilla browser JS, covered by the built-in regression suite.
 
 ## Quick start
 
@@ -72,12 +72,16 @@ viewer, and your saved view settings in `<project>/.ai-usage/`. To look:
 
 Open **`.ai-usage/Open dashboard.cmd`** in the project (`Open dashboard.command` on macOS,
 `open-dashboard.sh` on Linux). It starts the dashboard if it is not already running, waits until it
-is actually up, and opens your browser at the right port. Click it again later and it reuses the
-same server rather than starting another. There is no window to leave open — the server stops on
-its own a few minutes after you close the last dashboard tab.
+is actually up, and opens your browser at the right port. Click it again while that project's server
+is still healthy and it reuses the process; simultaneous clicks are serialized so only one server
+starts. There is no window to leave open — the server stops on its own a few minutes after you close
+the last dashboard tab.
 
-The launcher is written alongside a project's data, so a project that has not recorded a turn
-yet does not have one. After upgrading, an existing project gets it on its next prompt.
+The launcher is written only after a successful non-aggregate store. Disabled projects, projects
+with no stored turns, and aggregate-mode projects therefore do not get one. After upgrading, an
+existing project gets it on its next successfully stored prompt. The launcher also needs `node` on
+the GUI process's `PATH`; if it is missing, the shell reports that `node` was not found and the
+dashboard does not open (the Windows launcher pauses so the message remains visible).
 
 From a terminal, if you prefer:
 
@@ -184,8 +188,9 @@ Everything for a project stays inside that project:
 
 Machine-wide state lives once, outside your projects, in `~/.ai-usage-inspector/`: the
 installed `app/`, the hook `spool/` (normally empty), `scan-state.json`, and cached pricing
-tables. While a dashboard is open there is also a `.viewer-runtime.json` beside your
-project's data, recording the port it chose; it goes away when the server stops.
+tables. While a launcher-started dashboard is open, its pid, port, absolute data path, and nonce
+live in the OS temporary directory under a key derived from the canonical project path. That
+machine-local coordination file goes away when the server stops and is never stored in the project.
 
 The only thing written into an agent's own directory is its hook — listed in the table above,
 and removed by `--uninstall`. Your prompts and costs never leave your machine: the hook and

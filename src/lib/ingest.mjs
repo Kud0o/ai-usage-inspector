@@ -12,20 +12,22 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Bump when the bundled viewer changes so existing projects refresh their copy
 // on the next prompt (after the user re-installs the app via npx).
-export const VIEWER_VERSION = "17";
+export const VIEWER_VERSION = "18";
 
 // The file a user double-clicks to see their dashboard, so nobody has to open a
 // terminal and remember a path. It is deliberately thin: it only runs
 // viewer/launch.mjs, which holds all the logic and is refreshed with the bundle.
 // Paths are relative to the file itself, so moving or renaming the project keeps
 // it working.
-const LAUNCHER_NAME = {
-  win32: "Open dashboard.cmd",
-  darwin: "Open dashboard.command",
-}[process.platform] || "open-dashboard.sh";
+function launcherName(platform) {
+  return {
+    win32: "Open dashboard.cmd",
+    darwin: "Open dashboard.command",
+  }[platform] || "open-dashboard.sh";
+}
 
-function launcherBody() {
-  if (process.platform === "win32") {
+function launcherBody(platform) {
+  if (platform === "win32") {
     return [
       "@echo off",
       "rem  AI Usage Inspector - opens this project's dashboard.",
@@ -46,14 +48,18 @@ function launcherBody() {
   ].join("\n");
 }
 
-function ensureLauncher(base) {
-  const file = path.join(base, LAUNCHER_NAME);
-  const body = launcherBody();
+function ensureLauncher(base, platform = process.platform) {
+  const file = path.join(base, launcherName(platform));
+  const body = launcherBody(platform);
   try {
-    if (fs.existsSync(file) && fs.readFileSync(file, "utf8") === body) return;
-    fs.writeFileSync(file, body);
-    if (process.platform !== "win32") fs.chmodSync(file, 0o755);
+    if (!fs.existsSync(file) || fs.readFileSync(file, "utf8") !== body) fs.writeFileSync(file, body);
+    // Archives and Windows copies can preserve the bytes but lose execution.
+    if (platform !== "win32") fs.chmodSync(file, 0o755);
   } catch {}
+}
+
+export function ensureLauncherForTest(base, platform) {
+  ensureLauncher(base, platform);
 }
 
 // Make each project self-contained: copy the viewer + a default config into

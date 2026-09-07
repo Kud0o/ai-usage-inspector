@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { runtimePaths } from "../viewer/runtime.mjs";
 
 const SERVER = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "viewer", "server.mjs");
 const LONG_PROMPT = `${"lead ".repeat(80)}BURIEDNEEDLE tail`; // the needle sits well past the 280-char preview
@@ -22,13 +23,16 @@ const RECORDS = [
   },
 ];
 
-function request(port, pathname, { method = "GET", body } = {}) {
+function request(port, pathname, { method = "GET", body, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? null : JSON.stringify(body);
     const req = http.request(
       {
         host: "127.0.0.1", port, path: pathname, method,
-        headers: payload ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : {},
+        headers: {
+          ...headers,
+          ...(payload ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : {}),
+        },
       },
       (res) => {
         let text = "";
@@ -194,6 +198,10 @@ test("/api/status identifies the instance and its data directory", async (t) => 
   assert.equal(s.app, "ai-usage-inspector");
   assert.equal(s.nonce, "nonce-abc", "the launcher's own nonce comes back");
   assert.equal(path.resolve(s.dataDir), path.resolve(dir));
+  const runtime = runtimePaths(dir).runtimeFile;
+  assert.ok(fs.existsSync(runtime), "launcher coordination lives in machine-local temporary state");
+  assert.equal(fs.existsSync(path.join(dir, ".viewer-runtime.json")), false, "project data stays free of runtime state");
+  assert.equal(JSON.parse(fs.readFileSync(runtime, "utf8")).pid > 0, true);
 });
 
 // A server started from a terminal keeps its old behaviour: no runtime file, and
@@ -206,4 +214,23 @@ test("a terminal-started server writes no runtime file", async (t) => {
   const s = (await request(port, "/api/status")).json;
   assert.equal(s.nonce, null, "no instance nonce outside launcher mode");
   assert.equal(fs.existsSync(path.join(dir, ".viewer-runtime.json")), false);
+  assert.equal(fs.existsSync(runtimePaths(dir).runtimeFile), false, "terminal mode has no machine-local runtime either");
+});
+
+test("a launcher status check extends the idle deadline for the opening page", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-idlerace-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const nonce = "nonce-idle-race";
+  const port = await spawnViewer(t, dir, {
+    AI_USAGE_INSTANCE: nonce,
+    AI_USAGE_IDLE_EXIT_MS: "1000",
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 650));
+  const verified = await request(port, "/api/status", {
+    headers: { "X-AI-Usage-Launcher": nonce },
+  });
+  assert.equal(verified.status, 200);
+  await new Promise((resolve) => setTimeout(resolve, 650));
+  assert.equal((await request(port, "/api/status")).status, 200, "server survives past its original deadline");
 });

@@ -195,3 +195,20 @@ test("a project bundle gets a launcher pointing at its own viewer", async (t) =>
   assert.match(body, /launch\.mjs/, "it runs the launcher, not the server directly");
   assert.ok(!/[A-Za-z]:\|\/tmp\//.test(body), "paths stay relative so the project can move");
 });
+
+test("an unchanged POSIX launcher has its executable bit restored", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-launchermode-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const { ensureLauncherForTest } = await import("../src/lib/ingest.mjs");
+  ensureLauncherForTest(dir, "linux");
+
+  const original = fs.chmodSync;
+  let mode = null;
+  try {
+    fs.chmodSync = (_file, nextMode) => { mode = nextMode; };
+    ensureLauncherForTest(dir, "linux");
+  } finally {
+    fs.chmodSync = original;
+  }
+  assert.equal(mode, 0o755, "matching contents must not bypass permission repair");
+});

@@ -6,42 +6,35 @@
 // logic stays one cross-platform thing:
 //
 //   1. Is a server for THIS project already up? Reuse it — a second click opens
-//      another tab, it does not start a second server.
+//      another tab, without racing another launcher into starting a second server.
 //   2. Otherwise start one detached, with no console window, and wait until it
 //      is actually listening rather than sleeping and hoping.
 //   3. Open the browser at the port it really chose (which is not always 4317).
 //
 // The server it starts is given an instance nonce; it records that, its port and
-// its pid in .ai-usage/.viewer-runtime.json and serves them on /api/status. That
-// pair is what makes reuse safe: a pid alone is meaningless once the OS recycles
-// it, and something else entirely may be sitting on the port.
+// its pid in machine-local temporary state and serves the identity on
+// /api/status. That pair is what makes reuse safe: a pid alone is meaningless
+// once the OS recycles it, and something else entirely may be sitting on the port.
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { coordinateStartup, readRuntime, runtimePaths } from "./runtime.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(HERE, "..");            // <project>/.ai-usage
 const SERVER = path.join(HERE, "server.mjs");
-const RUNTIME_FILE = path.join(DATA_DIR, ".viewer-runtime.json");
+const { runtimeFile: RUNTIME_FILE, lockFile: START_LOCK } = runtimePaths(DATA_DIR);
 const READY_TIMEOUT_MS = 20_000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-function readRuntime() {
-  try {
-    const v = JSON.parse(fs.readFileSync(RUNTIME_FILE, "utf8"));
-    return v && v.port && v.nonce ? v : null;
-  } catch {
-    return null;
-  }
-}
 
 /** Is the thing on that port our server, for this project? */
 async function verify(runtime) {
   if (!runtime) return false;
   try {
     const res = await fetch(`http://127.0.0.1:${runtime.port}/api/status`, {
+      headers: { "X-AI-Usage-Launcher": runtime.nonce },
       signal: AbortSignal.timeout(1500),
     });
     if (!res.ok) return false;
@@ -54,36 +47,45 @@ async function verify(runtime) {
   }
 }
 
-function openBrowser(url) {
-  const platform = process.platform;
-  try {
-    if (platform === "win32") {
-      // The empty string is start's window-title argument; without it a quoted
-      // URL is taken as the title and nothing opens.
-      spawn("cmd", ["/c", "start", "", url], { detached: true, stdio: "ignore", windowsHide: true }).unref();
-    } else if (platform === "darwin") {
-      spawn("open", [url], { detached: true, stdio: "ignore" }).unref();
-    } else {
-      const child = spawn("xdg-open", [url], { detached: true, stdio: "ignore" });
-      child.on("error", () => {
-        try {
-          spawn("gio", ["open", url], { detached: true, stdio: "ignore" }).unref();
-        } catch {}
-      });
-      child.unref();
+function runOpen(command, args, spawnImpl) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawnImpl(command, args, { detached: true, stdio: "ignore", windowsHide: true });
+    } catch {
+      resolve(false);
+      return;
     }
-    return true;
-  } catch {
-    return false;
+    let settled = false;
+    const done = (ok) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    child.once("error", () => done(false));
+    child.once("close", (code) => done(code === 0));
+  });
+}
+
+export async function openBrowser(url, { platform = process.platform, spawnImpl = spawn } = {}) {
+  let methods;
+  if (platform === "win32") {
+    // The empty string is start's window-title argument; without it a quoted
+    // URL is taken as the title and nothing opens.
+    methods = [["cmd", ["/c", "start", "", url]]];
+  } else if (platform === "darwin") {
+    methods = [["open", [url]]];
+  } else {
+    methods = [["xdg-open", [url]], ["gio", ["open", url]]];
   }
+  for (const [command, args] of methods) {
+    if (await runOpen(command, args, spawnImpl)) return true;
+  }
+  return false;
 }
 
 async function startServer() {
   const nonce = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-  try {
-    fs.rmSync(RUNTIME_FILE, { force: true });
-  } catch {}
-
   const child = spawn(process.execPath, [SERVER], {
     cwd: path.resolve(DATA_DIR, ".."),
     detached: true,
@@ -97,7 +99,7 @@ async function startServer() {
   // fixed sleep would either open a dead page or waste time on a fast machine.
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const runtime = readRuntime();
+    const runtime = readRuntime(RUNTIME_FILE);
     if (runtime && runtime.nonce === nonce && (await verify(runtime))) return runtime;
     await sleep(150);
   }
@@ -111,13 +113,17 @@ async function main() {
     return;
   }
 
-  const existing = readRuntime();
-  let runtime = (await verify(existing)) ? existing : null;
-  if (runtime) {
+  const result = await coordinateStartup({
+    runtimeFile: RUNTIME_FILE,
+    lockFile: START_LOCK,
+    verify,
+    start: startServer,
+  });
+  const runtime = result.runtime;
+  if (runtime && !result.started) {
     console.log(`\n  Dashboard already running  ->  http://localhost:${runtime.port}`);
-  } else {
+  } else if (runtime) {
     console.log("\n  Starting the dashboard...");
-    runtime = await startServer();
   }
 
   if (!runtime) {
@@ -129,11 +135,18 @@ async function main() {
   }
 
   const url = `http://localhost:${runtime.port}`;
-  if (!openBrowser(url)) console.log(`  Open this in your browser: ${url}`);
+  if (!(await openBrowser(url))) {
+    console.error("\n  Could not open a browser. Open this URL yourself:");
+    console.error(`  ${url}\n`);
+    process.exitCode = 1;
+    return;
+  }
   console.log(`  ${url}\n`);
 }
 
-main().catch((err) => {
-  console.error(`\n  ${err && err.message ? err.message : err}\n`);
-  process.exitCode = 1;
-});
+if (path.resolve(process.argv[1] || "") === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error(`\n  ${err && err.message ? err.message : err}\n`);
+    process.exitCode = 1;
+  });
+}

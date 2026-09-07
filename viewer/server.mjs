@@ -22,6 +22,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { runtimePaths } from "./runtime.mjs";
+import { createSseRegistry } from "./sse.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(__dirname, "public");
@@ -277,22 +279,11 @@ const readBody = (req) =>
 // watches the data dir and tells connected clients to refetch. fs.watch is not
 // reliable on every filesystem (network shares, some containers), so a slow mtime
 // poll backs it up; both funnel through the same debounce.
-const clients = new Set();
 let watching = false;
-let notifyTimer = null;
+const clients = createSseRegistry({ onDrop: () => armIdleExit() });
 
 function notifyClients() {
-  clearTimeout(notifyTimer);
-  notifyTimer = setTimeout(() => {
-    for (const res of clients) {
-      try {
-        res.write("event: change\ndata: {}\n\n");
-      } catch {
-        clients.delete(res);
-      }
-    }
-  }, 400);
-  if (notifyTimer.unref) notifyTimer.unref();
+  clients.notify();
 }
 
 function dataFingerprint() {
@@ -340,6 +331,9 @@ const server = http.createServer(async (req, res) => {
   const route = url.pathname;
   try {
     if (route === "/api/status") {
+      // A verified reuse happens just before the browser opens. Resetting only
+      // for a launcher that knows our nonce closes the verify-to-open idle race.
+      if (LAUNCHER_MODE && req.headers["x-ai-usage-launcher"] === LAUNCH_NONCE) armIdleExit();
       return send(res, 200, JSON.stringify({
         app: "ai-usage-inspector",
         nonce: LAUNCH_NONCE,
@@ -377,23 +371,9 @@ const server = http.createServer(async (req, res) => {
         Connection: "keep-alive",
       });
       res.write("retry: 3000\n\n");
-      clients.add(res);
       clearTimeout(idleTimer);
       startWatching();
-      const beat = setInterval(() => {
-        try {
-          res.write(": ping\n\n");
-        } catch {}
-      }, 25000);
-      if (beat.unref) beat.unref();
-      const drop = () => {
-        clearInterval(beat);
-        clients.delete(res);
-        // Last dashboard gone: in launcher mode start the countdown to exit.
-        armIdleExit();
-      };
-      req.on("close", drop);
-      req.on("error", drop);
+      clients.add(req, res);
       return;
     }
     // Export the FULL stored records (prompt/response included) for the given
@@ -444,11 +424,12 @@ const server = http.createServer(async (req, res) => {
 const LAUNCH_NONCE = process.env.AI_USAGE_INSTANCE || null;
 const LAUNCHER_MODE = !!LAUNCH_NONCE;
 const IDLE_EXIT_MS = Number(process.env.AI_USAGE_IDLE_EXIT_MS || 5 * 60 * 1000);
-const RUNTIME_FILE = path.join(DATA_DIR, ".viewer-runtime.json");
+const { dir: RUNTIME_DIR, runtimeFile: RUNTIME_FILE } = runtimePaths(DATA_DIR);
 
 function writeRuntimeFile(port) {
   if (!LAUNCHER_MODE) return;
   try {
+    fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
     fs.writeFileSync(RUNTIME_FILE, JSON.stringify({
       nonce: LAUNCH_NONCE, port, pid: process.pid, dataDir: DATA_DIR, startedAt: Date.now(),
     }, null, 2));
