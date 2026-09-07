@@ -53,8 +53,18 @@ same ingest step.
 ## Quick start
 
 ```sh
-npx -y github:Kud0o/ai-usage-inspector
+npx -y ai-usage-inspector
 ```
+
+Or install it once and keep the command around:
+
+```sh
+npm install -g ai-usage-inspector
+ai-usage-inspector
+```
+
+To run the unreleased tip instead, point npx at the repo:
+`npx -y github:Kud0o/ai-usage-inspector`.
 
 That looks for each agent’s own data directory, and registers a hook wherever one can run. Then just
 use your agent — each project becomes self-contained, with its data, its own copy of the
@@ -68,8 +78,8 @@ node .ai-usage/viewer/server.mjs   # -> http://localhost:4317
 Add `.ai-usage/` to that project's `.gitignore` so the records are not committed.
 
 ```sh
-npx -y github:Kud0o/ai-usage-inspector --update      # upgrade
-npx -y github:Kud0o/ai-usage-inspector --uninstall   # remove the hooks
+npx -y ai-usage-inspector --update      # upgrade
+npx -y ai-usage-inspector --uninstall   # remove the hooks
 ```
 
 ## Supported agents
@@ -114,10 +124,10 @@ deliberately skips new or changed command hooks until their definition is review
 A hook reparses the session it fires on, so its earlier turns arrive too, and the automatic sweep looks back a day on first run. To import everything the agents already have on disk:
 
 ```sh
-node ~/.ai-usage-inspector/app/src/sync.mjs                      # everything
-node ~/.ai-usage-inspector/app/src/sync.mjs --provider codex --days 30
-node ~/.ai-usage-inspector/app/src/sync.mjs --reprice            # recompute stored costs
-node ~/.ai-usage-inspector/app/src/sync.mjs --relabel            # refresh provenance where the amount is unchanged
+node $HOME/.ai-usage-inspector/app/src/sync.mjs                      # everything
+node $HOME/.ai-usage-inspector/app/src/sync.mjs --provider codex --days 30
+node $HOME/.ai-usage-inspector/app/src/sync.mjs --reprice            # recompute stored costs
+node $HOME/.ai-usage-inspector/app/src/sync.mjs --relabel            # refresh provenance where the amount is unchanged
 ```
 
 Sync is idempotent — records upsert per session, so re-running never duplicates — and it
