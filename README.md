@@ -76,6 +76,9 @@ is actually up, and opens your browser at the right port. Click it again later a
 same server rather than starting another. There is no window to leave open — the server stops on
 its own a few minutes after you close the last dashboard tab.
 
+The launcher is written alongside a project's data, so a project that has not recorded a turn
+yet does not have one. After upgrading, an existing project gets it on its next prompt.
+
 From a terminal, if you prefer:
 
 ```sh
@@ -175,13 +178,19 @@ Everything for a project stays inside that project:
 |-- usage.ndjson     one JSON record per prompt
 |-- tombstones.json  records you deleted, so a later sync cannot bring them back
 |-- config.json      tracking, stored fields, and saved view settings
+|-- Open dashboard.cmd   double-click to open the dashboard (.command / .sh elsewhere)
 `-- viewer/          a copy of the dashboard; run it in place
 ```
 
 Machine-wide state lives once, outside your projects, in `~/.ai-usage-inspector/`: the
 installed `app/`, the hook `spool/` (normally empty), `scan-state.json`, and cached pricing
-tables. Nothing is written into the agents' own directories, and nothing leaves your
-machine.
+tables. While a dashboard is open there is also a `.viewer-runtime.json` beside your
+project's data, recording the port it chose; it goes away when the server stops.
+
+The only thing written into an agent's own directory is its hook — listed in the table above,
+and removed by `--uninstall`. Your prompts and costs never leave your machine: the hook and
+sweep paths make no network calls at all. The one thing that does is the dashboard fetching
+public pricing pages when it starts, which `--no-pricing-refresh` turns off.
 
 **Tracking is on by default and per project.** Turn it off, or strip whole field groups —
 `text` (the prompt and response themselves), `tokens`, `cost`, `context`, `timing`,
