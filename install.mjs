@@ -26,6 +26,7 @@ import os from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { getProvider, listProviders, detectInstalled } from "./src/providers/index.mjs";
+import { launcherName } from "./src/lib/ingest.mjs";
 
 const REPO = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
@@ -245,7 +246,8 @@ function help() {
   console.log(`    ${cmd(`node "${path.join("~", ".ai-usage-inspector", "app", "src", "sync.mjs")}"`)}   ${dim("[--provider claude|codex|cursor|opencode|cline|roo|kilo] [--days N]")}`);
   console.log();
   console.log(`  ${bold("View a project")}  ${dim("(after its first prompt)")}`);
-  console.log(`    ${cmd("node .ai-usage/viewer/server.mjs")}   ${dim("→ http://localhost:4317 (first free port; --port to pin)")}`);
+  console.log(`    ${cmd(path.join(".ai-usage", launcherName()))}   ${dim("← open this file")}`);
+  console.log(`    ${cmd("node .ai-usage/viewer/server.mjs")}   ${dim("or run it yourself → http://localhost:4317")}`);
   console.log();
   console.log(dim(`  Each project records into its own  .ai-usage/  folder (data + a`));
   console.log(dim(`  bundled viewer + saved settings). Add it to the project's .gitignore.`));
@@ -335,8 +337,8 @@ if (args.has("--help") || args.has("-h")) {
   }
   console.log();
   console.log(`  ${bold("View a project")}  ${dim("(after its first prompt)")}`);
-  console.log(`    ${cmd("cd <your project>")}`);
-  console.log(`    ${cmd("node .ai-usage/viewer/server.mjs")}   ${dim("→ http://localhost:4317 (first free port; --port to pin)")}`);
+  console.log(`    ${cmd(path.join(".ai-usage", launcherName()))}   ${dim("← open this file; no terminal needed")}`);
+  console.log(`    ${cmd("node .ai-usage/viewer/server.mjs")}   ${dim("or run it yourself → http://localhost:4317")}`);
   console.log();
   console.log(dim(`  Tip: add  .ai-usage/  to that project's .gitignore.`));
   console.log();

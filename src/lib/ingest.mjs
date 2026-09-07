@@ -19,7 +19,7 @@ export const VIEWER_VERSION = "18";
 // viewer/launch.mjs, which holds all the logic and is refreshed with the bundle.
 // Paths are relative to the file itself, so moving or renaming the project keeps
 // it working.
-function launcherName(platform) {
+export function launcherName(platform = process.platform) {
   return {
     win32: "Open dashboard.cmd",
     darwin: "Open dashboard.command",
