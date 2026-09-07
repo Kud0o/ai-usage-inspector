@@ -339,6 +339,14 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
   const route = url.pathname;
   try {
+    if (route === "/api/status") {
+      return send(res, 200, JSON.stringify({
+        app: "ai-usage-inspector",
+        nonce: LAUNCH_NONCE,
+        dataDir: DATA_DIR,
+        clients: clients.size,
+      }));
+    }
     if (route === "/api/events") {
       if (req.method === "DELETE") {
         let body = {};
@@ -370,6 +378,7 @@ const server = http.createServer(async (req, res) => {
       });
       res.write("retry: 3000\n\n");
       clients.add(res);
+      clearTimeout(idleTimer);
       startWatching();
       const beat = setInterval(() => {
         try {
@@ -380,6 +389,8 @@ const server = http.createServer(async (req, res) => {
       const drop = () => {
         clearInterval(beat);
         clients.delete(res);
+        // Last dashboard gone: in launcher mode start the countdown to exit.
+        armIdleExit();
       };
       req.on("close", drop);
       req.on("error", drop);
@@ -425,6 +436,49 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// ---- launcher mode ----------------------------------------------------------
+// Started by a double-clicked launcher rather than a terminal. The launcher has
+// no console to report into, so the server records where it is listening and
+// proves its identity on /api/status; and because nobody is watching a window to
+// close, it stops on its own once the last dashboard has gone.
+const LAUNCH_NONCE = process.env.AI_USAGE_INSTANCE || null;
+const LAUNCHER_MODE = !!LAUNCH_NONCE;
+const IDLE_EXIT_MS = Number(process.env.AI_USAGE_IDLE_EXIT_MS || 5 * 60 * 1000);
+const RUNTIME_FILE = path.join(DATA_DIR, ".viewer-runtime.json");
+
+function writeRuntimeFile(port) {
+  if (!LAUNCHER_MODE) return;
+  try {
+    fs.writeFileSync(RUNTIME_FILE, JSON.stringify({
+      nonce: LAUNCH_NONCE, port, pid: process.pid, dataDir: DATA_DIR, startedAt: Date.now(),
+    }, null, 2));
+  } catch {}
+}
+
+function clearRuntimeFile() {
+  if (!LAUNCHER_MODE) return;
+  try {
+    const cur = JSON.parse(fs.readFileSync(RUNTIME_FILE, "utf8"));
+    // Only remove our own record: a newer instance may already have replaced it.
+    if (cur && cur.nonce === LAUNCH_NONCE) fs.rmSync(RUNTIME_FILE, { force: true });
+  } catch {}
+}
+
+// A dashboard holds an SSE connection open, so "no clients" means no dashboard.
+// Give it a grace period: a browser reload drops and re-opens the stream.
+let idleTimer = null;
+function armIdleExit() {
+  if (!LAUNCHER_MODE || IDLE_EXIT_MS <= 0) return;
+  clearTimeout(idleTimer);
+  if (clients.size > 0) return;
+  idleTimer = setTimeout(() => {
+    if (clients.size > 0) return;
+    clearRuntimeFile();
+    process.exit(0);
+  }, IDLE_EXIT_MS);
+  if (idleTimer.unref) idleTimer.unref();
+}
+
 // When no port was explicitly requested, retry on the next port instead of
 // failing — the real listen() (not a separate probe) decides what's free,
 // since pre-checking with a throwaway socket is unreliable on Windows.
@@ -446,9 +500,15 @@ server.listen(port, HOST, () => {
   console.log(`\n  AI Usage Inspector  ->  http://localhost:${port}`);
   console.log(`  project: ${loadConfig().title}`);
   console.log(`  reading: ${DATA_DIR}\n`);
+  writeRuntimeFile(port);
+  armIdleExit();
   if (!ARGS.noPricingRefresh) refreshPricing();
   if (!ARGS.noSync) autoSync();
 });
+
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => { clearRuntimeFile(); process.exit(0); });
+}
 
 // Pull the last few days of sessions from every provider in the background so
 // the dashboard is fresh even when a hook missed turns (or was never

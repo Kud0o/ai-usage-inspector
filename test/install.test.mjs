@@ -172,3 +172,26 @@ test("--uninstall with no provider flag clears every tool's hook", needsSqlite, 
   assert.equal(hookText(box.readJson(CURSOR_HOOKS)).includes("ai-usage-inspector"), false);
   assert.equal(box.read(OPENCODE_PLUGIN), null);
 });
+
+// The point of the launcher is that nobody has to type a command. It is
+// generated with the bundle, so a project that has recorded anything has one.
+test("a project bundle gets a launcher pointing at its own viewer", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-launcher-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const saved = process.env.AI_USAGE_DIR;
+  delete process.env.AI_USAGE_DIR;                 // aggregate mode has no bundle
+  t.after(() => { if (saved !== undefined) process.env.AI_USAGE_DIR = saved; });
+
+  const { ensureBundleForTest } = await import("../src/lib/ingest.mjs");
+  ensureBundleForTest(dir);
+
+  const name = process.platform === "win32" ? "Open dashboard.cmd"
+    : process.platform === "darwin" ? "Open dashboard.command"
+    : "open-dashboard.sh";
+  const file = path.join(dir, ".ai-usage", name);
+  assert.ok(fs.existsSync(file), `expected ${name}`);
+
+  const body = fs.readFileSync(file, "utf8");
+  assert.match(body, /launch\.mjs/, "it runs the launcher, not the server directly");
+  assert.ok(!/[A-Za-z]:\|\/tmp\//.test(body), "paths stay relative so the project can move");
+});

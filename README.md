@@ -70,6 +70,14 @@ That looks for each agent’s own data directory, and registers a hook wherever 
 use your agent — each project becomes self-contained, with its data, its own copy of the
 viewer, and your saved view settings in `<project>/.ai-usage/`. To look:
 
+Open **`.ai-usage/Open dashboard.cmd`** in the project (`Open dashboard.command` on macOS,
+`open-dashboard.sh` on Linux). It starts the dashboard if it is not already running, waits until it
+is actually up, and opens your browser at the right port. Click it again later and it reuses the
+same server rather than starting another. There is no window to leave open — the server stops on
+its own a few minutes after you close the last dashboard tab.
+
+From a terminal, if you prefer:
+
 ```sh
 cd <your project>
 node .ai-usage/viewer/server.mjs   # -> http://localhost:4317

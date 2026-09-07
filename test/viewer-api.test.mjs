@@ -163,3 +163,47 @@ test("static index is served; unknown routes and traversal do not escape", async
   const escaped = await request(port, "/....//....//package.json");
   assert.ok(escaped.status === 403 || escaped.status === 404, `traversal must not serve a file (got ${escaped.status})`);
 });
+
+// Spawn a server with a given environment, wait for it, hand back its port.
+async function spawnViewer(t, dir, env) {
+  const port = 4500 + Math.floor(Math.random() * 400);
+  const proc = spawn(process.execPath, [SERVER, "--port", String(port), "--no-sync", "--no-pricing-refresh"], {
+    env: { ...process.env, AI_USAGE_DIR: dir, ...env },
+    stdio: "ignore",
+  });
+  t.after(() => { try { proc.kill(); } catch {} });
+  for (let i = 0; i < 60; i++) {
+    try {
+      await request(port, "/api/status");
+      return port;
+    } catch {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  throw new Error("viewer did not start");
+}
+
+// The launcher must tell OUR server from whatever else may hold a port, and from
+// a server for a different project. A pid cannot do it: the OS reuses them.
+test("/api/status identifies the instance and its data directory", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-status-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const port = await spawnViewer(t, dir, { AI_USAGE_INSTANCE: "nonce-abc" });
+
+  const s = (await request(port, "/api/status")).json;
+  assert.equal(s.app, "ai-usage-inspector");
+  assert.equal(s.nonce, "nonce-abc", "the launcher's own nonce comes back");
+  assert.equal(path.resolve(s.dataDir), path.resolve(dir));
+});
+
+// A server started from a terminal keeps its old behaviour: no runtime file, and
+// it does not wander off while someone is watching the window.
+test("a terminal-started server writes no runtime file", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-cli-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const port = await spawnViewer(t, dir, {});
+
+  const s = (await request(port, "/api/status")).json;
+  assert.equal(s.nonce, null, "no instance nonce outside launcher mode");
+  assert.equal(fs.existsSync(path.join(dir, ".viewer-runtime.json")), false);
+});

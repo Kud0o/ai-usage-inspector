@@ -12,11 +12,57 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Bump when the bundled viewer changes so existing projects refresh their copy
 // on the next prompt (after the user re-installs the app via npx).
-export const VIEWER_VERSION = "16";
+export const VIEWER_VERSION = "17";
+
+// The file a user double-clicks to see their dashboard, so nobody has to open a
+// terminal and remember a path. It is deliberately thin: it only runs
+// viewer/launch.mjs, which holds all the logic and is refreshed with the bundle.
+// Paths are relative to the file itself, so moving or renaming the project keeps
+// it working.
+const LAUNCHER_NAME = {
+  win32: "Open dashboard.cmd",
+  darwin: "Open dashboard.command",
+}[process.platform] || "open-dashboard.sh";
+
+function launcherBody() {
+  if (process.platform === "win32") {
+    return [
+      "@echo off",
+      "rem  AI Usage Inspector - opens this project's dashboard.",
+      "rem  Generated file: it is rewritten when the viewer is updated.",
+      // Forward slash on purpose: node accepts it on Windows, and it keeps this
+      // template free of backslash escaping that is easy to get wrong.
+      'node "%~dp0viewer/launch.mjs" %*',
+      "if errorlevel 1 pause",
+      "",
+    ].join("\r\n");
+  }
+  return [
+    "#!/bin/sh",
+    "#  AI Usage Inspector - opens this project's dashboard.",
+    "#  Generated file: it is rewritten when the viewer is updated.",
+    'exec node "$(dirname "$0")/viewer/launch.mjs" "$@"',
+    "",
+  ].join("\n");
+}
+
+function ensureLauncher(base) {
+  const file = path.join(base, LAUNCHER_NAME);
+  const body = launcherBody();
+  try {
+    if (fs.existsSync(file) && fs.readFileSync(file, "utf8") === body) return;
+    fs.writeFileSync(file, body);
+    if (process.platform !== "win32") fs.chmodSync(file, 0o755);
+  } catch {}
+}
 
 // Make each project self-contained: copy the viewer + a default config into
 // <project>/.ai-usage/ so it can be viewed in place. Skipped in aggregate mode
 // (AI_USAGE_DIR). Idempotent and best-effort.
+export function ensureBundleForTest(cwd) {
+  return ensureBundle(cwd);
+}
+
 function ensureBundle(cwd) {
   if (process.env.AI_USAGE_DIR) return;
   try {
@@ -39,6 +85,7 @@ function ensureBundle(cwd) {
     if (!cfg.title) { cfg.title = path.basename(cwd); changed = true; }
     if (!cfg.ui || typeof cfg.ui !== "object") { cfg.ui = {}; changed = true; }
     if (changed) fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2) + "\n");
+    ensureLauncher(base);
   } catch {}
 }
 
@@ -84,12 +131,6 @@ export async function ingest(provider, raw) {
 }
 
 /**
- * Ingest one transcript directly (backfill/sync path — no hook payload).
- * cwd may be unknown up front; it's recovered from the parsed turns. The same
- * per-project tracking config gates ingestion, so disabled projects are
- * skipped exactly like on the hook path. Returns the number of turns written.
- */
-/**
  * A marker that changes when the source behind a transcript changes.
  *
  * Only Claude and Codex hand us a file path; Cursor, OpenCode and the Cline
@@ -114,6 +155,12 @@ function transcriptStamp(provider, transcriptPath) {
   }
 }
 
+/**
+ * Ingest one transcript directly (backfill/sync path — no hook payload).
+ * cwd may be unknown up front; it's recovered from the parsed turns. The same
+ * per-project tracking config gates ingestion, so disabled projects are
+ * skipped exactly like on the hook path. Returns the number of turns written.
+ */
 export async function ingestTranscript(provider, { transcriptPath, cwd, sessionId, opts } = {}) {
   if (!transcriptPath) return 0;
   // Parsing happens outside the usage lock, so a scan that started before the

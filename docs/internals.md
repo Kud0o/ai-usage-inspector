@@ -282,6 +282,25 @@ test/                      88 tests: every provider, the store, the spool, the A
 npm test      # Node's built-in runner, no dependencies
 ```
 
+## Opening it without a terminal
+
+`ensureBundle` writes a launcher beside each project's data — `Open dashboard.cmd` on Windows,
+`Open dashboard.command` on macOS, `open-dashboard.sh` elsewhere. It is deliberately two lines: it
+runs [`viewer/launch.mjs`](../viewer/launch.mjs), which holds the logic and is refreshed with the
+bundle. Its paths are relative to itself, so moving or renaming the project keeps it working.
+
+The launcher spawns the server detached, with `windowsHide`, so no console window is left behind,
+and passes it an instance nonce. The server records that nonce, its port and its pid in
+`.ai-usage/.viewer-runtime.json` and serves them on `/api/status`; the launcher polls that file and
+then verifies over HTTP before opening a browser. Waiting for the real `listen()` rather than
+sleeping is what stops it opening a dead page, and checking the nonce is what stops it adopting some
+other process that happens to hold the port — a pid alone cannot, since the OS reuses them.
+
+A server started this way exits about five minutes after its last dashboard disconnects, tracked by
+the SSE clients the page holds open. Closing the tab is therefore the way to stop it, several tabs
+share one process, and a crashed browser leaves a short-lived stray rather than a permanent one. A
+server started from a terminal has none of this: no nonce, no runtime file, no self-exit.
+
 ## The numbers behind all this
 
 Values worth knowing before they surprise you. All are constants in the source, not settings.
