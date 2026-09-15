@@ -8,6 +8,39 @@ export const FIRST_SCAN_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const SCAN_OVERLAP_MS = 5 * 60 * 1000;
 export const SCAN_STATUSES = new Set(["ok", "locked", "unsupported-schema", "missing"]);
 
+// Raised when rows already stored need their sessions read again from the start.
+// A change to how turns are identified or costed reaches a stored row only when
+// its session is read again, and the transcripts behind old rows are not kept for
+// ever — so an upgrade across it asks each agent for one full read.
+export const REPAIR_EPOCH = 1;
+
+// A repair covers the rows one destination holds: each project's own files, or
+// the pooled copy in an aggregate AI_USAGE_DIR. Settling one says nothing about
+// the other — and a machine that always writes to an aggregate must still be able
+// to settle its own.
+function repairDestination() {
+  if (!process.env.AI_USAGE_DIR) return "projects";
+  const dir = path.resolve(process.env.AI_USAGE_DIR);
+  // A Windows path names the same directory whatever its casing.
+  return `dir:${process.platform === "win32" ? dir.toLowerCase() : dir}`;
+}
+
+function repairedAt(entry) {
+  const done = entry && entry.repaired && typeof entry.repaired === "object" ? entry.repaired : {};
+  return Number(done[repairDestination()]) || 0;
+}
+
+function pendingRepair(state, providerId) {
+  const entry = state && state.providers && state.providers[providerId];
+  const requested = Number(entry && entry.repairRequested) || 0;
+  return requested > repairedAt(entry) ? requested : null;
+}
+
+/** The repair epoch this machine still owes a provider, or null. */
+export function repairDue(providerId, { file = scanStatePath() } = {}) {
+  return pendingRepair(readScanState(file), providerId);
+}
+
 export function scanStatePath() {
   return process.env.AI_USAGE_SCAN_STATE_FILE
     || path.join(os.homedir(), ".ai-usage-inspector", "scan-state.json");
@@ -24,6 +57,10 @@ export function readScanState(file = scanStatePath()) {
 
 export function scanWindow(providerId, { file = scanStatePath(), now = Date.now() } = {}) {
   const state = readScanState(file);
+  // A repair this machine still owes reads the provider's whole history once,
+  // whatever the mark says.
+  const repairEpoch = pendingRepair(state, providerId);
+  if (repairEpoch !== null) return { scanStartedAtMs: now, sinceMs: 0, repairEpoch };
   const provider = state.providers && state.providers[providerId];
   const mark = Number(provider && provider.lastSuccessfulScanMs);
   return {
@@ -31,6 +68,7 @@ export function scanWindow(providerId, { file = scanStatePath(), now = Date.now(
     sinceMs: Number.isFinite(mark) && mark > 0
       ? Math.max(0, mark - SCAN_OVERLAP_MS)
       : Math.max(0, now - FIRST_SCAN_WINDOW_MS),
+    repairEpoch: null,
   };
 }
 
@@ -91,6 +129,7 @@ export async function recordScanResult(providerId, {
   completed = false,
   detail = null,
   recordedAtMs = Date.now(),
+  repairEpoch = null,
 } = {}) {
   const cleanStatus = SCAN_STATUSES.has(status) ? status : "unsupported-schema";
   return mutateJson(file, (state) => {
@@ -120,7 +159,54 @@ export async function recordScanResult(providerId, {
       entry.lastSuccessfulScanMs = Math.max(Number(previous.lastSuccessfulScanMs) || 0, started);
       entry.lastSuccessfulScanAt = new Date(entry.lastSuccessfulScanMs).toISOString();
     }
+    // Passed only for a full-history pass that reached everything it found, so a
+    // repair cut short is attempted again.
+    const repaired = Number(repairEpoch);
+    if (Number.isFinite(repaired) && repaired > 0) {
+      entry.repaired = { ...(previous.repaired || {}), [repairDestination()]: Math.max(repairedAt(previous), repaired) };
+    }
     next.providers[providerId] = entry;
     return next;
+  }, { schema: 1, providers: {} });
+}
+
+/** Record that a provider's history was read in full for a repair. */
+export async function markRepaired(providerId, repairEpoch, { file = scanStatePath() } = {}) {
+  return mutateJson(file, (state) => {
+    const next = state && typeof state === "object" ? { ...state } : {};
+    next.schema = 1;
+    next.providers = next.providers && typeof next.providers === "object" ? { ...next.providers } : {};
+    const previous = next.providers[providerId] && typeof next.providers[providerId] === "object"
+      ? next.providers[providerId]
+      : {};
+    next.providers[providerId] = {
+      ...previous,
+      repaired: { ...(previous.repaired || {}), [repairDestination()]: Math.max(repairedAt(previous), Number(repairEpoch) || 0) },
+    };
+    return next;
+  }, { schema: 1, providers: {} });
+}
+
+/**
+ * Note an install. Replacing an app older than REPAIR_EPOCH asks each agent found
+ * here for one full read of its history. A fresh install owes nothing — no row
+ * has been written the old way — and reading everything would import history the
+ * user never asked for. Returns whether a repair was requested.
+ */
+export async function recordInstall({ upgrading = false, providerIds = [], file = scanStatePath() } = {}) {
+  return mutateJson(file, (state) => {
+    const next = state && typeof state === "object" ? { ...state } : {};
+    next.schema = 1;
+    next.providers = next.providers && typeof next.providers === "object" ? { ...next.providers } : {};
+    const installed = Number(next.installedRepairEpoch) || 0;
+    const requested = Boolean(upgrading) && installed < REPAIR_EPOCH && providerIds.length > 0;
+    if (requested) {
+      for (const id of providerIds) {
+        const previous = next.providers[id] && typeof next.providers[id] === "object" ? next.providers[id] : {};
+        next.providers[id] = { ...previous, repairRequested: REPAIR_EPOCH };
+      }
+    }
+    next.installedRepairEpoch = Math.max(installed, REPAIR_EPOCH);
+    return { data: next, value: requested };
   }, { schema: 1, providers: {} });
 }

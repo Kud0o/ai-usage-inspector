@@ -102,7 +102,7 @@ npx -y ai-usage-inspector --uninstall   # remove the hooks
 | Agent | Where the numbers come from | Registered in | Notes |
 |---|---|---|---|
 | Claude Code | `~/.claude/projects/.../*.jsonl` | `~/.claude/settings.json` | Exact usage, streamed-message dedupe, subagent attribution, skills |
-| OpenAI Codex | `~/.codex/sessions/.../rollout-*.jsonl` | `~/.codex/hooks.json` | Cumulative token deltas per turn |
+| OpenAI Codex | `~/.codex/sessions/.../rollout-*.jsonl`, `~/.codex/archived_sessions/` | `~/.codex/hooks.json` | Cumulative token deltas per turn |
 | Cursor | `state.vscdb` SQLite stores | `~/.cursor/hooks.json` | Needs Node >= 22.5. Estimates tokens when Cursor stores no exact counts |
 | OpenCode | `~/.local/share/opencode/opencode.db` | `~/.config/opencode/plugins/` | Needs Node >= 22.5. Tokens **and cost as OpenCode recorded them**; a session whose per-message accounting is incomplete is stored as one rolled-up row |
 | Cline · Roo · Kilo | `<VSCode>/User/globalStorage/<extId>/tasks/` | none — scan only | Tokens and cost as the extension recorded them. VS Code extensions cannot run a turn-end hook, so these arrive on sync or on the sweep any other agent triggers |
@@ -145,9 +145,14 @@ node $HOME/.ai-usage-inspector/app/src/sync.mjs --reprice            # recompute
 node $HOME/.ai-usage-inspector/app/src/sync.mjs --relabel            # refresh provenance where the amount is unchanged
 ```
 
-Sync is idempotent — records upsert per session, so re-running never duplicates — and it
-respects each project's tracking setting. Records you deleted in the dashboard stay
-deleted: a tombstone is kept per record, and sync honours it.
+Sync is idempotent — each transcript replaces what it stored before, so re-running never
+duplicates — and it respects each project's tracking setting. Records you deleted in the
+dashboard stay deleted: a tombstone is kept per record, and sync honours it.
+
+An upgrade can ask for one full read. When a release changes how turns are identified or
+costed, the installer marks each agent it finds for a single read of its whole history, so rows
+stored the old way are rewritten; the next sweep, or the dashboard's start-up sync, does it. A
+fresh install owes nothing, and imports no history you did not ask for.
 
 ## The dashboard
 
@@ -269,11 +274,14 @@ from — and that decides what a re-sync may do with it:
 | `cost.source` | Who worked the number out | On a re-sync |
 |---|---|---|
 | `provider` | the agent itself (OpenCode, Cline / Roo / Kilo) | **always taken fresh** — it is the authority on its own number |
-| `priced` | this tool, from a rate table (Claude, Codex, Cursor with exact counts) | **kept as recorded** |
-| `estimated` | this tool, but something in the number was a guess — token counts derived from text length (Cursor with no local counts), or a model with no listed rate, charged at its family default | **kept as recorded** |
+| `priced` | this tool, from a rate table (Claude, Codex, Cursor with exact counts) | **kept as recorded** while the turn's tokens are unchanged |
+| `estimated` | this tool, but something in the number was a guess — token counts derived from text length (Cursor with no local counts), or a model with no listed rate, charged at its family default | **kept as recorded** while the turn's tokens are unchanged |
 
-A cost this tool worked out is a fact about the day the turn ran, so re-importing history
-does not quietly restate it at today's rates — pass `--reprice` when you want that. If a row is
+A cost this tool worked out is a fact about the rates on the day the turn ran, so re-importing
+history does not quietly restate it at today's rates — pass `--reprice` when you want that. The
+promise covers rates, not tokens: when a re-read counts different tokens for a turn — an earlier
+capture was incomplete, or an older version gave them to the wrong turn — its cost is worked out
+again for the tokens really there. If a row is
 labelled `estimated` and you now know the real rate, `--relabel` refreshes the provenance and
 leaves the amount exactly as recorded. A turn
 mixing exact and estimated parts counts as estimated overall, so a guess is never shown as

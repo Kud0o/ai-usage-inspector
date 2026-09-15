@@ -189,3 +189,25 @@ test("a turn the old identity scheme could not name carries its legacy id", (t) 
   assert.equal(turns[0].legacyId, "undefined:p1", "built from promptId, as the old scheme did");
   assert.equal(turns[1].legacyId, undefined, "a turn with a uuid never had a legacy id");
 });
+
+// After /compact, Claude Code writes earlier prompts into the transcript again:
+// the same uuid under a new promptId, with none of the turn's work after it. The
+// replay must not open a second turn and take the real one's place.
+test("a prompt replayed after compaction opens no second turn", (t) => {
+  const s = session(t);
+  writeJsonl(s.file, [
+    user("2026-08-10T10:00:00.000Z", "spawn agents", { uuid: "u-real", promptId: "p1" }),
+    asst("2026-08-10T10:00:01.000Z", "m1", [{ type: "text", text: "main" }], usage(100, 10)),
+    { type: "system", subtype: "compact_boundary", timestamp: "2026-08-10T11:00:00.000Z" },
+    user("2026-08-10T10:00:00.000Z", "spawn agents", { uuid: "u-real", promptId: "p1-replayed" }),
+  ]);
+  writeJsonl(path.join(s.subDir, "a.jsonl"), [
+    { type: "user", promptId: "p1", isSidechain: true, timestamp: "2026-08-10T10:00:02.000Z", message: { content: "go" } },
+    asst("2026-08-10T10:00:03.000Z", "s1", [{ type: "text", text: "a" }], usage(50, 5)),
+  ]);
+
+  const turns = buildTurns(s.file);
+  assert.equal(turns.length, 1, "the replay is not a turn");
+  assert.equal(turns[0].usage.input, 100 + 50, "main and subagent tokens stay on the real turn");
+  assert.equal(turns[0].counts.subagentCalls, 1);
+});

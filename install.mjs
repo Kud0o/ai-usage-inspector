@@ -27,6 +27,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { getProvider, listProviders, detectInstalled } from "./src/providers/index.mjs";
 import { launcherName } from "./src/lib/ingest.mjs";
+import { recordInstall } from "./src/lib/scan-state.mjs";
 
 const REPO = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
@@ -116,7 +117,9 @@ function readJson(file) {
   }
 }
 
+// Returns whether this replaced an app that was already installed.
 function copyApp() {
+  const upgrading = fs.existsSync(path.join(APP, "src"));
   fs.rmSync(APP, { recursive: true, force: true });
   fs.mkdirSync(APP, { recursive: true });
   fs.cpSync(path.join(REPO, "src"), path.join(APP, "src"), { recursive: true });
@@ -139,6 +142,17 @@ function copyApp() {
     path.join(REPO, "src", "providers", "cursor", "remote-pricing.mjs"),
     path.join(APP, "viewer", "remote-pricing-cursor.mjs"),
   );
+  return upgrading;
+}
+
+// An upgrade across a change in how turns are identified or costed owes each agent
+// one full read of its history, so rows stored the old way are rewritten.
+async function noteInstall(upgrading) {
+  try {
+    if (await recordInstall({ upgrading, providerIds: detectInstalled().map((p) => p.id) })) {
+      skip("history  read in full once more on the next sweep, to repair stored rows");
+    }
+  } catch {}
 }
 
 const FIELD_GROUPS = ["text", "tokens", "cost", "context", "timing", "skills", "counts", "meta"];
@@ -265,8 +279,9 @@ if (args.has("--help") || args.has("-h")) {
   banner("dashboard · all projects");
   console.log();
   if (!fs.existsSync(path.join(APP, "src", "sync.mjs"))) {
-    copyApp();
+    const upgrading = copyApp();
     ok(`copied app v${VERSION}  ${gray(APP)}`);
+    await noteInstall(upgrading);
   }
   const AGG = path.join(HOME, ".ai-usage-inspector", "aggregate");
   fs.mkdirSync(AGG, { recursive: true });
@@ -287,8 +302,9 @@ if (args.has("--help") || args.has("-h")) {
 } else if (update) {
   banner("update");
   console.log();
-  copyApp();
+  const upgrading = copyApp();
   ok(`updated app to v${VERSION}  ${gray(APP)}`);
+  await noteInstall(upgrading);
   for (const p of selectedProviders(false)) installProvider(p); // ensure hooks exist
   noteUnsupportedIfPresent();
   const gc = seedGlobalConfig();
@@ -308,8 +324,9 @@ if (args.has("--help") || args.has("-h")) {
   const providers = selectedProviders(false);
   banner(`install · ${scope} · ${providers.map((p) => p.id).join("+")}`);
   console.log();
-  copyApp();
+  const upgrading = copyApp();
   ok(`copied app v${VERSION}  ${gray(APP)}`);
+  await noteInstall(upgrading);
   for (const p of providers) installProvider(p);
   noteUnsupportedIfPresent();
   const gc = seedGlobalConfig();

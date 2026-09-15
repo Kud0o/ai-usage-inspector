@@ -21,6 +21,13 @@ const RECORDS = [
     prompt: "short one", promptChars: 9, response: "ok", responseChars: 2,
     model: "gpt-test", usage: { input: 5, output: 1 }, cost: { total: 2, source: "priced" },
   },
+  // The Claude turn's id again, in another session: a Codex subagent thread
+  // repeats its parent's turn ids.
+  {
+    provider: "codex", sessionId: "s9", id: "s1:0", ts: "2026-08-10T12:00:00.000Z",
+    prompt: "same id, another session", promptChars: 24, response: "", responseChars: 0,
+    model: "gpt-test", usage: { input: 1, output: 1 }, cost: { total: 0.5, source: "priced" },
+  },
 ];
 
 function request(port, pathname, { method = "GET", body, headers = {} } = {}) {
@@ -83,8 +90,8 @@ test.after(() => {
 test("/api/events ships previews, never the full stored text", async () => {
   const res = await request(port, "/api/events");
   assert.equal(res.status, 200);
-  assert.equal(res.json.length, 2);
-  const long = res.json.find((e) => e.id === "s1:0");
+  assert.equal(res.json.length, 3);
+  const long = res.json.find((e) => e.id === "s1:0" && e.provider === "claude");
   assert.equal("prompt" in long, false, "full prompt must not ride along in the list");
   assert.equal(long.promptPreview.length, 280);
   assert.equal(long.promptChars, LONG_PROMPT.length, "true size still reported");
@@ -96,7 +103,7 @@ test("/api/search matches text past the preview cut-off", async () => {
   assert.deepEqual(hit.json.keys, [JSON.stringify(["claude", "s1", "s1:0"])]);
 
   const previews = (await request(port, "/api/events")).json;
-  const preview = previews.find((e) => e.id === "s1:0").promptPreview;
+  const preview = previews.find((e) => e.id === "s1:0" && e.provider === "claude").promptPreview;
   assert.equal(preview.includes("BURIEDNEEDLE"), false, "needle is genuinely beyond the preview");
 });
 
@@ -126,6 +133,14 @@ test("/api/event/:id returns one full record; unknown id is 404", async () => {
   assert.equal(ok.status, 200);
   assert.equal(ok.json.prompt, "short one");
   assert.equal((await request(port, "/api/event/nope")).status, 404);
+});
+
+test("/api/event names provider and session, so turns sharing an id each open themselves", async () => {
+  const claude = await request(port, "/api/event/s1%3A0?provider=claude&session=s1");
+  const codex = await request(port, "/api/event/s1%3A0?provider=codex&session=s9");
+  assert.equal(claude.json.prompt, LONG_PROMPT);
+  assert.equal(codex.json.prompt, "same id, another session");
+  assert.equal((await request(port, "/api/event/s1%3A0?provider=codex&session=s1")).status, 404);
 });
 
 test("/api/stream is an SSE feed that fires when the data dir changes", async () => {

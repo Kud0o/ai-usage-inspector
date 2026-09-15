@@ -82,6 +82,11 @@ export function buildTurns(transcriptPath, opts = {}) {
   return buildClaudeTurns(transcriptPath, opts);
 }
 
+/** Which transcript a batch came from, for the store: the session file's name. */
+export function transcriptId(transcriptPath) {
+  return typeof transcriptPath === "string" ? path.basename(transcriptPath, ".jsonl") || null : null;
+}
+
 /**
  * All session transcripts on disk (~/.claude/projects/<enc-cwd>/<session>.jsonl),
  * for backfill/sync. cwd is recovered from each transcript's own entries (turn

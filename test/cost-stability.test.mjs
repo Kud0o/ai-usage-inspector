@@ -64,3 +64,33 @@ test("a genuinely new turn is unaffected", async (t) => {
   assert.equal(rows.length, 2);
   assert.equal(rows.find((r) => r.id === "s1:1").cost.total, 4.56);
 });
+
+// The promise is about rates, not tokens. A figure recorded for different tokens
+// (an empty replay, a capture taken before the turn finished) describes something
+// else, and is worked out again once the real tokens are read.
+test("corrected tokens take a fresh cost", async (t) => {
+  const file = tmpUsage(t);
+  await upsertSession(file, "s1", [{ ...rec("priced", 0), usage: { input: 0 } }]);
+  await upsertSession(file, "s1", [{ ...rec("priced", 4.2), usage: { input: 900 } }]);
+  assert.equal(read(file)[0].cost.total, 4.2);
+});
+
+test("a row stored without usage keeps its cost when usage appears", async (t) => {
+  const file = tmpUsage(t);
+  const bare = rec("priced", 1.23);
+  delete bare.usage;
+  await upsertSession(file, "s1", [bare]);
+  await upsertSession(file, "s1", [rec("priced", 9.99)]);
+  assert.equal(read(file)[0].cost.total, 1.23, "nothing shows the tokens changed");
+});
+
+// --relabel promises amounts stay as recorded. Taking a new figure for changed
+// tokens is what a plain re-sync does, never a relabel.
+test("--relabel keeps the recorded amount even when the tokens changed", async (t) => {
+  const file = tmpUsage(t);
+  t.after(() => { delete process.env.AI_USAGE_RELABEL; });
+  await upsertSession(file, "s1", [rec("priced", 1)]);
+  process.env.AI_USAGE_RELABEL = "1";
+  await upsertSession(file, "s1", [{ ...rec("priced", 2), usage: { input: 200 } }]);
+  assert.equal(read(file)[0].cost.total, 1);
+});

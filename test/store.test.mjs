@@ -445,3 +445,120 @@ test("a turn that never had the field does not gain one", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Transcript-scoped replacement. Codex continues a reverted thread in a new
+// rollout under the same thread id, so one session can have two transcripts, and
+// reading one must not delete the turns the other wrote.
+
+function usageFile(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-transcripts-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return path.join(dir, "usage.ndjson");
+}
+
+const codexTurn = (id, extra = {}) => ({
+  provider: "codex", sessionId: "t1", id, usage: { input: 10 }, cost: { total: 1, source: "priced" }, ...extra,
+});
+
+test("two transcripts of one session keep their own turns", async (t) => {
+  const file = usageFile(t);
+  await upsertSession(file, "t1", [codexTurn("a1"), codexTurn("a2")], { transcriptId: "t1" });
+  await upsertSession(file, "t1", [codexTurn("b1")], { transcriptId: "r2" });
+  assert.deepEqual(
+    validRecords(file).map((r) => `${r.transcriptId}/${r.id}`).sort(),
+    ["r2/b1", "t1/a1", "t1/a2"],
+  );
+});
+
+test("re-reading a transcript drops a turn that left it, and only its own", async (t) => {
+  const file = usageFile(t);
+  await upsertSession(file, "t1", [codexTurn("a1"), codexTurn("a2")], { transcriptId: "t1" });
+  await upsertSession(file, "t1", [codexTurn("b1")], { transcriptId: "r2" });
+  await upsertSession(file, "t1", [codexTurn("a1")], { transcriptId: "t1" });
+  assert.deepEqual(validRecords(file).map((r) => r.id).sort(), ["a1", "b1"]);
+});
+
+// Rows written before rows named their transcript can carry ids today's parser no
+// longer produces. The transcript that owns the session must still clear them.
+test("the session's own transcript replaces rows stored before transcripts were named", async (t) => {
+  const file = usageFile(t);
+  fs.writeFileSync(file, [codexTurn("t1:0"), codexTurn("t1:1")].map((r) => JSON.stringify(r)).join("\n") + "\n");
+  await upsertSession(file, "t1", [codexTurn("0190aaaa-0000-7000-8000-000000000001")], { transcriptId: "t1" });
+  assert.deepEqual(validRecords(file).map((r) => r.id), ["0190aaaa-0000-7000-8000-000000000001"]);
+});
+
+test("a continuation keeps older rows, except the turn it renames", async (t) => {
+  const file = usageFile(t);
+  fs.writeFileSync(file, [codexTurn("original-turn"), codexTurn("t1:0")].map((r) => JSON.stringify(r)).join("\n") + "\n");
+  await upsertSession(file, "t1", [codexTurn("t1:0@r2", { legacyId: "t1:0" })], { transcriptId: "r2" });
+  assert.deepEqual(validRecords(file).map((r) => r.id).sort(), ["original-turn", "t1:0@r2"]);
+});
+
+test("a turn claimed by an old position-based name inherits nothing from that row", async (t) => {
+  const file = usageFile(t);
+  // The stored t1:0 may be the ORIGINAL file's turn: the name alone cannot say.
+  fs.writeFileSync(file, JSON.stringify(codexTurn("t1:0", { prompt: "original", cost: { total: 1.23, source: "priced" } })) + "\n");
+  const keepText = (r, prior) => (prior && r.prompt === undefined && prior.prompt !== undefined ? { ...r, prompt: prior.prompt } : r);
+  await upsertSession(file, "t1", [
+    codexTurn("t1:0@r2", { legacyId: "t1:0", cost: { total: 9.99, source: "priced" } }),
+  ], { transcriptId: "r2", preserveFields: keepText });
+  const [row] = validRecords(file);
+  assert.equal(row.id, "t1:0@r2");
+  assert.equal(row.prompt, undefined, "no text from a row that may be another turn");
+  assert.equal(row.cost.total, 9.99, "and no cost from it either");
+});
+
+test("a copy with less work cannot replace another transcript's turn; one with more can", async (t) => {
+  const file = usageFile(t);
+  await upsertSession(file, "t1", [codexTurn("u1", { usage: { input: 500 } })], { transcriptId: "t1" });
+  await upsertSession(file, "t1", [codexTurn("u1", { usage: { input: 0 } })], { transcriptId: "r2" });
+  let rows = validRecords(file);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].usage.input, 500);
+  assert.equal(rows[0].transcriptId, "t1");
+
+  await upsertSession(file, "t1", [codexTurn("u1", { usage: { input: 900 } })], { transcriptId: "r2" });
+  rows = validRecords(file);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].usage.input, 900);
+  assert.equal(rows[0].transcriptId, "r2");
+});
+
+// After /compact, Claude Code writes earlier prompts again. A replay reaching the
+// store must not displace the turn that holds the work.
+test("within a batch, the copy carrying tokens beats a later empty copy", async (t) => {
+  const file = usageFile(t);
+  await upsertSession(file, "s1", [
+    { provider: "claude", sessionId: "s1", id: "u1", usage: { input: 1200, output: 30 }, cost: { total: 2, source: "priced" } },
+    { provider: "claude", sessionId: "s1", id: "u1", usage: { input: 0, output: 0 }, cost: { total: 0, source: "priced" } },
+  ]);
+  const rows = validRecords(file);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].usage.input, 1200);
+});
+
+test("deleting a turn does not hide a later transcript's turn at the same position", async (t) => {
+  const file = usageFile(t);
+  await addTombstones(tombstonePath(file), [{ provider: "codex", sessionId: "t1", id: "t1:0" }]);
+  await upsertSession(file, "t1", [codexTurn("t1:0@r2", { legacyId: "t1:0" })], { transcriptId: "r2" });
+  await upsertSession(file, "t1", [codexTurn("t1:0@r3", { legacyId: "t1:0" })], { transcriptId: "r3" });
+  assert.deepEqual(validRecords(file).map((r) => r.id).sort(), ["t1:0@r2", "t1:0@r3"]);
+});
+
+test("a deleted turn stays deleted when its own transcript is read again", async (t) => {
+  const file = usageFile(t);
+  await addTombstones(tombstonePath(file), [{ provider: "codex", sessionId: "t1", id: "t1:0@r2" }]);
+  await upsertSession(file, "t1", [codexTurn("t1:0@r2", { legacyId: "t1:0" })], { transcriptId: "r2" });
+  assert.deepEqual(validRecords(file), []);
+});
+
+// Cursor, OpenCode and the Cline family keep one source per session and name no
+// transcript; their batches must go on replacing the whole session.
+test("a batch that names no transcript still replaces the whole session", async (t) => {
+  const file = usageFile(t);
+  await upsertSession(file, "t1", [codexTurn("a1")], { transcriptId: "t1" });
+  await upsertSession(file, "t1", [codexTurn("b1")], { transcriptId: "r2" });
+  await upsertSession(file, "t1", [codexTurn("c1")]);
+  assert.deepEqual(validRecords(file).map((r) => r.id), ["c1"]);
+});

@@ -5,8 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { runLauncher } from "../src/record.mjs";
-import { drainSpool, sweepProviders, shouldSweepNow, msSinceLastScan } from "../src/worker.mjs";
-import { claimScan, recordScanResult } from "../src/lib/scan-state.mjs";
+import { drainSpool, rescan, sweepProviders, shouldSweepNow, msSinceLastScan } from "../src/worker.mjs";
+import { REPAIR_EPOCH, claimScan, recordInstall, recordScanResult, repairDue } from "../src/lib/scan-state.mjs";
 
 // Point scan bookkeeping at a throwaway file: these tests must never touch the
 // real ~/.ai-usage-inspector/scan-state.json.
@@ -374,4 +374,22 @@ test("starvation is measured per provider, not across them", async (t) => {
   }));
   const both = [{ id: "codex" }, { id: "claude" }];
   assert.equal(msSinceLastScan(now, both), 3_600_000, "reports the provider that has waited longest");
+});
+
+// A repair reads a provider's whole history once. A transcript that moved while
+// being read belongs to a live session its hook reads again, so it must not keep
+// the repair owed for ever; any other failure must.
+test("a repair survives a transcript that moved, but not one that failed", async (t) => {
+  withScanState(t);
+  await recordInstall({ upgrading: true, providerIds: ["moving", "broken"] });
+  const moved = () => {
+    const err = new Error("transcript changed while being parsed");
+    err.scanStatus = "locked";
+    err.transcriptMoved = true;
+    throw err;
+  };
+  await rescan({ id: "moving", discoverTranscripts: () => [{ transcriptPath: "x" }], buildTurns: moved }, {});
+  await rescan({ id: "broken", discoverTranscripts: () => [{ transcriptPath: "x" }], buildTurns: () => { throw new Error("boom"); } }, {});
+  assert.equal(repairDue("moving"), null);
+  assert.equal(repairDue("broken"), REPAIR_EPOCH);
 });

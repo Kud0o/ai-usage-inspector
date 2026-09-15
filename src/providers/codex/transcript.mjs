@@ -13,7 +13,24 @@
 // of the running total across that turn — robust to multiple model calls per turn
 // (tool loops). Older flat formats (no `payload` wrapper) are tolerated.
 import fs from "node:fs";
+import path from "node:path";
 import { costOf, contextMax } from "./pricing.mjs";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The ids a canonical rollout filename encodes, read the way codex-rs reads them
+ * (rollout_file_name.rs): `rollout-<YYYY-MM-DDTHH-MM-SS>-<thread-id>.jsonl`, or
+ * `...-<thread-id>_<rollout-id>.jsonl` once `thread/revert` has moved the thread
+ * into a new file. Any other name is not canonical and returns null.
+ */
+export function parseRolloutName(fileName) {
+  const m = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)\.jsonl$/.exec(String(fileName || ""));
+  if (!m) return null;
+  const [threadId, rolloutId = threadId, extra] = m[1].split("_");
+  if (extra !== undefined || !UUID_RE.test(threadId) || !UUID_RE.test(rolloutId)) return null;
+  return { threadId: threadId.toLowerCase(), rolloutId: rolloutId.toLowerCase() };
+}
 
 function readJsonl(file) {
   let text;
@@ -178,6 +195,16 @@ export function buildTurns(rolloutPath, opts = {}) {
   const sessionModel =
     opts.model || meta.model || (meta.turn_context && meta.turn_context.model) || "unknown";
   const cliVersion = meta.cli_version || meta.version || null;
+  // `thread/revert` continues a thread in a new rollout under the same thread id,
+  // and its turns count from zero again. An id built from a position would then
+  // name one of the original file's turns, so a continuation qualifies such ids
+  // with its own rollout id. Decided by the file alone, so the hook and a sync
+  // always agree.
+  const name = typeof rolloutPath === "string" ? parseRolloutName(path.basename(rolloutPath)) : null;
+  const continuation = name && sessionId
+    && name.rolloutId !== String(meta.id || name.threadId).toLowerCase()
+    ? name.rolloutId
+    : null;
 
   // Segment into turns at each user message; attach the token-count deltas and
   // assistant text that follow it. `currentModel` follows turn_context records,
@@ -272,6 +299,7 @@ export function buildTurns(rolloutPath, opts = {}) {
         cliVersion,
         index: i,
         permissionMode: opts.permissionMode || null,
+        continuation,
       }),
     )
     .filter(Boolean);
@@ -304,8 +332,14 @@ function finalizeTurn(t, ctx) {
   const firstResponseMs =
     startTs && t.firstAsstTs ? Math.max(0, Date.parse(t.firstAsstTs) - Date.parse(startTs)) : 0;
 
+  const baseId = t.turnId || `${ctx.sessionId || "codex"}:${ctx.index}`;
+  // Codex's own turn ids are UUIDs and unique anywhere. The fallback, and the
+  // `rollout-N` ids Codex synthesizes when it migrates an old rollout, are
+  // positions, which a continuation file repeats.
+  const qualified = ctx.continuation && !UUID_RE.test(baseId);
   return {
-    id: t.turnId || `${ctx.sessionId || "codex"}:${ctx.index}`,
+    id: qualified ? `${baseId}@${ctx.continuation}` : baseId,
+    ...(qualified ? { legacyId: baseId } : {}),
     provider: "codex",
     sessionId: ctx.sessionId,
     cwd: ctx.cwd,

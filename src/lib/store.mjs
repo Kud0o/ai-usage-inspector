@@ -223,6 +223,22 @@ function sameAmount(a, b) {
   });
 }
 
+/** Do two usage objects count the same tokens? A field one of them lacks counts as zero. */
+function sameTokens(a, b) {
+  const fields = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const k of fields) if ((Number(a[k]) || 0) !== (Number(b[k]) || 0)) return false;
+  return true;
+}
+
+/** Every token a record accounts for, of whatever kind. */
+function tokenCount(r) {
+  const u = r && r.usage;
+  if (!u || typeof u !== "object") return 0;
+  let n = 0;
+  for (const v of Object.values(u)) n += Number(v) || 0;
+  return n;
+}
+
 function preserveComputedCost(next, previous) {
   if (process.env.AI_USAGE_REPRICE === "1") return next;
   if (!previous || !previous.cost || !next || !next.cost) return next;
@@ -243,9 +259,17 @@ function preserveComputedCost(next, previous) {
   // amount is unchanged, in either direction. This is the escape hatch for a row
   // left estimated after the real rate became known — --reprice would fix the
   // label too, but only by restating what the turn cost at today's rates.
-  if (process.env.AI_USAGE_RELABEL === "1" && sameAmount(previous.cost, next.cost)) {
-    return next;
+  // It never takes a new amount, not even for tokens that changed: that is what a
+  // plain re-sync does.
+  if (process.env.AI_USAGE_RELABEL === "1") {
+    return sameAmount(previous.cost, next.cost) ? next : { ...next, cost: previous.cost };
   }
+  // The promise is about rates, not tokens. When a re-read counts different
+  // tokens for the turn, the stored figure was worked out for something that is
+  // not this turn — a capture taken before it finished, a replay holding none of
+  // its work, or a position an older parser gave to a different turn — so it is
+  // worked out again instead of being carried forward.
+  if (previous.usage && next.usage && !sameTokens(previous.usage, next.usage)) return next;
   return { ...next, cost: previous.cost };
 }
 
@@ -263,15 +287,27 @@ export class LockTimeoutError extends Error {
 }
 
 /**
- * Replace one session's records, filtering persistent tombstones. Returns how
- * many records were accepted; THROWS LockTimeoutError if the lock was never
- * acquired, so the caller can retry instead of recording a phantom success.
+ * Replace what one transcript wrote for one session, filtering persistent
+ * tombstones. Returns how many records were accepted; THROWS LockTimeoutError if
+ * the lock was never acquired, so the caller can retry instead of recording a
+ * phantom success.
+ *
+ * Without `transcriptId` the batch is taken to be the whole session, which holds
+ * for every provider that keeps one source per session. With it, the batch
+ * replaces only what that transcript wrote: Codex continues a reverted thread in
+ * a new rollout under the same thread id, and reading one file must not delete
+ * the other's turns.
  */
-export async function upsertSession(file, sessionId, records, { precondition = null, preserveFields = (r) => r } = {}) {
+export async function upsertSession(file, sessionId, records, {
+  precondition = null,
+  preserveFields = (r) => r,
+  transcriptId = null,
+} = {}) {
   // Which provider this batch replaces. Session ids are only unique within a
   // provider, so replacing on the id alone would let one provider delete
   // another's rows — the same composite identity tombstoneKey() uses.
   const provider = records.length ? (records[0].provider ? String(records[0].provider) : "claude") : null;
+  const transcript = transcriptId == null ? null : String(transcriptId);
   // Rows an older version wrote with no session at all got the id
   // "undefined:<startTs>". The turn now arriving with that same timestamp IS that
   // row, so it may replace it — but only that one. Matching the prefix alone
@@ -281,13 +317,8 @@ export async function upsertSession(file, sessionId, records, { precondition = n
   const supersededOrphanIds = new Set(
     records.map((r) => (r && r.legacyId ? String(r.legacyId) : null)).filter(Boolean),
   );
-  const replaces = (r) => {
-    if (provider === null) return false; // nothing to replace with
-    const rp = r && r.provider ? String(r.provider) : "claude";
-    if (rp !== provider) return false;
-    if (r.sessionId === sessionId) return true;
-    return r.sessionId == null && typeof r.id === "string" && supersededOrphanIds.has(r.id);
-  };
+  const providerOf = (r) => (r && r.provider ? String(r.provider) : "claude");
+
   const result = await mutateNdjson(file, (existing) => {
     // Re-checked under the lock: whatever these records were parsed from may have
     // moved on while we queued for it.
@@ -295,20 +326,81 @@ export async function upsertSession(file, sessionId, records, { precondition = n
     // Read while holding usage lock. Viewer writes tombstone before waiting for
     // this lock, closing delete-vs-upsert resurrection races.
     const blocked = loadTombstoneKeys(tombstonePath(file));
-    const priorByKey = new Map(existing.map((r) => [tombstoneKey(r), r]));
-    // A batch can carry the same turn twice. Keep the LAST copy: a re-parse
-    // appends the more complete version, so the later record wins.
-    const byKey = new Map();
+    // Only a turn's own key blocks it. An old, position-based name is ambiguous —
+    // it may be another transcript's turn — and honouring it hid every later
+    // revert's turn at a position the user had once deleted. A continuation turn
+    // deleted under its old name can reappear once; deleting it again sticks.
+    const deleted = (r) => blocked.has(tombstoneKey(r));
+
+    // A batch can carry the same turn twice. A re-parse appends the more complete
+    // version, so the later copy wins — unless it carries fewer tokens: after
+    // /compact, Claude Code writes earlier prompts again, and a replay holds none
+    // of the turn's work.
+    const incoming = new Map();
     for (const r of records) {
-      if (blocked.has(tombstoneKey(r))) continue;
-      byKey.set(tombstoneKey(r), r);
+      if (deleted(r)) continue;
+      const key = tombstoneKey(r);
+      const held = incoming.get(key);
+      if (held && tokenCount(held) > tokenCount(r)) continue;
+      incoming.set(key, r);
     }
-    const accepted = [...byKey.values()].map((r) => {
-      const prior = priorByKey.get(tombstoneKey(r));
-      return preserveComputedCost(preserveFields(r, prior), prior);
-    });
+    const renamed = new Set();
+    for (const r of incoming.values()) if (r.legacyId != null) renamed.add(String(r.legacyId));
+
+    const replaced = [];
+    const kept = [];
+    // Turns another transcript already holds with at least as much work.
+    const outranked = new Set();
+    for (const row of existing) {
+      if (provider === null || providerOf(row) !== provider) {
+        kept.push(row);
+      } else if (row.sessionId !== sessionId) {
+        const orphan = row.sessionId == null && typeof row.id === "string" && supersededOrphanIds.has(row.id);
+        (orphan ? replaced : kept).push(row);
+      } else if (transcript === null) {
+        replaced.push(row);
+      } else if (row.transcriptId != null) {
+        const key = tombstoneKey(row);
+        const mine = incoming.get(key);
+        if (String(row.transcriptId) === transcript) {
+          // This transcript read again: a turn that has left it goes too.
+          replaced.push(row);
+        } else if (mine && tokenCount(mine) > tokenCount(row)) {
+          replaced.push(row);
+        } else {
+          // Another transcript's turn. When both carry it, keep the copy with the
+          // work; on a tie the stored one stays, so two files never trade it back
+          // and forth.
+          if (mine) outranked.add(key);
+          kept.push(row);
+        }
+      } else if (transcript === String(sessionId)
+          || incoming.has(tombstoneKey(row))
+          || (typeof row.id === "string" && renamed.has(row.id))) {
+        // Stored before rows named their transcript. The session's own transcript
+        // takes all of them, as every write used to: such rows can carry ids and
+        // timestamps today's parser no longer produces, and only wholesale
+        // replacement clears those. Any other transcript takes only the turns it
+        // can name.
+        replaced.push(row);
+      } else {
+        kept.push(row);
+      }
+    }
+
+    // A turn inherits preserved fields and its cost only from a replaced row with
+    // its own key. A row claimed through an old name is removed but passes on
+    // nothing: that name may have belonged to a different turn.
+    const priorByKey = new Map(replaced.map((row) => [tombstoneKey(row), row]));
+    const accepted = [];
+    for (const [key, r] of incoming) {
+      if (outranked.has(key)) continue;
+      const prior = priorByKey.get(key);
+      const named = transcript === null ? r : { ...r, transcriptId: transcript };
+      accepted.push(preserveComputedCost(preserveFields(named, prior), prior));
+    }
     return {
-      records: existing.filter((r) => !replaces(r)).concat(accepted),
+      records: kept.concat(accepted),
       value: accepted.length,
     };
   });

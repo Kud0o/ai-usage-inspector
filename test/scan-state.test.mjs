@@ -5,9 +5,13 @@ import path from "node:path";
 import test from "node:test";
 import {
   FIRST_SCAN_WINDOW_MS,
+  REPAIR_EPOCH,
   SCAN_OVERLAP_MS,
+  markRepaired,
   readScanState,
+  recordInstall,
   recordScanResult,
+  repairDue,
   scanWindow,
 } from "../src/lib/scan-state.mjs";
 
@@ -71,4 +75,80 @@ test("providers keep independent marks", async (t) => {
   assert.ok(state.providers.cursor);
   assert.equal(state.providers.opencode, undefined);
   assert.equal(scanWindow("opencode", { file, now: a }).sinceMs, a - FIRST_SCAN_WINDOW_MS);
+});
+
+// A fix to how turns are identified or costed reaches a stored row only when its
+// session is read again. An upgrade across one reads each agent's history once;
+// a fresh install owes nothing and must not import history nobody asked for.
+test("a fresh install owes no repair", async (t) => {
+  const file = tmpState(t);
+  const now = Date.parse("2026-09-15T12:00:00Z");
+  assert.equal(await recordInstall({ file, upgrading: false, providerIds: ["claude"] }), false);
+  assert.equal(repairDue("claude", { file }), null);
+  assert.equal(scanWindow("claude", { file, now }).sinceMs, now - FIRST_SCAN_WINDOW_MS);
+});
+
+test("an upgrade reads each agent's whole history until a clean pass settles it", async (t) => {
+  const file = tmpState(t);
+  const now = Date.parse("2026-09-15T12:00:00Z");
+  await recordScanResult("codex", { file, scanStartedAtMs: now - 3_600_000, status: "ok", completed: true });
+  assert.equal(await recordInstall({ file, upgrading: true, providerIds: ["codex", "claude"] }), true);
+
+  const window = scanWindow("codex", { file, now });
+  assert.equal(window.sinceMs, 0, "the whole history, not the mark");
+  assert.equal(window.repairEpoch, REPAIR_EPOCH);
+
+  await recordScanResult("codex", { file, scanStartedAtMs: now, status: "ok", completed: false });
+  assert.equal(scanWindow("codex", { file, now }).sinceMs, 0, "a pass that did not finish settles nothing");
+
+  await recordScanResult("codex", { file, scanStartedAtMs: now, status: "ok", completed: true, repairEpoch: window.repairEpoch });
+  assert.equal(repairDue("codex", { file }), null);
+  assert.equal(scanWindow("codex", { file, now: now + 60_000 }).sinceMs, now - SCAN_OVERLAP_MS, "back to the normal window");
+  assert.equal(repairDue("claude", { file }), REPAIR_EPOCH, "each agent is repaired on its own");
+});
+
+test("an upgrade from a version that already repairs asks for nothing", async (t) => {
+  const file = tmpState(t);
+  await recordInstall({ file, upgrading: false, providerIds: ["codex"] });
+  assert.equal(await recordInstall({ file, upgrading: true, providerIds: ["codex"] }), false);
+  assert.equal(repairDue("codex", { file }), null);
+});
+
+test("sync's stamp settles a repair the same way", async (t) => {
+  const file = tmpState(t);
+  await recordInstall({ file, upgrading: true, providerIds: ["claude"] });
+  await markRepaired("claude", REPAIR_EPOCH, { file });
+  assert.equal(repairDue("claude", { file }), null);
+});
+
+test("a repair settled in an aggregate directory is still owed to the projects' own rows", async (t) => {
+  const file = tmpState(t);
+  const saved = process.env.AI_USAGE_DIR;
+  t.after(() => {
+    if (saved === undefined) delete process.env.AI_USAGE_DIR;
+    else process.env.AI_USAGE_DIR = saved;
+  });
+  delete process.env.AI_USAGE_DIR;
+  await recordInstall({ file, upgrading: true, providerIds: ["cursor"] });
+  process.env.AI_USAGE_DIR = path.join(path.dirname(file), "aggregate");
+  await recordScanResult("cursor", { file, scanStartedAtMs: Date.now(), status: "ok", completed: true, repairEpoch: REPAIR_EPOCH });
+  assert.equal(repairDue("cursor", { file }), null, "the aggregate copy is repaired");
+  delete process.env.AI_USAGE_DIR;
+  assert.equal(repairDue("cursor", { file }), REPAIR_EPOCH, "the projects' rows are not");
+});
+
+test("one aggregate directory spelled two ways settles one repair on Windows", { skip: process.platform !== "win32" && "paths are case-sensitive here" }, async (t) => {
+  const file = tmpState(t);
+  const saved = process.env.AI_USAGE_DIR;
+  t.after(() => {
+    if (saved === undefined) delete process.env.AI_USAGE_DIR;
+    else process.env.AI_USAGE_DIR = saved;
+  });
+  const dir = path.join(path.dirname(file), "Aggregate");
+  delete process.env.AI_USAGE_DIR;
+  await recordInstall({ file, upgrading: true, providerIds: ["cursor"] });
+  process.env.AI_USAGE_DIR = dir.toUpperCase();
+  await markRepaired("cursor", REPAIR_EPOCH, { file });
+  process.env.AI_USAGE_DIR = dir.toLowerCase();
+  assert.equal(repairDue("cursor", { file }), null);
 });

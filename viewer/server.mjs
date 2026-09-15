@@ -22,7 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { ensureOwnedDir, runtimePaths } from "./runtime.mjs";
+import { ensureRuntimeDir, runtimePaths } from "./runtime.mjs";
 import { createSseRegistry } from "./sse.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -392,7 +392,14 @@ const server = http.createServer(async (req, res) => {
     }
     if (route.startsWith("/api/event/")) {
       const id = decodeURIComponent(route.slice("/api/event/".length));
-      const e = loadEvents().find((x) => x.id === id);
+      // An id is unique only within its provider and session — a Codex subagent
+      // thread repeats its parent's turn ids — so the drawer names all three. A
+      // request without them still resolves by id alone.
+      const provider = url.searchParams.get("provider");
+      const session = url.searchParams.get("session");
+      const e = loadEvents().find((x) => x.id === id
+        && (provider === null || (x.provider || "claude") === provider)
+        && (session === null || (x.sessionId == null ? "" : String(x.sessionId)) === session));
       return e ? send(res, 200, JSON.stringify(e)) : send(res, 404, "{}");
     }
     if (route === "/api/config") {
@@ -429,7 +436,7 @@ const { dir: RUNTIME_DIR, runtimeFile: RUNTIME_FILE } = runtimePaths(DATA_DIR);
 function writeRuntimeFile(port) {
   if (!LAUNCHER_MODE) return;
   try {
-    ensureOwnedDir(RUNTIME_DIR);
+    ensureRuntimeDir(RUNTIME_DIR);
     const body = JSON.stringify({
       nonce: LAUNCH_NONCE, port, pid: process.pid, dataDir: DATA_DIR, startedAt: Date.now(),
     }, null, 2);

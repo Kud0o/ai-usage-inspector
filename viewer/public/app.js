@@ -629,7 +629,7 @@ function rowHtml(e) {
     ? `<span class="skill-chip" title="Auto-continued after a context compaction — not a prompt anyone typed">⟳</span> `
     : "";
   const prov = e.provider || "claude";
-  return `<tr class="row" data-id="${esc(e.id)}">
+  return `<tr class="row" data-id="${esc(e.id)}" data-provider="${esc(prov)}" data-session="${esc(e.sessionId == null ? "" : e.sessionId)}">
     <td class="mono muted col-when">${fmtWhen(e.ts)}</td>
     <td class="col-provider"><span class="tag prov-${esc(prov)}">${esc(prov)}</span></td>
     <td class="ws col-workspace">${esc(e.workspace)}</td>
@@ -747,12 +747,14 @@ function detailBlock(kind, label, chars, text) {
 }
 
 // ---------- drawer ----------
-async function openDrawer(id) {
+async function openDrawer(id, provider, session) {
   const drawer = $("#drawer");
   drawer.hidden = false;
   $("#drawer-panel").innerHTML = `<div class="muted mono" style="padding:40px">loading…</div>`;
   let e;
-  try { e = await (await fetch("/api/event/" + encodeURIComponent(id))).json(); } catch { e = null; }
+  // The same id can belong to more than one turn, so name the provider and session too.
+  const scope = provider == null ? "" : `?provider=${encodeURIComponent(provider)}&session=${encodeURIComponent(session || "")}`;
+  try { e = await (await fetch("/api/event/" + encodeURIComponent(id) + scope)).json(); } catch { e = null; }
   if (!e || !e.id) { $("#drawer-panel").innerHTML = `<div class="muted mono" style="padding:40px">not found</div>`; return; }
   const u = e.usage || {}, c = e.cost || {}, k = e.counts || {};
   // meta spans (omit when the `meta`/`timing` group is stripped)
@@ -928,7 +930,7 @@ function bind() {
     })
   );
   $("#rows").addEventListener("click", (e) => {
-    const tr = e.target.closest("tr.row"); if (tr) openDrawer(tr.dataset.id);
+    const tr = e.target.closest("tr.row"); if (tr) openDrawer(tr.dataset.id, tr.dataset.provider, tr.dataset.session);
   });
   $("#drawer").addEventListener("click", async (e) => {
     if (e.target.dataset.close !== undefined) return closeDrawer();

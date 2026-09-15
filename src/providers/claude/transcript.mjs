@@ -216,8 +216,15 @@ export function buildTurns(transcriptPath, opts = {}) {
   // the hook path and the backfill scan can always see — entry-level sessionId
   // is not guaranteed to be present.
   const fileSession = path.basename(String(transcriptPath || ""), ".jsonl") || null;
+  // After /compact, Claude Code writes earlier prompts into the transcript again:
+  // the same uuid under a new promptId, with none of the turn's work after it.
+  // Opening a turn for the replay put an empty copy beside the real turn, and
+  // the store kept whichever was written last — the empty one.
+  const opened = new Set();
   for (const e of entries) {
     if (isHumanPrompt(e)) {
+      if (e.uuid && opened.has(e.uuid)) continue;
+      if (e.uuid) opened.add(e.uuid);
       cur = {
         promptEntry: e,
         promptId: e.promptId || null,

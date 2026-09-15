@@ -74,12 +74,19 @@ function restoreEnv(name, previous) {
  * mark where it was so the next run picks the work back up.
  */
 export async function rescan(provider, norm, leaseId = null) {
-  const { sinceMs, scanStartedAtMs } = scanWindow(provider.id);
+  const { sinceMs, scanStartedAtMs, repairEpoch } = scanWindow(provider.id);
   const effectiveSince = Number.isFinite(norm.sinceMs) ? norm.sinceMs : sinceMs;
+  // A caller that names its own window is not reading everything, so it cannot
+  // finish a repair.
+  const repairing = repairEpoch != null && !Number.isFinite(norm.sinceMs);
 
   let status = "ok";
   let detail = null;
   let completed = false;
+  // A repair is done once the store answered and every transcript it listed was
+  // stored — save those that moved while being read, which belong to a live
+  // session its hook reads again anyway.
+  let repaired = repairing;
   try {
     let found = [];
     if (typeof provider.discoverTranscriptsStatus === "function") {
@@ -90,12 +97,14 @@ export async function rescan(provider, norm, leaseId = null) {
     } else {
       found = await provider.discoverTranscripts({ sinceMs: effectiveSince });
     }
+    if (status !== "ok") repaired = false;
     let allIngested = true;
     for (const transcript of found) {
       try {
         await ingestTranscript(provider, transcript);
       } catch (err) {
         allIngested = false;
+        if (!(err && err.transcriptMoved)) repaired = false;
         if (err && err.scanStatus) {
           status = err.scanStatus;
           detail = err.message || detail;
@@ -107,9 +116,17 @@ export async function rescan(provider, norm, leaseId = null) {
     status = (err && err.scanStatus) || status;
     detail = (err && err.message) || detail;
     completed = false;
+    repaired = false;
   }
   try {
-    await recordScanResult(provider.id, { scanStartedAtMs, status, detail, completed, leaseId });
+    await recordScanResult(provider.id, {
+      scanStartedAtMs,
+      status,
+      detail,
+      completed,
+      leaseId,
+      repairEpoch: repaired ? repairEpoch : null,
+    });
   } catch {}
 }
 

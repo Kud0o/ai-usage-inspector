@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { HOME } from "../../lib/paths.mjs";
-import { buildTurns as buildCodexTurns } from "./transcript.mjs";
+import { buildTurns as buildCodexTurns, parseRolloutName } from "./transcript.mjs";
 import { applyRemoteRates } from "./pricing.mjs";
 import { refreshPricing as refreshRemote } from "./remote-pricing.mjs";
 
@@ -55,14 +55,18 @@ export function normalizePayload(raw) {
 }
 
 /**
- * All rollout files on disk (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl),
+ * All rollout files on disk (~/.codex/sessions/YYYY/MM/DD/, and the flat
+ * ~/.codex/archived_sessions/ Codex moves finished threads into),
  * for backfill/sync. Each entry: { transcriptPath, opts } — cwd/session come
  * from the rollout's own session_meta, so opts stays empty. `sinceMs` skips
  * files not modified since then.
  */
 export function discoverTranscripts({ sinceMs = 0 } = {}) {
-  const root = path.join(CODEX_HOME, "sessions");
-  const out = [];
+  // One rollout can exist twice — active and archived after a backup is restored,
+  // say. Both copies name the same transcript, so reading the smaller one last
+  // would replace the fuller one's rows. Rollouts only grow, so keep the larger
+  // copy (the newer on a tie), and only then apply the window to it.
+  const best = new Map();
   const walk = (dir, depth) => {
     let ents;
     try {
@@ -76,17 +80,39 @@ export function discoverTranscripts({ sinceMs = 0 } = {}) {
         if (depth < 4) walk(p, depth + 1); // sessions/YYYY/MM/DD
       } else if (e.isFile() && e.name.startsWith("rollout-") && e.name.endsWith(".jsonl")) {
         try {
-          if (fs.statSync(p).mtimeMs >= sinceMs) out.push({ transcriptPath: p, opts: {} });
+          const st = fs.statSync(p);
+          const held = best.get(e.name);
+          if (!held || st.size > held.size || (st.size === held.size && st.mtimeMs > held.mtimeMs)) {
+            best.set(e.name, { path: p, size: st.size, mtimeMs: st.mtimeMs });
+          }
         } catch {}
       }
     }
   };
-  walk(root, 0);
-  return out;
+  walk(path.join(CODEX_HOME, "sessions"), 0);
+  // Codex moves finished threads to archived_sessions. Their usage still happened,
+  // and a repair that skipped them would settle while their rows stayed wrong.
+  walk(path.join(CODEX_HOME, "archived_sessions"), 0);
+  return [...best.values()]
+    .filter((copy) => copy.mtimeMs >= sinceMs)
+    .map((copy) => ({ transcriptPath: copy.path, opts: {} }));
 }
 
 export function buildTurns(transcriptPath, opts = {}) {
   return buildCodexTurns(transcriptPath, opts);
+}
+
+/**
+ * Which rollout a transcript is, for the store: the rollout id codex-rs encodes
+ * in the filename. It equals the thread id until a thread is reverted into a new
+ * file, and that difference is what lets two files of one thread keep their own
+ * turns. A name Codex did not write still names its own file, so reading it can
+ * only replace what that file stored — never the whole session.
+ */
+export function transcriptId(transcriptPath) {
+  if (typeof transcriptPath !== "string") return null;
+  const name = parseRolloutName(path.basename(transcriptPath));
+  return name ? name.rolloutId : path.basename(transcriptPath, ".jsonl") || null;
 }
 
 // ---- install-time (Stop hook in ~/.codex/hooks.json) ----

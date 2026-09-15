@@ -26,10 +26,30 @@ function canonicalProjectPath(dataDir) {
 // and open a browser on their page believing it was your dashboard. So prefer
 // the per-user runtime directory the OS already provides, fall back to a
 // uid-qualified name, and refuse to use a directory that is not ours.
+function currentUid() {
+  return typeof process.getuid === "function" ? process.getuid() : null;
+}
+
+/**
+ * May XDG_RUNTIME_DIR hold our state, given what lstat says about it?
+ *
+ * The variable is only a name. On a system that does not set it up, or in an
+ * environment someone else shaped, it can point anywhere — /tmp included. So it
+ * is used only when it names a real directory of ours that nobody else can
+ * enter, and it is never tightened to make it so: it belongs to the system.
+ */
+export function runtimeDirUsable(dir, st, { uid = null } = {}) {
+  return Boolean(dir) && path.isAbsolute(dir) && refuseReason(st, { uid }) === null;
+}
+
 function runtimeRoot() {
+  const uid = currentUid();
   const xdg = process.env.XDG_RUNTIME_DIR;
-  if (xdg && path.isAbsolute(xdg)) return path.join(xdg, "ai-usage-inspector");
-  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (xdg && path.isAbsolute(xdg)) {
+    let st = null;
+    try { st = fs.lstatSync(xdg); } catch {}
+    if (runtimeDirUsable(xdg, st, { uid })) return path.join(xdg, "ai-usage-inspector");
+  }
   return path.join(os.tmpdir(), uid === null ? "ai-usage-inspector" : `ai-usage-inspector-${uid}`);
 }
 
@@ -61,7 +81,7 @@ export function refuseReason(st, { uid = null } = {}) {
 export function ensureOwnedDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (process.platform === "win32") return dir;
-  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  const uid = currentUid();
   let reason = refuseReason(fs.lstatSync(dir), { uid });
   if (reason === "is accessible to other users") {
     // Ours, merely too open: tighten rather than refuse.
@@ -70,6 +90,20 @@ export function ensureOwnedDir(dir) {
   }
   if (reason) throw new Error(`${dir} ${reason}`);
   return dir;
+}
+
+/**
+ * Create a project's runtime directory without trusting anything on the way.
+ *
+ * Checking only the directory we use is not enough: whoever owns its parent can
+ * rename it away after the check and put their own in its place. So the base is
+ * verified before the project directory inside it. The base's own parent is a
+ * sticky temp directory, where nobody else may move what we own, or an
+ * XDG_RUNTIME_DIR that runtimeRoot() has already checked.
+ */
+export function ensureRuntimeDir(dir) {
+  ensureOwnedDir(path.dirname(dir));
+  return ensureOwnedDir(dir);
 }
 
 export function runtimePaths(dataDir) {
@@ -96,13 +130,38 @@ function removeStaleLock(lockFile, staleMs, token) {
     const before = fs.statSync(lockFile);
     if (Date.now() - before.mtimeMs <= staleMs) return false;
     // Claim the stale lock by moving it aside. Only one rename can succeed, so
-    // a slower contender cannot delete the fresh lock its winner just created.
+    // two contenders cannot both delete it.
     const claimed = `${lockFile}.stale-${token}`;
     fs.renameSync(lockFile, claimed);
+    // The check and the rename are still two steps: a winner can replace the stale
+    // lock in between, and then what was just moved is its fresh one. So judge
+    // the file now held, and give a fresh lock back. link() refuses to replace an
+    // existing path, so a lock taken in the meantime is never clobbered.
+    if (Date.now() - fs.statSync(claimed).mtimeMs <= staleMs) {
+      try { fs.linkSync(claimed, lockFile); } catch {}
+      fs.rmSync(claimed, { force: true });
+      return false;
+    }
     fs.rmSync(claimed, { force: true });
     return true;
   } catch {
     return false;
+  }
+}
+
+// A contender that died between claiming a stale lock and removing it leaves the
+// claim behind, under a name nothing reads again.
+function reapClaims(lockFile, staleMs) {
+  const dir = path.dirname(lockFile);
+  const prefix = `${path.basename(lockFile)}.stale-`;
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { return; }
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const file = path.join(dir, name);
+    try {
+      if (Date.now() - fs.lstatSync(file).mtimeMs > staleMs) fs.rmSync(file, { force: true });
+    } catch {}
   }
 }
 
@@ -128,7 +187,8 @@ export async function coordinateStartup({
 }) {
   const deadline = Date.now() + waitMs;
   const token = `${process.pid}-${Date.now().toString(36)}-${crypto.randomBytes(6).toString("hex")}`;
-  ensureOwnedDir(path.dirname(lockFile));
+  ensureRuntimeDir(path.dirname(lockFile));
+  reapClaims(lockFile, staleMs);
 
   while (Date.now() < deadline) {
     const running = readRuntime(runtimeFile);

@@ -9,13 +9,16 @@
 //   node sync.mjs --reprice            # recompute stored costs at today's rates
 //   node sync.mjs --relabel            # refresh cost provenance, keep the amounts
 //
-// Idempotent: records upsert per sessionId, so re-running never duplicates.
-// Re-syncing also does NOT rewrite costs this tool computed for old turns —
-// what a turn cost is a fact about when it ran — unless --reprice is passed.
+// Idempotent: each transcript replaces what it stored before, so re-running never
+// duplicates. Re-syncing also does NOT rewrite costs this tool computed for old
+// turns while their tokens are unchanged — what a turn cost is a fact about the
+// rates when it ran — unless --reprice is passed. A repair owed after an upgrade
+// widens the window to a provider's whole history, once.
 // Per-project tracking config still gates every project (disabled = skipped),
 // exactly like the hook path.
 import { getProvider, detectInstalled } from "./providers/index.mjs";
 import { ingestTranscript } from "./lib/ingest.mjs";
+import { markRepaired, repairDue } from "./lib/scan-state.mjs";
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(name);
@@ -39,8 +42,9 @@ function help() {
   Imports existing provider history into per-project .ai-usage records.
 
   Costs this tool computed for turns already recorded are kept as-is on a
-  re-sync; pass --reprice to recompute them at today's rates, or
-  --relabel to refresh only their provenance and leave the amounts as recorded.
+  re-sync while the turn's tokens are unchanged; pass --reprice to recompute
+  them at today's rates, or --relabel to refresh only their provenance and
+  leave the amounts as recorded.
 `);
 }
 
@@ -116,9 +120,24 @@ async function main() {
       console.log(`  ${p.id}: needs Node >= 22.5 for node:sqlite (you have ${process.versions.node}) — skipped`);
       continue;
     }
-    const found = await p.discoverTranscripts({ sinceMs });
+    // A repair owed after an upgrade reads this provider's whole history once,
+    // whatever window was asked for. The dashboard runs this at start, and on a
+    // --local or autoSweep:false machine nothing else would.
+    const repair = repairDue(p.id);
+    if (repair !== null) console.log(`  ${p.id}: reading full history once, to repair stored rows`);
+    const since = repair === null ? sinceMs : 0;
+    let found = [];
+    let storeOk = true;
+    if (typeof p.discoverTranscriptsStatus === "function") {
+      const result = await p.discoverTranscriptsStatus({ sinceMs: since });
+      found = result.transcripts || [];
+      storeOk = (result.status || "ok") === "ok";
+    } else {
+      found = await p.discoverTranscripts({ sinceMs: since });
+    }
     let files = 0;
     let turns = 0;
+    let failed = false;
     for (const t of found) {
       try {
         const n = await ingestTranscript(p, t);
@@ -126,7 +145,15 @@ async function main() {
           files++;
           turns += n;
         }
-      } catch {}
+      } catch (err) {
+        // One still being written is read again by its hook; anything else is not.
+        if (!(err && err.transcriptMoved)) failed = true;
+      }
+    }
+    // Settles the repair only for where this run wrote: the projects, or one
+    // aggregate directory.
+    if (repair !== null && storeOk && !failed) {
+      try { await markRepaired(p.id, repair); } catch {}
     }
     console.log(`  ${p.id}: ${found.length} transcript(s) scanned, ${turns} turn(s) from ${files} session(s) imported`);
   }

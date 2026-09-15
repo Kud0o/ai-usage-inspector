@@ -12,7 +12,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Bump when the bundled viewer changes so existing projects refresh their copy
 // on the next prompt (after the user re-installs the app via npx).
-export const VIEWER_VERSION = "18";
+export const VIEWER_VERSION = "19";
 
 // The file a user double-clicks to see their dashboard, so nobody has to open a
 // terminal and remember a path. It is deliberately thin: it only runs
@@ -96,23 +96,40 @@ function ensureBundle(cwd) {
 }
 
 // Shared tail: tag, field-select, upsert, bundle. Returns turns written.
-async function storeTurns(turns, cwd, cfg, sessionId, precondition = null) {
+async function storeTurns(turns, cwd, cfg, sessionId, precondition = null, transcriptId = null) {
   const label = workspaceLabel(cwd);
   for (const t of turns) t.workspace = label;
 
-  const sid = sessionId || (turns[0] && turns[0].sessionId);
-  if (!sid) return 0;
+  // One transcript can hold turns of more than one session, and each session is
+  // replaced on its own: written under the first, the others were appended beside
+  // their earlier copies on every re-read. A turn that names no session belongs
+  // to the one the caller identified.
+  const fallback = sessionId || (turns[0] && turns[0].sessionId);
+  const sessions = new Map();
+  for (const t of turns) {
+    const sid = t.sessionId || fallback;
+    if (!sid) continue;
+    if (!sessions.has(sid)) sessions.set(sid, []);
+    sessions.get(sid).push(t);
+  }
+  if (!sessions.size) return 0;
 
-  const slim = turns.map((t) => applyFieldSelection(t, cfg.fields));
-  const written = await upsertSession(workspaceFile(cwd), sid, slim, {
-    precondition,
-    // A field turned off stops new recording; it does not erase what is stored.
-    preserveFields: (r, prior) => preserveStoredFields(r, prior, cfg.fields),
-  });
-  if (written === ABORT) {
-    const err = new Error("transcript changed before the write");
-    err.scanStatus = "locked";
-    throw err;
+  let written = 0;
+  for (const [sid, group] of sessions) {
+    const slim = group.map((t) => applyFieldSelection(t, cfg.fields));
+    const n = await upsertSession(workspaceFile(cwd), sid, slim, {
+      precondition,
+      // A field turned off stops new recording; it does not erase what is stored.
+      preserveFields: (r, prior) => preserveStoredFields(r, prior, cfg.fields),
+      transcriptId,
+    });
+    if (n === ABORT) {
+      const err = new Error("transcript changed before the write");
+      err.scanStatus = "locked";
+      err.transcriptMoved = true;
+      throw err;
+    }
+    written += n;
   }
   ensureBundle(cwd);
   return written;
@@ -133,7 +150,7 @@ export async function ingest(provider, raw) {
   // await: some providers' parsers are async (cursor reads SQLite).
   const turns = await provider.buildTurns(transcriptPath, opts || {});
   if (!turns.length) return 0;
-  return storeTurns(turns, cwd, cfg, sessionId);
+  return storeTurns(turns, cwd, cfg, sessionId, null, transcriptIdOf(provider, transcriptPath));
 }
 
 /**
@@ -162,6 +179,22 @@ function transcriptStamp(provider, transcriptPath) {
 }
 
 /**
+ * Which transcript a batch was read from, when the provider can say. Codex keeps
+ * a reverted thread in more than one rollout, so the store has to know which file
+ * wrote which rows. A provider that keeps one source per session names nothing,
+ * and its batches replace the whole session as they always have.
+ */
+function transcriptIdOf(provider, transcriptPath) {
+  if (!provider || typeof provider.transcriptId !== "function") return null;
+  try {
+    const value = provider.transcriptId(transcriptPath);
+    return value == null || value === "" ? null : String(value);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Ingest one transcript directly (backfill/sync path — no hook payload).
  * cwd may be unknown up front; it's recovered from the parsed turns. The same
  * per-project tracking config gates ingestion, so disabled projects are
@@ -179,6 +212,7 @@ export async function ingestTranscript(provider, { transcriptPath, cwd, sessionI
   if (before !== null && transcriptStamp(provider, transcriptPath) !== before) {
     const err = new Error("transcript changed while being parsed");
     err.scanStatus = "locked";
+    err.transcriptMoved = true;
     throw err;
   }
 
@@ -198,6 +232,9 @@ export async function ingestTranscript(provider, { transcriptPath, cwd, sessionI
   if (!isEnabled(cfg)) return 0;
   // Checked again under the write lock: config work and the lock queue both take
   // time, and the agent may have appended a turn in the meantime.
-  return storeTurns(turns, effCwd, cfg, sessionId, () =>
-    before === null || transcriptStamp(provider, transcriptPath) === before);
+  return storeTurns(
+    turns, effCwd, cfg, sessionId,
+    () => before === null || transcriptStamp(provider, transcriptPath) === before,
+    transcriptIdOf(provider, transcriptPath),
+  );
 }

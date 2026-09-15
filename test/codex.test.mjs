@@ -3,7 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { buildTurns } from "../src/providers/codex/transcript.mjs";
+import { buildTurns, parseRolloutName } from "../src/providers/codex/transcript.mjs";
+import * as codexProvider from "../src/providers/codex/index.mjs";
+import { ingestTranscript } from "../src/lib/ingest.mjs";
 
 function writeJsonl(file, records) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -81,4 +83,151 @@ test("Codex hook install migrates legacy TOML without deleting unrelated setting
     else process.env.CODEX_HOME = oldHome;
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1. `thread/revert` continues a thread in a new rollout under the same
+// thread id: rollout-<ts>-<thread>_<rollout>.jsonl. Both files parse to the same
+// session, and reading the second used to delete every turn of the first.
+
+const THREAD = "019f5143-59f3-7143-8649-4ff9f3b2f7cf";
+const ROLLOUT = "01a0718c-2b3c-7d4e-8f50-6a7b8c9d0e1f";
+
+test("rollout filenames are read the way Codex writes them", () => {
+  assert.deepEqual(parseRolloutName(`rollout-2026-09-05T08-45-15-${THREAD}.jsonl`), { threadId: THREAD, rolloutId: THREAD });
+  assert.deepEqual(parseRolloutName(`rollout-2026-09-05T20-30-42-${THREAD}_${ROLLOUT}.jsonl`), { threadId: THREAD, rolloutId: ROLLOUT });
+  assert.equal(parseRolloutName("rollout-test.jsonl"), null);
+  assert.equal(parseRolloutName(`rollout-2026-09-05T20-30-42-${THREAD}_not-a-rollout-id.jsonl`), null);
+  assert.equal(codexProvider.transcriptId(`/x/rollout-2026-09-05T20-30-42-${THREAD}_${ROLLOUT}.jsonl`), ROLLOUT);
+  assert.equal(codexProvider.transcriptId("/x/rollout-test.jsonl"), "rollout-test", "a name Codex did not write still names its own file");
+});
+
+// The reporter's pair: the original file with two turns reaching 5,000 in / 500
+// out, and the continuation with one turn whose counter runs from 300 to 800 in.
+function writeRevertPair(dir, { turnId = null } = {}) {
+  const rec = (timestamp, type, payload) => ({ timestamp, type, payload });
+  const tokens = (input, output) => ({
+    type: "token_count",
+    info: {
+      total_token_usage: { input_tokens: input, cached_input_tokens: 0, output_tokens: output, reasoning_output_tokens: 0 },
+      last_token_usage: { input_tokens: input, cached_input_tokens: 0, output_tokens: output, reasoning_output_tokens: 0 },
+      model_context_window: 100000,
+    },
+  });
+  const meta = (ts) => [
+    rec(ts, "session_meta", { id: THREAD, cwd: dir, cli_version: "0.154.0" }),
+    rec(ts, "turn_context", { model: "gpt-test" }),
+  ];
+  const original = path.join(dir, `rollout-2026-09-05T08-45-15-${THREAD}.jsonl`);
+  const continuation = path.join(dir, `rollout-2026-09-05T20-30-42-${THREAD}_${ROLLOUT}.jsonl`);
+  writeJsonl(original, [
+    ...meta("2026-09-05T08:45:15.000Z"),
+    rec("2026-09-05T08:46:00.000Z", "event_msg", { type: "user_message", message: "before the revert, one" }),
+    rec("2026-09-05T08:46:05.000Z", "event_msg", tokens(2000, 200)),
+    rec("2026-09-05T08:47:00.000Z", "event_msg", { type: "user_message", message: "before the revert, two" }),
+    rec("2026-09-05T08:47:05.000Z", "event_msg", tokens(5000, 500)),
+  ]);
+  writeJsonl(continuation, [
+    ...meta("2026-09-05T20:30:42.000Z"),
+    ...(turnId ? [rec("2026-09-05T20:30:59.000Z", "event_msg", { type: "task_started", turn_id: turnId })] : []),
+    rec("2026-09-05T20:31:00.000Z", "event_msg", { type: "user_message", message: "after the revert" }),
+    rec("2026-09-05T20:31:03.000Z", "event_msg", tokens(300, 30)),
+    rec("2026-09-05T20:31:08.000Z", "event_msg", tokens(800, 80)),
+  ]);
+  return { original, continuation };
+}
+
+test("a continuation's position-based ids name its own turns; the original's are unchanged", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-codex-revert-ids-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const { original, continuation } = writeRevertPair(dir);
+  assert.deepEqual(buildTurns(original).map((x) => [x.id, x.legacyId]), [[`${THREAD}:0`, undefined], [`${THREAD}:1`, undefined]]);
+  const [turn] = buildTurns(continuation);
+  assert.deepEqual([turn.id, turn.legacyId], [`${THREAD}:0@${ROLLOUT}`, `${THREAD}:0`]);
+  assert.equal(turn.sessionId, THREAD, "still the same session");
+});
+
+test("a Codex turn id is unique on its own and is never qualified", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-codex-revert-uuid-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const turnId = "01a07e02-aaaa-7bbb-8ccc-dddddddddddd";
+  const [turn] = buildTurns(writeRevertPair(dir, { turnId }).continuation);
+  assert.equal(turn.id, turnId);
+  assert.equal(turn.legacyId, undefined);
+});
+
+test("issue #1: both rollouts of a reverted thread keep their turns, in either order, however often synced", async (t) => {
+  for (const order of ["original first", "continuation first"]) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-codex-issue1-"));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const { original, continuation } = writeRevertPair(dir);
+    const files = order === "original first" ? [original, continuation] : [continuation, original];
+    for (let pass = 0; pass < 3; pass++) {
+      for (const transcriptPath of files) await ingestTranscript(codexProvider, { transcriptPath });
+    }
+    const rows = fs.readFileSync(path.join(dir, ".ai-usage", "usage.ndjson"), "utf8")
+      .split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      .filter((r) => r.sessionId === THREAD);
+    assert.equal(rows.length, 3, `${order}: all three turns`);
+    assert.equal(rows.reduce((n, r) => n + r.usage.input + r.usage.output, 0), 6380, `${order}: 5,500 + 880 tokens`);
+  }
+});
+
+test("a copy of a rollout under a name Codex did not write cannot delete the other file's turns", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-codex-copy-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const { original, continuation } = writeRevertPair(dir);
+  const copy = path.join(dir, "rollout-copy.jsonl");
+  fs.copyFileSync(original, copy);
+  for (let pass = 0; pass < 2; pass++) {
+    for (const transcriptPath of [original, continuation, copy]) await ingestTranscript(codexProvider, { transcriptPath });
+  }
+  const rows = fs.readFileSync(path.join(dir, ".ai-usage", "usage.ndjson"), "utf8")
+    .split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    .filter((r) => r.sessionId === THREAD);
+  assert.equal(rows.length, 3, "no turn deleted, no turn doubled");
+  assert.equal(rows.reduce((n, r) => n + r.usage.input + r.usage.output, 0), 6380);
+});
+
+test("archived rollouts are discovered too", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-codex-archived-"));
+  const saved = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  t.after(() => {
+    if (saved === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = saved;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  const live = path.join(home, "sessions", "2026", "09", "01", `rollout-2026-09-01T10-00-00-${THREAD}.jsonl`);
+  const archived = path.join(home, "archived_sessions", `rollout-2026-07-10T21-13-33-${ROLLOUT}.jsonl`);
+  writeJsonl(live, [{ timestamp: "2026-09-01T10:00:00.000Z", type: "session_meta", payload: { id: THREAD } }]);
+  writeJsonl(archived, [{ timestamp: "2026-07-10T21:13:33.000Z", type: "session_meta", payload: { id: ROLLOUT } }]);
+  const provider = await import(`../src/providers/codex/index.mjs?archived=${Date.now()}`);
+  assert.deepEqual(
+    provider.discoverTranscripts({ sinceMs: 0 }).map((f) => path.basename(f.transcriptPath)).sort(),
+    [path.basename(archived), path.basename(live)].sort(),
+  );
+});
+
+test("when one rollout exists twice, the fuller copy is the one read", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-codex-twocopies-"));
+  const saved = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  t.after(() => {
+    if (saved === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = saved;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  const name = `rollout-2026-09-01T10-00-00-${THREAD}.jsonl`;
+  const live = path.join(home, "sessions", "2026", "09", "01", name);
+  const archived = path.join(home, "archived_sessions", name);
+  const meta = { timestamp: "2026-09-01T10:00:00.000Z", type: "session_meta", payload: { id: THREAD } };
+  const prompt = (n) => ({ timestamp: `2026-09-01T10:0${n}:00.000Z`, type: "event_msg", payload: { type: "user_message", message: `turn ${n}` } });
+  writeJsonl(live, [meta, prompt(1), prompt(2)]);
+  writeJsonl(archived, [meta, prompt(1)]);
+  // The smaller copy is the newer file, so only size can pick the right one.
+  const later = new Date(Date.now() + 60_000);
+  fs.utimesSync(archived, later, later);
+  const provider = await import(`../src/providers/codex/index.mjs?twocopies=${Date.now()}`);
+  assert.deepEqual(provider.discoverTranscripts({ sinceMs: 0 }).map((f) => f.transcriptPath), [live]);
 });

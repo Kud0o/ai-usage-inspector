@@ -76,6 +76,18 @@ that its owner died — and is only ever removed by its owner. Lines that
 are not valid JSON are carried through a rewrite rather than discarded. Twelve processes
 writing one file at once lose nothing.
 
+What a write replaces is one transcript's contribution to one session. A provider that keeps a
+session in a single source — Cursor, OpenCode, the Cline family — names no transcript, and its
+batch replaces the whole session, so a turn that has left the source goes too. Claude and Codex
+name the file: Codex continues a reverted thread in a new rollout under the same thread id, and
+reading one file must not delete the other's turns. Rows written before rows named their
+transcript are replaced wholesale by the session's own transcript, because they can carry ids and
+timestamps today's parser no longer produces; any other transcript takes only the turns it can
+name. When two sources carry the same turn, the copy holding the work is the one kept. An old,
+position-based id identifies which stored row a continuation replaces, but blocks nothing and passes
+on nothing — it may have been another turn's — so a continuation turn deleted before its id was
+qualified can reappear once; deleting it again sticks.
+
 ## Scan windows
 
 Scan-based providers (Cursor, OpenCode) do not rescan a fixed window. Each keeps a durable
@@ -86,6 +98,14 @@ The mark only advances when a scan both found a healthy store and stored everyth
 found. A locked database, a schema the reader does not recognise, or a single failed write
 leaves it where it was — and the scan status (`ok`, `locked`, `unsupported-schema`,
 `missing`) is recorded, so stale capture is visible rather than looking like an idle day.
+
+An upgrade across a change in how turns are identified or costed also records a repair for each
+agent the installer finds. Until that agent's history has been read in full once, its window
+starts at the beginning. Only a pass that reached every transcript it listed settles the repair —
+save transcripts that moved while being read, which belong to a live session its hook reads
+again. `sync.mjs` honours the same repair, so machines that never sweep (`--local`,
+`autoSweep: false`) settle it the first time the dashboard starts. A repair is settled per
+destination: a pass into an aggregate `AI_USAGE_DIR` does not count for the rows each project holds.
 
 ## Sweeping for hookless work
 
@@ -154,6 +174,7 @@ unchanged, in either direction, and still refuses a different amount — that is
 | One assistant message spans many streamed lines sharing `message.id` | Dedupe by id; keep the final usage |
 | Subagents live in separate `.../<session>/subagents/*.jsonl` files | Attribute to the parent prompt via `promptId` |
 | Subagents may run a cheaper model | Price each message at its own model |
+| After `/compact`, earlier prompts are written again under the same uuid | A replayed uuid opens no turn, so the real turn keeps its tokens |
 
 `counts.subagentCalls` is the number of subagent *files* (one per Task invocation), not a
 flattened count of their assistant messages.
@@ -162,6 +183,13 @@ flattened count of their assistant messages.
 [`src/providers/codex/transcript.mjs`](../src/providers/codex/transcript.mjs) segments the
 rollout at each user message and stores the **delta** of the running total across the turn,
 which handles tool loops and multiple model calls inside one response.
+
+A reverted thread continues in a new rollout under the same thread id,
+`rollout-<ts>-<thread>_<rollout>.jsonl`, and the rollout id tells the store which file wrote
+which rows. Its turns count from zero again, so in that file an id built from a position — the
+fallback, or Codex's own `rollout-N` — is qualified with the rollout id and keeps the old one as
+`legacyId`. Codex's UUID turn ids are unique on their own and never change. Rollouts Codex has
+moved to `archived_sessions` are read as well.
 
 **Cursor** — the stop hook is only a trigger.
 [`src/providers/cursor/`](../src/providers/cursor/) scans Cursor's local SQLite stores
@@ -252,7 +280,7 @@ The viewer is a small HTTP service, so the data is scriptable without the UI:
 | `GET /api/events` | every record as list items (280-char previews, no full text) |
 | `GET /api/search?q=` | full-text match over the stored prompt/response; returns matching record keys |
 | `POST /api/export` | `{keys:[...]}` -> the complete records, prompt and response included |
-| `GET /api/event/:id` | one full record |
+| `GET /api/event/:id?provider=&session=` | one full record; provider and session pick the right one when an id repeats across sessions |
 | `GET /api/stream` | server-sent events; emits `change` when the data dir is written |
 | `GET/POST /api/config` | the project's tracking, field, and UI settings |
 | `DELETE /api/events` | `{keys:[...]}` -> tombstone + remove |
@@ -321,11 +349,19 @@ predictable path under it belongs to whoever creates it first. That is enough to
 lock, or to plant a runtime record naming a server of the attacker's own — the launcher would verify
 that server, find the fields it expected, and open a browser on their page.
 
-So the root is per-user: `XDG_RUNTIME_DIR` when the OS provides one, otherwise a uid-qualified name
-under the temp directory. Before use, the directory is checked rather than assumed — `mkdir`'s mode
-only applies to directories it actually creates, so an existing one proves nothing. A symlink, or
-another user's directory, is refused; one of ours that is merely too open is tightened. The runtime
-file itself is written with `O_NOFOLLOW` so a planted symlink cannot redirect the write.
+So the root is per-user: `XDG_RUNTIME_DIR` when it names a private directory of ours — the
+variable is only a name, and is never trusted, or tightened, on its say-so — otherwise a
+uid-qualified name under the temp directory. Each level is checked before use rather than assumed:
+the root first, then the project folder inside it, because whoever owns a parent can rename a
+verified child away and put their own in its place. `mkdir`'s mode only applies to directories it
+actually creates, so an existing one proves nothing. A symlink, or another user's directory, is
+refused; one of ours that is merely too open is tightened. The runtime file itself is written with
+`O_NOFOLLOW` so a planted symlink cannot redirect the write.
+
+A stale startup lock is claimed by renaming it aside, and the claimed file is judged again: if a
+winner replaced the stale lock between the age check and the rename, the fresh lock is put back
+with a hard link, which refuses to overwrite a lock taken in the meantime. A claim left by a
+contender that died is cleared once it is older than the stale window.
 
 ## The numbers behind all this
 
@@ -382,7 +418,10 @@ for the whole pool.
   so any fix has to be deliberate.
 - **Claude `effortLevel`** is read from `settings.json` at capture time, so a rebuilt turn
   gets today's setting rather than the one it ran under. Sync passes none at all.
-- **A computed cost is preserved on the hook path too.** If a turn were ever captured
-  before it finished, its cost would stay as first recorded until `sync --reprice`.
+- **Codex subagent threads repeat inherited history.** A child thread's rollout holds records
+  below `subagent_history_start_ordinal` that Codex copies from its parent, and they are read as
+  the child's own turns. Some are provably copies of the parent's turns, but most cannot be
+  matched to anything the parent recorded, so nothing is skipped yet: dropping them could delete
+  usage recorded nowhere else.
 - **Cursor multi-root workspaces** are not resolved; only `workspace.json`'s single
   `folder` is read.
