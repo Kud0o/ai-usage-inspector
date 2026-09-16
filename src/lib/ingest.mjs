@@ -14,7 +14,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // on the next prompt (after the user re-installs the app via npx).
 // 21: bundles written by a sweep run from a checkout are missing the settings
 // module and cannot start; every bundle is rewritten once to repair them.
-export const VIEWER_VERSION = "21";
+// 22: interactive time charts (readout, zoom) and a since/until date range.
+export const VIEWER_VERSION = "22";
 
 // A project gets viewer/ and nothing else — no src/ tree beside it — so the
 // modules the bundled dashboard imports are copied in next to it, under the

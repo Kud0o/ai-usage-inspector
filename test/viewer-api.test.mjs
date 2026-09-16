@@ -423,3 +423,73 @@ test("a launcher status check extends the idle deadline for the opening page", a
   await new Promise((resolve) => setTimeout(resolve, 650));
   assert.equal((await request(port, "/api/status")).status, 200, "server survives past its original deadline");
 });
+
+// Time charts: a pointer reads a day, a drag zooms, scrolling scales, and a zoom
+// becomes a filter only when asked. The window math is where a chart goes wrong
+// quietly — an empty view, a window stuck past the last day — so it is pinned here.
+const DAYS = Array.from({ length: 30 }, (_, i) => `2026-06-${String(i + 1).padStart(2, "0")}`);
+
+test("a pointer across a time chart lands on a day, never outside the range", () => {
+  const ui = viewerUi(RECORDS);
+  assert.equal(ui.run("dayIndexAt(30, 0)"), 0);
+  assert.equal(ui.run("dayIndexAt(30, 1)"), 29);
+  assert.equal(ui.run("dayIndexAt(30, 0.5)"), 15);
+  assert.equal(ui.run("dayIndexAt(30, -3)"), 0);
+  assert.equal(ui.run("dayIndexAt(30, 7)"), 29);
+  assert.equal(ui.run("dayIndexAt(0, 0.5)"), -1);
+});
+
+test("dragging across days zooms to them, and a window over every day is no zoom", () => {
+  const ui = viewerUi(RECORDS);
+  ui.run(`globalThis.days = ${JSON.stringify(DAYS)};`);
+  assert.deepEqual({ ...ui.run("zoomFromIndices(days, 20, 5)") }, { from: "2026-06-06", to: "2026-06-21" }, "either drag direction");
+  assert.equal(ui.run("zoomFromIndices(days, 0, 29)"), null);
+  const click = ui.run("zoomFromIndices(days, 10, 10)");
+  assert.ok(click && click.from < click.to, "a click still opens a window at least two days wide");
+  assert.equal(ui.run('zoomFromIndices(["2026-06-01", "2026-06-02"], 0, 1)'), null, "too few days to zoom");
+  assert.deepEqual([...ui.run('daysInZoom(days, { from: "2026-06-03", to: "2026-06-05" })')], ["2026-06-03", "2026-06-04", "2026-06-05"]);
+  assert.equal(ui.run('daysInZoom(days, { from: "2027-01-01", to: "2027-01-02" }).length'), 30, "a window the data left shows every day, not nothing");
+});
+
+test("scrolling scales about the pointer, stays inside the range, and zooms back out to nothing", () => {
+  const ui = viewerUi(RECORDS);
+  ui.run(`globalThis.days = ${JSON.stringify(DAYS)};`);
+  const zoomIn = ui.run("zoomByFactor(days, null, 0.5, 0.9)");
+  assert.ok(zoomIn, "scrolling in opens a window");
+  assert.ok(zoomIn.to >= "2026-06-26", "the day under the pointer stays in view");
+  const nearEnd = ui.run('zoomByFactor(days, { from: "2026-06-25", to: "2026-06-30" }, 0.8, 1)');
+  assert.equal(nearEnd.to, "2026-06-30", "never past the last day");
+  // Scaling out against the edge slides the window back rather than cutting it
+  // short: six days scaled by 1.25 is eight days, all of them before the end.
+  const outAtEdge = ui.run('zoomByFactor(days, { from: "2026-06-25", to: "2026-06-30" }, 1.25, 1)');
+  assert.deepEqual({ ...outAtEdge }, { from: "2026-06-23", to: "2026-06-30" }, "the window keeps its width at the edge");
+  let zoom = ui.run('({ from: "2026-06-10", to: "2026-06-14" })');
+  for (let i = 0; i < 20 && zoom; i++) {
+    ui.run(`globalThis.z = ${JSON.stringify(zoom)};`);
+    zoom = ui.run("zoomByFactor(days, z, 1.25, 0.5)");
+  }
+  assert.equal(zoom, null, "scrolling out far enough returns to every day");
+});
+
+test("the day readout says what the day held, in the fields this project keeps", () => {
+  const ui = viewerUi(RECORDS);
+  ui.run('CHART_DAYS = { days: { "2026-06-03": { n: 4, tok: 12000, cost: 1.5, models: { "opus-5": 3, "sonnet-5": 1 } } }, allKeys: [], keys: [] };');
+  const tip = ui.run('dayTooltip("2026-06-03")');
+  assert.match(tip, /turns<i>4<\/i>/);
+  assert.match(tip, /tokens<i>12\.0k<\/i>/);
+  assert.match(tip, /cost<i>\$1\.500<\/i>/);
+  assert.match(tip, /mostly<i>opus-5 \(3\)<\/i>/);
+  ui.run('state.fields = { cost: false };');
+  assert.doesNotMatch(ui.run('dayTooltip("2026-06-03")'), /cost/, "a field this project does not keep is not shown");
+  assert.equal(ui.run('dayTooltip("1999-01-01")'), "");
+});
+
+test("a zoom is a closer look; filtering to it is a separate, explicit step", () => {
+  const records = DAYS.slice(0, 10).map((day, i) => ({ ...RECORDS[0], id: `z-${i}`, ts: `${day}T12:00:00.000Z` }));
+  const ui = viewerUi(records);
+  ui.run('globalThis.reflect = () => {}; persist = () => {}; renderCharts = () => {};');
+  ui.run('state.zoom = { from: "2026-06-03", to: "2026-06-05" }; apply();');
+  assert.equal(ui.run("state.view.length"), 10, "zooming the chart leaves every turn in the view");
+  ui.run('state.filters.since = state.zoom.from; state.filters.until = state.zoom.to; state.zoom = null; apply();');
+  assert.equal(ui.run("state.view.length"), 3, "since and until both bound the view once asked");
+});
