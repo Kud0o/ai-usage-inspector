@@ -26,5 +26,11 @@ export function addCost(a, b) {
   if (a.estimated || b.estimated) out.estimated = true;
   // Which part was the guess — the rate or the token counts — so the UI can say.
   if (a.estimatedRate || b.estimatedRate) out.estimatedRate = true;
+  // The rate-table revision the parts were worked out under, and the latest
+  // revision that corrected any of their models' rates (see claude/pricing.mjs).
+  for (const key of ["rates", "supersedes"]) {
+    const values = [a[key], b[key]].filter((n) => typeof n === "number");
+    if (values.length) out[key] = Math.max(...values);
+  }
   return out;
 }

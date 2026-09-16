@@ -1,14 +1,16 @@
-// Dynamic model pricing: fetch current per-MTok rates from Claude's public
-// pricing docs and cache them on disk, so recorded costs track price changes
-// without a code edit. Zero-dependency, fully offline-safe.
+// Dynamic model pricing: fetch current per-MTok rates and context windows from
+// Claude's public docs and cache them on disk, so recorded costs and context
+// fill track new models and price changes without a code edit. Zero-dependency,
+// fully offline-safe.
 //
 // Split of responsibilities:
-//   - The viewer (long-lived, has network) calls refreshPricing() on start to
-//     keep the cache current. It uses a conditional GET (ETag) so the page is
-//     only re-parsed when it actually changed.
+//   - The viewer, `install` and `sync` (interactive, have network) call
+//     refreshPricing() to keep the cache current. The viewer refreshes on every
+//     start; install and sync only when the cache is older than its ttl, so
+//     neither is slowed by a fetch that already happened today.
 //   - The Stop hook (short-lived, must stay fast) never hits the network. It
-//     reads the cached rates synchronously via readCachedRates() — see
-//     pricing.mjs, which applies them over the built-in table at import.
+//     reads the cached rates and windows synchronously — see pricing.mjs, which
+//     applies them over the built-in table at import.
 //
 // The built-in table in pricing.mjs is always the fallback: if the network is
 // down, the page format changes, or nothing has been cached yet, costs still
@@ -22,6 +24,12 @@ import path from "node:path";
 export const PRICING_URL =
   "https://platform.claude.com/docs/en/about-claude/pricing.md";
 
+// The models overview: one column per current model, with a "Claude API ID" row
+// and a "Context window" row. A model is listed here from its launch, which is
+// exactly when the built-in table does not know it yet.
+export const MODELS_URL =
+  "https://platform.claude.com/docs/en/about-claude/models/overview.md";
+
 // Shared across every project on this machine — pricing is global, not
 // per-project. Lives beside the installed app's global config. Per-provider
 // file so providers never clobber each other's cached rates.
@@ -30,6 +38,8 @@ export const CACHE_FILE = path.join(
   ".ai-usage-inspector",
   "pricing-claude.json",
 );
+
+const PRICE_FIELDS = ["input", "output", "cacheWrite5m", "cacheWrite1h", "cacheRead"];
 
 // "Claude Opus 4.8" -> "claude-opus-4-8". Trailing footnotes/links in the cell
 // (e.g. "Claude Sonnet 5 through August 31, 2026") are ignored: we only read
@@ -50,12 +60,14 @@ function parsePrice(cell) {
   return Number.isFinite(n) ? n : null;
 }
 
-// Parse the pricing markdown into { "<model-id>": { input, output } }.
+// Parse the pricing markdown into { "<model-id>": { input, output, ... } }.
 // Each model row renders as: Model | Base Input | 5m | 1h | Cache hit | Output.
-// We take the first price as input and the last as output, so the column count
-// can shift without breaking. First row for a given id wins — the canonical
-// "Model pricing" table sits above the batch/fast-mode tables, and currently
-// effective intro pricing is listed before the future standard price.
+// Input is the first price and output the last, so the column count can shift
+// without breaking; the three cache prices are read only when a row carries all
+// five, because a model's cache prices do not always follow its input — Fable
+// 5.1's cache hits are 0.025x input, not the usual 0.1x. First row for a given
+// id wins: the canonical "Model pricing" table sits above the batch/fast-mode
+// tables, and currently effective pricing is listed before any future price.
 export function parsePricingMarkdown(md) {
   const rates = {};
   for (const line of String(md || "").split("\n")) {
@@ -67,9 +79,56 @@ export function parsePricingMarkdown(md) {
     if (prices.length < 2) continue;
     const input = prices[0];
     const output = prices[prices.length - 1];
-    if (input >= 0 && output >= 0) rates[id] = { input, output };
+    if (!(input >= 0 && output >= 0)) continue;
+    const rate = { input, output };
+    if (prices.length === 5 && prices.slice(1, 4).every((n) => n >= 0)) {
+      [rate.cacheWrite5m, rate.cacheWrite1h, rate.cacheRead] = prices.slice(1, 4);
+    }
+    rates[id] = rate;
   }
   return rates;
+}
+
+// "1M tokens" -> 1000000, "200K tokens" -> 200000, "1,000,000 tokens" -> 1000000.
+function parseWindow(cell) {
+  const m = /([\d.,]+)\s*([KM])?\s*tokens?/i.exec(String(cell || ""));
+  if (!m) return null;
+  const n = Number(m[1].replace(/,/g, ""));
+  if (!Number.isFinite(n)) return null;
+  const scale = m[2] ? (m[2].toUpperCase() === "M" ? 1_000_000 : 1_000) : 1;
+  const tokens = Math.round(n * scale);
+  return tokens >= 1_000 ? tokens : null;
+}
+
+/**
+ * Parse the models overview into { "<model-id>": contextWindowTokens }. Its tables
+ * run one model per column, so the ids and the windows are read from their own
+ * rows and matched by column. Dated ids ("claude-haiku-4-5-20251001") are keyed
+ * without the date, as the rate table is.
+ */
+export function parseModelsMarkdown(md) {
+  const windows = {};
+  let ids = null;
+  const label = (cell) => cell.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").trim();
+  for (const line of String(md || "").split("\n")) {
+    if (line[0] !== "|") { ids = null; continue; }
+    const cells = line.split("|").slice(1, -1).map((c) => c.trim());
+    const name = label(cells[0] || "");
+    if (/^Claude API ID$/i.test(name)) {
+      ids = cells.slice(1).map((c) => {
+        const m = /`?(claude-[a-z0-9-]+)`?/i.exec(c);
+        return m ? m[1].toLowerCase().replace(/-\d{8}$/, "") : null;
+      });
+      continue;
+    }
+    if (ids && /^Context window$/i.test(name)) {
+      cells.slice(1).forEach((cell, i) => {
+        const tokens = parseWindow(cell);
+        if (ids[i] && tokens) windows[ids[i]] = tokens;
+      });
+    }
+  }
+  return windows;
 }
 
 function readCache(file) {
@@ -87,10 +146,16 @@ function writeCache(file, data) {
   } catch {}
 }
 
-/** Cached rate map ({id:{input,output}}) or null. Sync, never throws. */
+/** Cached rate map ({id:{input,output,...}}) or null. Sync, never throws. */
 export function readCachedRates(file = CACHE_FILE) {
   const c = readCache(file);
   return c && c.rates ? c.rates : null;
+}
+
+/** Cached context windows ({id: tokens}) or null. Sync, never throws. */
+export function readCachedWindows(file = CACHE_FILE) {
+  const c = readCache(file);
+  return c && c.windows && typeof c.windows === "object" ? c.windows : null;
 }
 
 // What actually changed between two rate maps: a model added, removed, or
@@ -105,10 +170,25 @@ export function diffRates(oldRates, nextRates) {
     const y = b[id];
     if (!y) changes.push({ id, type: "removed", from: x });
     else if (!x) changes.push({ id, type: "added", to: y });
-    else if (x.input !== y.input || x.output !== y.output)
+    else if (PRICE_FIELDS.some((k) => x[k] !== y[k]))
       changes.push({ id, type: "changed", from: x, to: y });
   }
   return changes;
+}
+
+/** Windows that were added or moved. A model dropping off the page is not a change. */
+export function diffWindows(oldWindows, nextWindows) {
+  const a = oldWindows || {};
+  const changes = [];
+  for (const [id, tokens] of Object.entries(nextWindows || {})) {
+    if (a[id] !== tokens) changes.push({ id, type: "window", from: a[id] ?? null, to: tokens });
+  }
+  return changes;
+}
+
+async function fetchText(fetchImpl, url, headers, timeoutMs) {
+  const signal = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : undefined;
+  return fetchImpl(url, { headers, ...(signal ? { signal } : {}) });
 }
 
 /**
@@ -116,69 +196,92 @@ export function diffRates(oldRates, nextRates) {
  * non-blocking by contract — every failure path falls back to the cached (or
  * null) rates and the caller keeps using the built-in table.
  *
- * Returns { status, rates, changes? }. status is one of: no-fetch, fresh (cache
- * still within ttl, skipped network), not-modified (304 from server), unchanged
- * (re-fetched but the parsed rates are identical), updated (rates actually
- * differ — `changes` lists what moved), offline, http-<code>, read-error,
- * parse-thin.
+ * Returns { status, rates, windows, changes? }. status is one of: no-fetch,
+ * fresh (cache still within ttl, skipped network), not-modified (304 from
+ * server), unchanged (re-fetched but nothing parsed differently), updated (a
+ * rate or a window actually differs — `changes` lists what moved), offline,
+ * http-<code>, read-error, parse-thin.
  */
 export async function refreshPricing({
   file = CACHE_FILE,
   url = PRICING_URL,
+  modelsUrl = MODELS_URL,
   ttlMs = 12 * 60 * 60 * 1000,
+  timeoutMs = 10_000,
   now = Date.now(),
-  fetchImpl = globalThis.fetch,
+  // AI_USAGE_NO_PRICING_REFRESH=1 keeps a run off the network entirely: the test
+  // suite sets it, and so can anyone on a machine that must not reach out.
+  fetchImpl = process.env.AI_USAGE_NO_PRICING_REFRESH === "1" ? null : globalThis.fetch,
 } = {}) {
-  if (typeof fetchImpl !== "function") {
-    return { status: "no-fetch", rates: readCachedRates(file) };
-  }
   const cached = readCache(file);
+  const cachedWindows = (cached && cached.windows) || null;
+  if (typeof fetchImpl !== "function") {
+    return { status: "no-fetch", rates: cached ? cached.rates || null : null, windows: cachedWindows };
+  }
   // Don't even open a socket if we refreshed recently.
   if (cached && cached.fetchedAt && now - cached.fetchedAt < ttlMs) {
-    return { status: "fresh", rates: cached.rates || null };
+    return { status: "fresh", rates: cached.rates || null, windows: cachedWindows };
   }
+
+  // Windows come from their own page. A failure there leaves the last known
+  // windows in place; it never holds back a rate refresh.
+  let windows = cachedWindows;
+  let windowChanges = [];
+  try {
+    const res = await fetchText(fetchImpl, modelsUrl, { accept: "text/markdown, text/plain, */*" }, timeoutMs);
+    if (res.ok) {
+      const parsed = parseModelsMarkdown(await res.text());
+      if (Object.keys(parsed).length) {
+        windowChanges = diffWindows(cachedWindows, parsed);
+        windows = { ...(cachedWindows || {}), ...parsed };
+      }
+    }
+  } catch {}
 
   const headers = { accept: "text/markdown, text/plain, */*" };
   if (cached && cached.etag) headers["if-none-match"] = cached.etag;
 
+  const keep = (status) => {
+    if (windowChanges.length && cached) writeCache(file, { ...cached, windows });
+    return { status, rates: cached ? cached.rates : null, windows, ...(windowChanges.length ? { changes: windowChanges } : {}) };
+  };
+
   let res;
   try {
-    res = await fetchImpl(url, { headers });
+    res = await fetchText(fetchImpl, url, headers, timeoutMs);
   } catch {
-    return { status: "offline", rates: cached ? cached.rates : null };
+    return keep("offline");
   }
 
   // Unchanged since last fetch — bump the timestamp, skip re-parsing.
   if (res.status === 304 && cached) {
-    writeCache(file, { ...cached, fetchedAt: now });
-    return { status: "not-modified", rates: cached.rates || null };
+    writeCache(file, { ...cached, windows, fetchedAt: now });
+    return windowChanges.length
+      ? { status: "updated", rates: cached.rates || null, windows, changes: windowChanges }
+      : { status: "not-modified", rates: cached.rates || null, windows };
   }
-  if (!res.ok) {
-    return { status: `http-${res.status}`, rates: cached ? cached.rates : null };
-  }
+  if (!res.ok) return keep(`http-${res.status}`);
 
   let md;
   try {
     md = await res.text();
   } catch {
-    return { status: "read-error", rates: cached ? cached.rates : null };
+    return keep("read-error");
   }
 
   const rates = parsePricingMarkdown(md);
   // Guard against a page redesign silently zeroing out prices: keep the old
   // cache if the parse came back implausibly thin.
-  if (Object.keys(rates).length < 3) {
-    return { status: "parse-thin", rates: cached ? cached.rates : null };
-  }
+  if (Object.keys(rates).length < 3) return keep("parse-thin");
 
   const etag = res.headers.get("etag") || (cached && cached.etag) || null;
-  const changes = diffRates(cached && cached.rates, rates);
+  const changes = [...diffRates(cached && cached.rates, rates), ...windowChanges];
   // Re-fetched, but the numbers are identical — no real change. Just record
   // that we checked (bump fetchedAt / refresh the etag) and report it.
   if (cached && changes.length === 0) {
-    writeCache(file, { ...cached, etag, fetchedAt: now, rates });
-    return { status: "unchanged", rates };
+    writeCache(file, { ...cached, etag, fetchedAt: now, rates, windows });
+    return { status: "unchanged", rates, windows };
   }
-  writeCache(file, { etag, fetchedAt: now, source: url, rates });
-  return { status: "updated", rates, changes };
+  writeCache(file, { etag, fetchedAt: now, source: url, rates, windows });
+  return { status: "updated", rates, windows, changes };
 }

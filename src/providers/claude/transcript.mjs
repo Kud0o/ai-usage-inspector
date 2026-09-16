@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { costOf, contextMax, zeroCost, addCost } from "./pricing.mjs";
+import { costOf, contextMax, modelInfo, zeroCost, addCost } from "./pricing.mjs";
 import { subagentsDir } from "../../lib/paths.mjs";
 
 function readJsonl(file, strict = false) {
@@ -219,6 +219,31 @@ function costFields(cost) {
     total: cost.total,
     source: cost.source || "priced",
     ...(cost.estimatedRate ? { estimatedRate: true } : {}),
+    // Carried so a later correction to a model's rates can tell this cost was
+    // worked out before it (see pricing.mjs, RATES_REVISION).
+    ...(typeof cost.rates === "number" ? { rates: cost.rates } : {}),
+    ...(typeof cost.supersedes === "number" ? { supersedes: cost.supersedes } : {}),
+  };
+}
+
+// How full one thread's context window was: the whole input of its last request
+// against its model's window. The main thread and every subagent run are
+// separate conversations with windows of their own, so each is measured on its
+// own messages and never on another's.
+function contextOf(messages, fallbackModel) {
+  const last = messages[messages.length - 1];
+  const model = (last && last.model) || fallbackModel || "unknown";
+  const u = (last && last.usage) || {};
+  const used = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+  let max = contextMax(model);
+  // A model this version has no window for is measured against a guess, and a
+  // request larger than the guess proves the guess wrong: Claude's only window
+  // above 200k is 1M. Better that than a context reported several times full.
+  if (modelInfo(model).estimated && used > max) max = 1_000_000;
+  return {
+    contextTokens: used,
+    contextMax: max,
+    contextFillPct: max ? Math.round((used / max) * 1000) / 10 : 0,
   };
 }
 
@@ -346,6 +371,7 @@ function runRecord(run, seen, messages) {
     durationMs: run.ts && endTs ? Math.max(0, Date.parse(endTs) - Date.parse(run.ts)) : 0,
     usage,
     cost: costFields(cost),
+    ...contextOf(run.messages, run.result.resolvedModel),
     counts: { apiCalls: run.messages.length, toolCalls, thinkingBlocks: thinking },
     subagents,
   };
@@ -439,13 +465,8 @@ function finalizeTurn(t, opts, session) {
 
   const last = main[main.length - 1];
   const model = (last && last.model) || (e.message && e.message.model) || "unknown";
-  const ctxMax = contextMax(model);
-  // Context occupancy = the full input that went into the last main request.
-  const lastUsage = (last && last.usage) || {};
-  const ctxTokens =
-    (lastUsage.input_tokens || 0) +
-    (lastUsage.cache_read_input_tokens || 0) +
-    (lastUsage.cache_creation_input_tokens || 0);
+  // The turn's context is its main thread's alone; its runs report their own.
+  const context = contextOf(main, model);
 
   const { toolCalls, thinking } = countBlocks(main);
   const skills = collectSkills(main);
@@ -504,9 +525,7 @@ function finalizeTurn(t, opts, session) {
     effortLevel: opts.effortLevel || null,
     skills,
     usage: tokens,
-    contextTokens: ctxTokens,
-    contextMax: ctxMax,
-    contextFillPct: ctxMax ? Math.round((ctxTokens / ctxMax) * 1000) / 10 : 0,
+    ...context,
     counts: {
       apiCalls: main.length,
       subagentCalls: countRuns(subagents),

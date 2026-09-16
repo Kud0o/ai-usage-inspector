@@ -8,7 +8,7 @@ import { ingest, ingestTranscript } from "./lib/ingest.mjs";
 import { globalConfigPath } from "./lib/config.mjs";
 import { getProvider, detectInstalled } from "./providers/index.mjs";
 import { scanWindow, recordScanResult, claimScan, readScanState } from "./lib/scan-state.mjs";
-import { backupCandidateStores, cleanUpCopies } from "./lib/copies.mjs";
+import { backupCandidateStores, candidateStores, cleanUpCopies } from "./lib/copies.mjs";
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -121,6 +121,15 @@ export async function rescan(provider, norm, leaseId = null) {
         await cleanUpCopies({ transcripts: found, backup });
       } catch {
         repaired = false;
+      }
+      // Rows whose transcripts are gone were not re-read; their context is
+      // measured again from the request size each one stores.
+      if (repaired && typeof provider.repairStoredContext === "function") {
+        try {
+          await provider.repairStoredContext([...candidateStores(found).values()]);
+        } catch {
+          repaired = false;
+        }
       }
     }
   } catch (err) {

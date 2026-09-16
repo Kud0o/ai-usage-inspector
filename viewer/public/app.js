@@ -922,7 +922,7 @@ function runRows(e, runs, depth, path = []) {
       <td class="col-mode muted">—</td>
       <td class="num col-in">${valueHtml(run.usage?.input, fmtTok)}</td>
       <td class="num col-out">${valueHtml(run.usage?.output, fmtTok)}</td>
-      <td class="col-context muted num">—</td>
+      <td class="num col-context" title="This run's own context window, not the main thread's">${has("context") && typeof run.contextFillPct === "number" ? ctxBar(run.contextFillPct) : '<span class="muted">—</span>'}</td>
       <td class="num cost-cell col-cost">${valueHtml(run.cost?.total, fmtUsd)}</td>
       <td class="prompt-cell col-prompt" title="${esc(run.description)}">${valueHtml(run.description)}</td>
     </tr>${children.length && isExpanded(key) ? runRows(e, children, depth + 1, runPath) : ""}`;
@@ -1070,12 +1070,17 @@ function runMetrics(e, main = false) {
     ["cache write", e.usage?.cacheCreate, fmtInt], ["cache read", e.usage?.cacheRead, fmtInt],
     ["cost", e.cost?.total, fmtUsd],
   ];
+  // Each thread's own window: a run's context is not the main thread's, and the
+  // main thread's is the turn's own figure, never a sum over its runs.
+  if (has("context") && typeof e.contextFillPct === "number") {
+    metrics.push(["context", e, (t) => `${(t.contextFillPct || 0).toFixed(0)}% · ${fmtTok(t.contextTokens)} of ${fmtTok(t.contextMax)}`]);
+  }
   if (!main) metrics.push(["duration", e.durationMs, fmtDur], ["api calls", e.counts?.apiCalls, fmtInt], ["tool calls", e.counts?.toolCalls, fmtInt]);
   return `<dl class="run-metrics">${metrics.map(([label, value, fmt]) => `<div><dt>${esc(label)}</dt><dd>${valueHtml(value, fmt)}</dd></div>`).join("")}</dl>`;
 }
 function subagentSection(e) {
   if (!has("subagents") || !runsOf(e).length) return "";
-  const main = { usage: {}, cost: {} };
+  const main = { usage: {}, cost: {}, contextTokens: e.contextTokens, contextMax: e.contextMax, contextFillPct: e.contextFillPct };
   for (const [group, keys] of [["usage", ["input", "output", "cacheCreate", "cacheRead"]], ["cost", ["total"]]]) {
     for (const key of keys) {
       const total = e[group]?.[key], agents = sumRuns(e, group, key);

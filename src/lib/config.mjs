@@ -204,6 +204,7 @@ const GROUP_KEYS = {
 // A subagent run carries its own share of what these groups control, so turning
 // one off has to reach inside the run tree as well.
 const RUN_GROUP_KEYS = {
+  context: ["contextTokens", "contextMax", "contextFillPct"],
   counts: ["counts"],
   text: ["description"],
   tokens: ["usage"],

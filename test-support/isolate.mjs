@@ -13,6 +13,8 @@ const restore = (values) => keys.forEach((key, i) => {
   else process.env[key] = values[i];
 });
 process.env.HOME = process.env.USERPROFILE = base;
+// No test reaches the network, and child processes the tests start inherit this.
+process.env.AI_USAGE_NO_PRICING_REFRESH = "1";
 process.env.CODEX_HOME = path.join(base, ".codex");
 delete process.env.AI_USAGE_DIR;
 process.env.AI_USAGE_SCAN_STATE_FILE = path.join(base, "scan-state.json");

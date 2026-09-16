@@ -368,8 +368,37 @@ tracked, the built-in tables are used and no fetch happens.
 
 Costs are computed and stored **when each prompt is recorded**, so refreshed rates apply to
 turns recorded after the cache last updated. The hook path reads the cache locally and
-never makes a network call. New models are picked up automatically; their context window
-falls back to a default until the built-in table is updated.
+never makes a network call.
+
+For Claude the refresh reads two pages. The pricing page gives all five prices per model —
+input, 5-minute and 1-hour cache writes, cache hits, output — because cache prices do not always
+follow input: Fable 5.1 and Mythos 5.1 charge 0.025x input for cache hits, not 0.1x. The models
+overview gives each current model's context window, read from its "Claude API ID" and "Context
+window" rows by column. A model released after this version is priced and measured from those
+the first time the cache refreshes. The models page failing never holds back a rate refresh, and
+the windows already known are kept.
+
+`install` and `sync` refresh the Claude cache too, when it is more than 12 hours old, with a
+5-second bound per page: a machine that only ever runs the hook never starts the dashboard, and
+would otherwise price every new model on a guess for good. Codex and Cursor refresh only from the
+dashboard, because their refreshers take no timeout. `AI_USAGE_NO_PRICING_REFRESH=1` keeps every
+command off the network; the test suite runs with it.
+
+A model with no known window at all is measured against 200k, unless a request is larger than
+that — then against 1M, Claude's only larger window — so a context is never reported more than
+full. Context fill is per thread: a turn's figure is its main thread's last request, and each
+subagent run carries its own `contextTokens`, `contextMax` and `contextFillPct`, measured on its
+own messages against its own model's window. The `context` field group strips and restores them
+on runs as on turns.
+
+**Rate corrections.** A computed cost carries `rates`, the revision of the Claude rate table it
+was worked out under, and — for a model whose built-in rates a revision corrected — `supersedes`,
+that revision. A stored cost whose `rates` is older than the incoming cost's `supersedes` is
+worked out again instead of kept; every other stored cost with unchanged tokens stands, as before.
+Revision 2 corrected Opus 5 and Sonnet 5 (missing, so priced at the Opus-tier guess where no
+fetched rates existed, and labelled estimated) and Fable 5.1 and Mythos 5.1 (cache hits priced 4x
+too high everywhere). Repair epoch 3 reads every history once on upgrade, so each of those rows is
+reached.
 
 When unchanged turn usage preserves a computed cost, each run with unchanged usage also keeps
 its computed cost, matched recursively by `agentId`. A new or changed run keeps its fresh cost;
@@ -533,7 +562,7 @@ Values worth knowing before they surprise you. All are constants in the source, 
 |---|---|
 | `sync --days N` | filters on transcript modification time, then imports each qualifying session whole — it does not filter individual turns |
 | dashboard start | spawns a detached `sync --days 7`, only when the globally installed app exists. Disable with `--no-sync` |
-| pricing refresh | on dashboard start, over the network. Disable with `--no-pricing-refresh`. The hook and sweep paths never fetch |
+| pricing refresh | on dashboard start, over the network (disable with `--no-pricing-refresh`); Claude also on `install` and `sync` when the cache is over 12 hours old, 5 s per page. `AI_USAGE_NO_PRICING_REFRESH=1` disables all of it. The hook and sweep paths never fetch |
 | first import of old history | priced at today's rates, since no rate is recorded in the transcript |
 
 **Aggregate mode** (`install.mjs --dashboard`)

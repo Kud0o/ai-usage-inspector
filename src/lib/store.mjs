@@ -250,6 +250,13 @@ function preserveComputedCost(next, previous, preserveRuns = true) {
   if (!previous || !previous.cost || !next || !next.cost) return next;
   if (!COMPUTED_COST_SOURCES.has(previous.cost.source)) return next;
   if (!COMPUTED_COST_SOURCES.has(next.cost.source)) return next;
+  // A cost worked out under rates since found wrong for its model is not kept.
+  // The incoming cost names the table revision that corrected them; a stored
+  // cost from before it was never the provider's price, so the promise to keep
+  // what a turn cost at the time does not cover it.
+  if (typeof next.cost.supersedes === "number" && !(Number(previous.cost.rates) >= next.cost.supersedes)) {
+    return preserveRuns ? preserveRunCosts(next, previous) : next;
+  }
   const preserved = (cost = previous.cost) => {
     const out = { ...next, cost };
     return preserveRuns ? preserveRunCosts(out, previous) : out;

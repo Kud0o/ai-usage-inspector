@@ -393,3 +393,62 @@ test("turns a branch copied from an earlier session are marked as copies", (t) =
   ]);
   assert.equal(buildTurns(original.file)[0].copied, undefined);
 });
+
+// The main thread and each subagent run are separate conversations with windows
+// of their own. A run that filled its window says so on the run; it does not make
+// the turn look full, and the turn's figure is its main thread's alone.
+test("the main thread and each subagent run report their own context, never a merged one", (t) => {
+  const s = session(t);
+  writeJsonl(s.file, [
+    user("2026-09-10T10:00:00.000Z", "look into it", { uuid: "u1", promptId: "p1" }),
+    asst("2026-09-10T10:00:01.000Z", "m1", [agentCall("toolu_ctx")], usage(1000, 10, { cache_read_input_tokens: 99_000 }), { message: { model: "claude-opus-5" } }),
+    callResult("2026-09-10T10:00:30.000Z", "toolu_ctx", { status: "completed", agentId: "big" }),
+    asst("2026-09-10T10:00:31.000Z", "m2", [{ type: "text", text: "done" }], usage(2000, 20, { cache_read_input_tokens: 198_000 }), { message: { model: "claude-opus-5" } }),
+  ]);
+  writeJsonl(path.join(s.subDir, "agent-big.jsonl"), [
+    runStart("big", "2026-09-10T10:00:02.000Z"),
+    asst("2026-09-10T10:00:10.000Z", "r1", [{ type: "text", text: "reading" }], usage(1000, 5, { cache_read_input_tokens: 299_000 }), { message: { model: "claude-sonnet-5" } }),
+    asst("2026-09-10T10:00:20.000Z", "r2", [{ type: "text", text: "read it all" }], usage(1000, 5, { cache_read_input_tokens: 599_000 }), { message: { model: "claude-sonnet-5" } }),
+  ]);
+  sidecar(s, "big", { agentType: "Explore", description: "read everything", toolUseId: "toolu_ctx", spawnDepth: 1 });
+
+  const [turn] = buildTurns(s.file);
+  assert.equal(turn.contextTokens, 200_000, "the turn: its main thread's last request, and nothing of the run's");
+  assert.equal(turn.contextMax, 1_000_000, "Opus 5 has a 1M window");
+  assert.equal(turn.contextFillPct, 20);
+  const [run] = turn.subagents;
+  assert.equal(run.contextTokens, 600_000, "the run: its own last request");
+  assert.equal(run.contextMax, 1_000_000, "measured against the run's own model");
+  assert.equal(run.contextFillPct, 60);
+});
+
+// A model released after this version shipped has no window here. A request
+// larger than the guessed window proves the guess wrong, and Claude's only window
+// above 200k is 1M — so a context is never reported several times full.
+test("a model with no known window is never reported more than full", (t) => {
+  const s = session(t);
+  writeJsonl(s.file, [
+    user("2026-09-10T10:00:00.000Z", "go", { uuid: "u1" }),
+    asst("2026-09-10T10:00:01.000Z", "m1", [{ type: "text", text: "ok" }], usage(1000, 10, { cache_read_input_tokens: 499_000 }), { message: { model: "claude-opus-9" } }),
+  ]);
+  const [turn] = buildTurns(s.file);
+  assert.equal(turn.contextMax, 1_000_000);
+  assert.equal(turn.contextFillPct, 50);
+  assert.ok(turn.contextFillPct <= 100);
+});
+
+// A stored cost is kept while its tokens are unchanged, except when it predates a
+// correction to its model's rates. That test reads the revision off the stored
+// row, so a parsed turn must carry it — or a corrected cost would be worked out
+// again on every read instead of settling.
+test("a parsed turn carries the rate revision its cost was worked out under", (t) => {
+  const s = session(t);
+  writeJsonl(s.file, [
+    user("2026-09-10T10:00:00.000Z", "go", { uuid: "u1" }),
+    asst("2026-09-10T10:00:01.000Z", "m1", [{ type: "text", text: "ok" }], usage(10, 1, { cache_read_input_tokens: 1_000_000 }), { message: { model: "claude-fable-5-1" } }),
+  ]);
+  const [turn] = buildTurns(s.file);
+  assert.equal(turn.cost.rates, 2);
+  assert.equal(turn.cost.supersedes, 2);
+  assert.equal(turn.cost.cacheRead, 0.25, "a million cache-read tokens on Fable 5.1");
+});

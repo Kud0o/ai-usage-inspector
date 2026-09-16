@@ -6,7 +6,7 @@
 
 ![Node](https://img.shields.io/badge/Node-%3E%3D18-339933?logo=node.js&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-success)
-![Tests](https://img.shields.io/badge/tests-293-success)
+![Tests](https://img.shields.io/badge/tests-307-success)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 </div>
@@ -247,8 +247,10 @@ machine-local coordination file goes away when the server stops and is never sto
 
 The only thing written into an agent's own directory is its hook — listed in the table above,
 and removed by `--uninstall`. Your prompts and costs never leave your machine: the hook and
-sweep paths make no network calls at all. The one thing that does is the dashboard fetching
-public pricing pages when it starts, which `--no-pricing-refresh` turns off.
+sweep paths make no network calls at all. The one thing that does is fetching Anthropic's public
+pricing and models pages — when the dashboard starts, which `--no-pricing-refresh` turns off, and
+during `install` and `sync` at most twice a day. Set `AI_USAGE_NO_PRICING_REFRESH=1` to keep every
+command off the network.
 
 **Tracking is on by default and per project.** Turn it off, or strip whole field groups —
 `text` (the prompt and response themselves), `tokens`, `cost`, `context`, `timing`,
@@ -340,8 +342,12 @@ leaves the amount exactly as recorded. A turn
 mixing exact and estimated parts counts as estimated overall, so a guess is never shown as
 authoritative.
 
-Rates ship built-in and refresh best-effort when the dashboard starts; the hook path never
-touches the network. See [pricing refresh](docs/internals.md#pricing-refresh), and
+Rates and context windows ship built-in and refresh best-effort from Anthropic's docs — every
+price column, cache reads included, and each current model's window — so a model released after
+your version still prices and measures correctly. The hook path never touches the network; it
+reads what the last refresh cached. When a version corrects rates it had wrong for a model, the
+costs it stored for that model are worked out again once on upgrade; every other stored cost
+stands. See [pricing refresh](docs/internals.md#pricing-refresh), and
 [the numbers behind all this](docs/internals.md#the-numbers-behind-all-this) for the limits,
 windows and retry bounds these paths run under.
 
@@ -362,8 +368,11 @@ windows and retry bounds these paths run under.
 - **Codex agent threads keep the history they inherit.** Codex copies part of a parent thread into
   each child it spawns, and those turns are still counted as the child's. The dashboard nests the
   child under its parent, but its numbers are as recorded until that copying can be told apart.
-- **`context fill %`** uses the latest request's input size over the known model context
-  window; unknown windows fall back to a default.
+- **`context fill %`** is the input size of a thread's latest request over its model's context
+  window. The main thread and each subagent run are separate conversations, so a turn shows its
+  main thread's fill and every run shows its own. A model with no known window is measured against
+  a default, and a request larger than that default is measured against 1M instead — so a context
+  is never reported more than full.
 - **First-response latency** is transcript-granularity timing, not a model-side metric.
 - **Disabling a field group affects new records only.** It does not scrub what is already
   written — use the delete controls for that.

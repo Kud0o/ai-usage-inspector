@@ -526,7 +526,7 @@ function autoSync() {
       env: { ...process.env },
     });
     child.unref();
-    console.log(`  sync: refreshing last 7 days in the background (reload page for new data)\n`);
+    console.log(`  sync: refreshing last 7 days in the background — the page updates as rows arrive\n`);
   } catch {}
 }
 
@@ -548,7 +548,9 @@ function refreshPricing() {
           const shown = changes.slice(0, 8).map((c) =>
             c.type === "changed"
               ? `${c.id} ${c.from.input}/${c.from.output}→${c.to.input}/${c.to.output}`
-              : `${c.id} ${c.type}`,
+              : c.type === "window"
+                ? `${c.id} window ${c.from ? `${c.from}→` : ""}${c.to}`
+                : `${c.id} ${c.type}`,
           );
           const more = changes.length > 8 ? ` (+${changes.length - 8} more)` : "";
           console.log(`  pricing: updated ${label} rates — ${shown.join(", ")}${more}`);

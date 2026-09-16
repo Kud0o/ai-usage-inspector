@@ -14,7 +14,10 @@ export const SCAN_STATUSES = new Set(["ok", "locked", "unsupported-schema", "mis
 // ever — so an upgrade across it asks each agent for one full read.
 // 1: turns kept per transcript (2.5.0). 2: one home per session, branches and
 // subagent runs counted once, copies in other folders removed (2.6.0).
-export const REPAIR_EPOCH = 2;
+// 3: Opus 5, Sonnet 5, Fable 5.1 and Mythos 5.1 measured against their 1M
+// windows, each subagent run's context measured on its own, and the costs those
+// models were given under wrong rates worked out again (2.8.0).
+export const REPAIR_EPOCH = 3;
 
 // A repair covers the rows one destination holds: each project's own files, or
 // the pooled copy in an aggregate AI_USAGE_DIR. Settling one says nothing about

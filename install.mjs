@@ -140,6 +140,15 @@ async function noteInstall(upgrading) {
       skip("history  read in full once more on the next sweep, to repair stored rows");
     }
   } catch {}
+  // Current Claude rates and context windows, so a machine that only ever runs
+  // the hook still prices and measures models released after this version. The
+  // hook itself never fetches; it reads what this leaves on disk. Bounded, and
+  // an install never fails over it.
+  try {
+    const r = await getProvider("claude").refreshPricing({ timeoutMs: 5_000 });
+    if (r && ["updated", "unchanged", "not-modified", "fresh"].includes(r.status)) ok("rates    current Claude prices and context windows cached");
+    else if (r) skip(`rates    could not fetch current Claude prices (${r.status}); using the built-in table`);
+  } catch {}
 }
 
 const FIELD_GROUPS = ["text", "tokens", "cost", "context", "timing", "skills", "counts", "meta"];

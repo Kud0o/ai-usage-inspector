@@ -13,7 +13,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { HOME, encCwd } from "../../lib/paths.mjs";
 import { buildTurns as buildClaudeTurns, transcriptSnapshot } from "./transcript.mjs";
-import { applyRemoteRates } from "./pricing.mjs";
+import { applyRemoteRates, knownContextMax } from "./pricing.mjs";
+import { ABORT, LockTimeoutError, mutateNdjson } from "../../lib/store.mjs";
 import { refreshPricing as refreshRemote } from "./remote-pricing.mjs";
 
 export const id = "claude";
@@ -181,10 +182,40 @@ export function uninstall({ scope, cwd }) {
   return { file, removed };
 }
 
+// ---- stored context windows ----
+
+/**
+ * Measure stored Claude rows against the windows this version knows. A re-read
+ * corrects every row whose transcript still exists; this reaches the rest — Claude
+ * Code deletes old transcripts — using the request size each row already stores,
+ * so the correction is exact. A row whose request is larger than the known window
+ * is left alone: that is not a size this model could have taken. Returns the number
+ * of rows changed; throws LockTimeoutError if a file could not be locked.
+ */
+export async function repairStoredContext(files) {
+  let fixed = 0;
+  for (const file of files) {
+    const result = await mutateNdjson(file, (records) => {
+      let changed = 0;
+      const next = records.map((r) => {
+        if ((r.provider || "claude") !== "claude" || typeof r.contextTokens !== "number") return r;
+        const window = knownContextMax(r.model);
+        if (!window || r.contextMax === window || r.contextTokens > window) return r;
+        changed++;
+        return { ...r, contextMax: window, contextFillPct: Math.round((r.contextTokens / window) * 1000) / 10 };
+      });
+      return changed ? { records: next, value: changed } : ABORT;
+    });
+    if (result === false) throw new LockTimeoutError(file);
+    if (result.value !== ABORT) fixed += result.value;
+  }
+  return fixed;
+}
+
 // ---- pricing refresh (Claude docs scrape) ----
 
-export async function refreshPricing() {
-  const r = await refreshRemote();
-  if (r && r.rates) applyRemoteRates(r.rates);
+export async function refreshPricing(options = {}) {
+  const r = await refreshRemote(options);
+  if (r && (r.rates || r.windows)) applyRemoteRates(r.rates, r.windows);
   return r;
 }

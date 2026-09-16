@@ -19,7 +19,7 @@
 import { getProvider, detectInstalled } from "./providers/index.mjs";
 import { ingestTranscript } from "./lib/ingest.mjs";
 import { markRepaired, repairDue, claimScan, recordScanResult } from "./lib/scan-state.mjs";
-import { backupCandidateStores, cleanUpCopies } from "./lib/copies.mjs";
+import { backupCandidateStores, candidateStores, cleanUpCopies } from "./lib/copies.mjs";
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(name);
@@ -117,6 +117,21 @@ async function main() {
     process.exit(1);
   }
 
+  // Current rates and context windows before anything is priced. A machine that
+  // only ever runs the hook never opens the dashboard, which is otherwise the only
+  // thing that fetches them — so a model released after this version shipped
+  // would be priced and measured on a guess for good. Skipped when fetched within
+  // the last 12 hours; bounded, and never fatal. Claude only: the other
+  // providers' refreshers take no timeout and refetch on every call, which a
+  // sync run on every sweep must not wait on.
+  for (const p of providers) {
+    if (p.id !== "claude" || typeof p.refreshPricing !== "function") continue;
+    try {
+      const r = await p.refreshPricing({ timeoutMs: 5_000 });
+      if (r && r.status === "updated") console.log(`  ${p.id}: rates and context windows updated from the provider's docs`);
+    } catch {}
+  }
+
   for (const p of providers) {
     if (typeof p.discoverTranscripts !== "function") {
       console.log(`  ${p.id}: no sync support`);
@@ -190,6 +205,16 @@ async function main() {
             }
           } catch {
             settled = false;
+          }
+          // Rows whose transcripts are gone were not re-read; their context is
+          // measured again from the request size each one stores.
+          if (typeof p.repairStoredContext === "function") {
+            try {
+              const fixed = await p.repairStoredContext([...candidateStores(found).values()]);
+              if (fixed) console.log(`  ${p.id}: context fill re-measured on ${fixed} stored turn(s) no transcript remains for`);
+            } catch {
+              settled = false;
+            }
           }
         }
         if (settled) {
