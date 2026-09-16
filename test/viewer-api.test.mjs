@@ -493,3 +493,41 @@ test("a zoom is a closer look; filtering to it is a separate, explicit step", ()
   ui.run('state.filters.since = state.zoom.from; state.filters.until = state.zoom.to; state.zoom = null; apply();');
   assert.equal(ui.run("state.view.length"), 3, "since and until both bound the view once asked");
 });
+
+// ---- third review: charts ----
+
+// Chart rendering reads theme colours; the harness has no stylesheet.
+const chartUi = (records) => {
+  const ui = viewerUi(records);
+  ui.run('globalThis.getComputedStyle = () => ({ getPropertyValue: () => "" }); document.documentElement = {};');
+  return ui;
+};
+const onDays = (days) => days.map((day, i) => ({ ...RECORDS[0], id: `c-${i}`, ts: `${day}T12:00:00.000Z` }));
+
+test("a zoom the filtered data no longer reaches is dropped, so no button acts on days nobody can see", () => {
+  const ui = chartUi(onDays(["2026-07-01", "2026-07-02", "2026-07-03", "2026-07-04"]));
+  ui.run('state.zoom = { from: "2026-06-03", to: "2026-06-05" }; renderCharts();');
+  assert.equal(ui.run("state.zoom"), null);
+  assert.deepEqual([...ui.run("CHART_DAYS.keys")], ["2026-07-01", "2026-07-02", "2026-07-03", "2026-07-04"]);
+  ui.run('state.zoom = { from: "2026-07-02", to: "2026-07-03" }; renderCharts();');
+  assert.deepEqual({ ...ui.run("state.zoom") }, { from: "2026-07-02", to: "2026-07-03" }, "a zoom still in reach stands");
+});
+
+test("with tokens not kept, the cost chart carries the zoom controls", () => {
+  const ui = chartUi(onDays(["2026-07-01", "2026-07-02", "2026-07-03", "2026-07-04"]));
+  ui.run('state.fields = { tokens: false }; state.zoom = { from: "2026-07-02", to: "2026-07-03" }; renderCharts();');
+  const html = ui.run('document.querySelector("#charts").innerHTML');
+  assert.match(html, /data-zoom="filter"/);
+  assert.match(html, /data-zoom="reset"/);
+  ui.run('state.fields = {}; renderCharts();');
+  assert.equal((ui.run('document.querySelector("#charts").innerHTML').match(/class="chart-zoom"/g) || []).length, 1, "and only one set when both charts show");
+});
+
+test("chart overlays that set their own display still hide", () => {
+  const css = fs.readFileSync(path.join(path.dirname(SERVER), "public", "styles.css"), "utf8");
+  const rule = /([^{}]+)\{\s*display:\s*none;?\s*\}/g;
+  const hidden = [...css.matchAll(rule)].map((m) => m[1]).join(",");
+  for (const selector of [".chart-tip[hidden]", ".chart-cursor[hidden]", ".chart-brush[hidden]"]) {
+    assert.ok(hidden.includes(selector), `${selector} has display: none`);
+  }
+});

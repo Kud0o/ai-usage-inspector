@@ -451,6 +451,10 @@ function renderCharts() {
   // What the time charts show: every day, or the window zoomed into. The rest of
   // the dashboard keeps counting every turn in the view — a zoom is a closer
   // look, not a filter, until it is asked to become one.
+  // A zoom the data no longer reaches — the filters moved past it — is dropped
+  // rather than kept beside a chart that has fallen back to showing every day,
+  // where its buttons would act on dates nobody can see.
+  if (state.zoom && !allKeys.some((k) => k >= state.zoom.from && k <= state.zoom.to)) state.zoom = null;
   const keys = daysInZoom(allKeys, state.zoom);
   CHART_DAYS = { days, allKeys, keys };
   const tok = keys.map((k) => days[k].tok);
@@ -477,7 +481,8 @@ function renderCharts() {
   cards.push(`<div class="card"><h3>permission mode</h3>${donut(modeCount, (x) => x + " turns")}</div>`);
   cards.push(`<div class="card"><h3>turns by model</h3>${donut(modelCount, (x) => x + " turns")}</div>`);
   if (has("skills") && skillsUsed) cards.push(`<div class="card"><h3>skills invoked <b>${skillsUsed}</b></h3>${donut(skillCount, (x) => x + "×")}</div>`);
-  if (has("cost")) cards.push(`<div class="card"><h3>cost / day <b class="cost-b">${fmtUsd(cost.reduce((a, b) => a + b, 0))}</b></h3>${barChart(keys, cost, cssv("--faint"), (x) => fmtUsd(x))}</div>`);
+  // The zoom controls live under the tokens chart; with tokens not kept, under cost.
+  if (has("cost")) cards.push(`<div class="card"><h3>cost / day <b class="cost-b">${fmtUsd(cost.reduce((a, b) => a + b, 0))}</b></h3>${barChart(keys, cost, cssv("--faint"), (x) => fmtUsd(x))}${has("tokens") ? "" : zoomBar(allKeys, keys)}</div>`);
   // Per-provider breakdowns — only when the view spans more than one provider.
   const provs = provsIn(v);
   if (provs.length > 1) {
@@ -741,11 +746,12 @@ function wireCharts() {
   for (const button of buttons) {
     button.addEventListener("click", () => {
       if (button.dataset.zoom === "reset") { state.zoom = null; renderCharts(); return; }
-      const { from, to } = state.zoom || {};
-      if (!from) return;
-      // The look becomes the filter: everything else now counts these days only.
-      state.filters.since = from;
-      state.filters.until = to;
+      // The look becomes the filter: everything else now counts the days the chart
+      // is showing — its first and last, not whatever the zoom was last set to.
+      const shown = CHART_DAYS.keys;
+      if (!state.zoom || !shown.length) return;
+      state.filters.since = shown[0];
+      state.filters.until = shown[shown.length - 1];
       state.zoom = null;
       reflect();
       apply();

@@ -207,3 +207,130 @@ test("stored rows with no transcript left are re-measured against the known wind
   assert.equal(after.other.contextFillPct, 450, "other providers are left alone");
   assert.equal(await repairStoredContext([file]), 0, "a second pass changes nothing");
 });
+
+// ---- third review ----
+
+test("a corrected turn is taken whole, so its total always equals its main thread plus its runs", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-whole-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "usage.ndjson");
+  const c = (total, stamp = {}) => ({ input: 0, output: 0, cacheWrite: 0, cacheRead: total, total, source: "priced", ...stamp });
+  const turn = (total, runTotal, stamp, runStamp) => ({
+    provider: "claude", sessionId: "s", id: "t", model: "claude-fable-5-1",
+    usage: { input: 0, output: 0, cacheCreate: 0, cacheRead: 2 * M }, cost: c(total, stamp),
+    subagents: [{ agentId: "a1", model: "claude-haiku-4-5", usage: { input: 0, output: 0, cacheCreate: 0, cacheRead: M }, cost: c(runTotal, runStamp) }],
+  });
+  // Stored by an older version: Fable main work at the 4x price, and a Haiku run at an older price.
+  await upsertSession(file, "s", [turn(1.2, 0.2)]);
+  // Read again: Fable at $0.25, Haiku at $0.10.
+  await upsertSession(file, "s", [turn(0.35, 0.1, { rates: 2, supersedes: 2 }, { rates: 2 })]);
+  const read = () => JSON.parse(fs.readFileSync(file, "utf8").trim());
+  let row = read();
+  assert.equal(row.cost.total, 0.35);
+  assert.equal(row.subagents[0].cost.total, 0.1, "the run is taken with the turn, not kept at its older price");
+  // And it settles: the next read keeps it.
+  await upsertSession(file, "s", [turn(0.35, 0.05, { rates: 2, supersedes: 2 }, { rates: 2 })]);
+  row = read();
+  assert.equal(row.subagents[0].cost.total, 0.1);
+});
+
+test("--relabel never changes an amount, and leaves a correction to the next plain sync", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-relabel-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "usage.ndjson");
+  const row = (total, stamp = {}) => ({ provider: "claude", sessionId: "s", id: "t", model: "claude-fable-5-1",
+    usage: { input: 0, output: 0, cacheCreate: 0, cacheRead: M }, cost: { input: 0, output: 0, cacheWrite: 0, cacheRead: total, total, source: "priced", ...stamp } });
+  const read = () => JSON.parse(fs.readFileSync(file, "utf8").trim());
+  await upsertSession(file, "s", [row(1)]);
+  process.env.AI_USAGE_RELABEL = "1";
+  try {
+    await upsertSession(file, "s", [row(0.25, { rates: 2, supersedes: 2 })]);
+  } finally {
+    delete process.env.AI_USAGE_RELABEL;
+  }
+  assert.equal(read().cost.total, 1, "relabel kept the amount");
+  await upsertSession(file, "s", [row(0.25, { rates: 2, supersedes: 2 })]);
+  assert.equal(read().cost.total, 0.25, "a plain sync still corrects it");
+});
+
+test("a fetched price without cache prices keeps the model's own cache ratio, whatever its input", () => {
+  applyRemoteRates({ "claude-mythos-5-1": { input: 8, output: 40 } }, null);
+  assert.equal(modelInfo("claude-mythos-5-1").cacheRead, 0.2, "0.025x of 8, not the generic 0.1x");
+  applyRemoteRates({ "claude-mythos-5-1": { input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 0.25 } }, null);
+});
+
+test("a refresh bringing only a window keeps the fetched price it had, and one bringing only a price keeps the window", () => {
+  applyRemoteRates({ "claude-opus-10": { input: 6, output: 30 } }, { "claude-opus-10": M });
+  applyRemoteRates(null, { "claude-opus-10": M });
+  assert.equal(modelInfo("claude-opus-10").input, 6);
+  assert.equal(modelInfo("claude-opus-10").estimated, undefined);
+  applyRemoteRates({ "claude-opus-10": { input: 7, output: 35 } }, null);
+  assert.equal(contextMax("claude-opus-10"), M);
+});
+
+test("a known price is not a known window, and a known window is not a known price", async (t) => {
+  const { knownContextMax } = await import("../src/providers/claude/pricing.mjs");
+  const { buildTurns } = await import("../src/providers/claude/transcript.mjs");
+  applyRemoteRates({ "claude-haiku-9": { input: 1, output: 5 } }, null);
+  assert.equal(knownContextMax("claude-haiku-9"), null, "priced, but its window is still a guess");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-window-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "s.jsonl");
+  fs.writeFileSync(file, [
+    { type: "user", uuid: "u1", sessionId: "s", cwd: dir, timestamp: "2026-09-16T10:00:00.000Z", message: { content: "go" } },
+    { type: "assistant", timestamp: "2026-09-16T10:00:01.000Z", message: { id: "m1", model: "claude-haiku-9", content: [], usage: { input_tokens: 1000, output_tokens: 1, cache_read_input_tokens: 499_000, cache_creation_input_tokens: 0 } } },
+  ].map((o) => JSON.stringify(o)).join("\n") + "\n");
+  assert.equal(buildTurns(file)[0].contextFillPct, 50, "a guessed window is still outgrown to 1M");
+
+  applyRemoteRates(null, { "claude-sonnet-10": M });
+  assert.equal(knownContextMax("claude-sonnet-10"), M, "a fetched window is known although its price is not");
+  assert.equal(modelInfo("claude-sonnet-10").estimated, true);
+});
+
+test("a rate page that fails backs off instead of fetching both pages on every sync, and keeps windows that did arrive", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-backoff-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "pricing-claude.json");
+  const calls = [];
+  const fetchImpl = fakeFetch({ pricing: null, models: MODELS_PAGE }, calls);
+  const first = await refreshPricing({ file, url: "pricing", modelsUrl: "models", now: 1_000_000_000, fetchImpl });
+  assert.equal(first.status, "http-404");
+  assert.equal(readCachedWindows(file)["claude-opus-5"], M, "windows kept with no rates cached yet");
+  const second = await refreshPricing({ file, url: "pricing", modelsUrl: "models", now: 1_000_000_000 + 60_000, fetchImpl });
+  assert.equal(second.status, "backoff");
+  assert.equal(calls.length, 2, "the second sync opened no socket");
+  const later = await refreshPricing({ file, url: "pricing", modelsUrl: "models", now: 1_000_000_000 + 2 * 60 * 60 * 1000, fetchImpl });
+  assert.notEqual(later.status, "backoff", "and tries again once the back-off has passed");
+  const dashboard = await refreshPricing({ file, url: "pricing", modelsUrl: "models", ttlMs: 0, now: 1_000_000_000 + 2 * 60 * 60 * 1000 + 1, fetchImpl });
+  assert.notEqual(dashboard.status, "backoff", "the dashboard, asking with ttlMs 0, is never held back");
+});
+
+test("windows are never matched to the columns of a table above them", () => {
+  const md = [
+    "| Feature | A | B |",
+    "| :-- | :-- | :-- |",
+    "| Claude API ID | `claude-opus-5` | `claude-haiku-4-5` |",
+    "| Feature | B | A |",
+    "| :-- | :-- | :-- |",
+    "| Context window | 200K tokens | 1M tokens |",
+  ].join("\n");
+  assert.deepEqual(parseModelsMarkdown(md), {});
+  assert.deepEqual(parseModelsMarkdown("| Claude API ID | `claude-opus-5` | `claude-haiku-4-5` |\n| Context window | 1M tokens |"), {}, "nor to a row with a different column count");
+});
+
+test("every provider's refresher stays off the network when told to", async () => {
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => { calls.push(String(url)); throw new Error("offline"); };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-offline-"));
+  try {
+    const codex = await import("../src/providers/codex/remote-pricing.mjs");
+    const cursor = await import("../src/providers/cursor/remote-pricing.mjs");
+    await codex.refreshPricing({ file: path.join(dir, "c.json"), ttlMs: 0 });
+    await cursor.refreshPricing({ file: path.join(dir, "k.json"), ttlMs: 0 });
+  } finally {
+    globalThis.fetch = original;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  assert.deepEqual(calls, []);
+});

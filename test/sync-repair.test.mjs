@@ -126,3 +126,29 @@ for (const blocked of [false, true]) test(blocked
   assert.ok(fs.readdirSync(path.join(home, ".ai-usage-inspector", "backups")).length === 1, "and backed up first");
   assert.equal(repairDue("claude", { file: state }), null);
 });
+
+// Sync finds stores through transcripts. A project whose transcripts Claude Code
+// has all deleted is reachable no other way, and its dashboard may be opened long
+// after the upgrade repair finished; the dashboard names its own store, and sync
+// re-measures it every time.
+test("sync re-measures the store a dashboard names, even with no transcript left and no repair owed", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-synchome-"));
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-orphan-"));
+  t.after(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  });
+  fs.mkdirSync(path.join(home, ".claude", "projects"), { recursive: true });
+  const state = path.join(home, "scan-state.json");
+  fs.writeFileSync(state, JSON.stringify({ schema: 1, installedRepairEpoch: 99, providers: { claude: { repaired: { default: 99 } } } }));
+  const usage = path.join(project, ".ai-usage", "usage.ndjson");
+  fs.mkdirSync(path.dirname(usage), { recursive: true });
+  fs.writeFileSync(usage, JSON.stringify({ provider: "claude", sessionId: "gone", id: "t1", model: "claude-opus-5", contextTokens: 800_000, contextMax: 200_000, contextFillPct: 400 }) + "\n");
+
+  const env = { ...process.env, HOME: home, USERPROFILE: home, AI_USAGE_SCAN_STATE_FILE: state, NO_COLOR: "1", AI_USAGE_PROJECT_STORE: usage };
+  delete env.AI_USAGE_DIR;
+  const result = runSync(env, "claude");
+  assert.equal(result.status, 0, result.stderr);
+  const [row] = fs.readFileSync(usage, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  assert.deepEqual([row.contextMax, row.contextFillPct], [1_000_000, 80]);
+});

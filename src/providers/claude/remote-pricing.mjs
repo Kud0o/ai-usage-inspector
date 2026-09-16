@@ -113,6 +113,9 @@ export function parseModelsMarkdown(md) {
   for (const line of String(md || "").split("\n")) {
     if (line[0] !== "|") { ids = null; continue; }
     const cells = line.split("|").slice(1, -1).map((c) => c.trim());
+    // A separator row starts a new table: its columns are not the old table's,
+    // so ids read above it must never be matched to windows read below it.
+    if (cells.length && cells.every((c) => /^:?-{2,}:?$/.test(c))) { ids = null; continue; }
     const name = label(cells[0] || "");
     if (/^Claude API ID$/i.test(name)) {
       ids = cells.slice(1).map((c) => {
@@ -121,7 +124,7 @@ export function parseModelsMarkdown(md) {
       });
       continue;
     }
-    if (ids && /^Context window$/i.test(name)) {
+    if (ids && cells.length - 1 === ids.length && /^Context window$/i.test(name)) {
       cells.slice(1).forEach((cell, i) => {
         const tokens = parseWindow(cell);
         if (ids[i] && tokens) windows[ids[i]] = tokens;
@@ -207,6 +210,10 @@ export async function refreshPricing({
   url = PRICING_URL,
   modelsUrl = MODELS_URL,
   ttlMs = 12 * 60 * 60 * 1000,
+  // After a failed attempt, how long before trying again. A page that is down must
+  // not cost every sync two slow requests; capped at ttlMs, so the dashboard's
+  // ttlMs of 0 still tries on every start.
+  retryMs = 60 * 60 * 1000,
   timeoutMs = 10_000,
   now = Date.now(),
   // AI_USAGE_NO_PRICING_REFRESH=1 keeps a run off the network entirely: the test
@@ -218,9 +225,12 @@ export async function refreshPricing({
   if (typeof fetchImpl !== "function") {
     return { status: "no-fetch", rates: cached ? cached.rates || null : null, windows: cachedWindows };
   }
-  // Don't even open a socket if we refreshed recently.
+  // Don't even open a socket if we refreshed recently, or failed to recently.
   if (cached && cached.fetchedAt && now - cached.fetchedAt < ttlMs) {
     return { status: "fresh", rates: cached.rates || null, windows: cachedWindows };
+  }
+  if (cached && cached.attemptedAt && now - cached.attemptedAt < Math.min(retryMs, ttlMs)) {
+    return { status: "backoff", rates: cached.rates || null, windows: cachedWindows };
   }
 
   // Windows come from their own page. A failure there leaves the last known
@@ -241,9 +251,11 @@ export async function refreshPricing({
   const headers = { accept: "text/markdown, text/plain, */*" };
   if (cached && cached.etag) headers["if-none-match"] = cached.etag;
 
+  // The rate page failed. Keep what was known, keep any windows that did arrive
+  // even with no rates cached yet, and note the attempt so the next sync backs off.
   const keep = (status) => {
-    if (windowChanges.length && cached) writeCache(file, { ...cached, windows });
-    return { status, rates: cached ? cached.rates : null, windows, ...(windowChanges.length ? { changes: windowChanges } : {}) };
+    writeCache(file, { ...(cached || {}), windows, attemptedAt: now });
+    return { status, rates: cached ? cached.rates || null : null, windows, ...(windowChanges.length ? { changes: windowChanges } : {}) };
   };
 
   let res;

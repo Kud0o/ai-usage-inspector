@@ -16,6 +16,7 @@
 // widens the window to a provider's whole history, once.
 // Per-project tracking config still gates every project (disabled = skipped),
 // exactly like the hook path.
+import path from "node:path";
 import { getProvider, detectInstalled } from "./providers/index.mjs";
 import { ingestTranscript } from "./lib/ingest.mjs";
 import { markRepaired, repairDue, claimScan, recordScanResult } from "./lib/scan-state.mjs";
@@ -210,7 +211,7 @@ async function main() {
           // measured again from the request size each one stores.
           if (typeof p.repairStoredContext === "function") {
             try {
-              const fixed = await p.repairStoredContext([...candidateStores(found).values()]);
+              const fixed = await p.repairStoredContext(withProjectStore([...candidateStores(found).values()]));
               if (fixed) console.log(`  ${p.id}: context fill re-measured on ${fixed} stored turn(s) no transcript remains for`);
             } catch {
               settled = false;
@@ -221,11 +222,27 @@ async function main() {
           try { await markRepaired(p.id, repair); } catch {}
         }
       }
+      // The store a dashboard asked about is re-measured on every sync, not only
+      // during the upgrade repair: a project whose transcripts are all gone is found
+      // no other way, and may be opened long after that repair has finished. It is
+      // a no-op once its rows are right.
+      const named = process.env.AI_USAGE_PROJECT_STORE;
+      if (repair === null && named && typeof p.repairStoredContext === "function") {
+        try { await p.repairStoredContext([named]); } catch {}
+      }
     } finally {
       // Explicit windows do not advance the automatic sweep's watermark.
       await recordScanResult(p.id, { leaseId, completed: false });
     }
   }
+}
+
+// Stores found through transcripts, plus the one a dashboard named, once.
+function withProjectStore(files) {
+  const named = process.env.AI_USAGE_PROJECT_STORE;
+  if (!named) return files;
+  const same = (a, b) => (process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b);
+  return files.some((f) => same(path.resolve(f), path.resolve(named))) ? files : [...files, named];
 }
 
 main().catch((e) => {

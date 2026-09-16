@@ -520,10 +520,18 @@ function autoSync() {
   try {
     const syncJs = path.join(os.homedir(), ".ai-usage-inspector", "app", "src", "sync.mjs");
     if (!fs.existsSync(syncJs)) return;
+    const env = { ...process.env };
+    // --no-pricing-refresh means no fetch from anything this dashboard starts, and
+    // sync refreshes rates itself.
+    if (ARGS.noPricingRefresh) env.AI_USAGE_NO_PRICING_REFRESH = "1";
+    // The store this dashboard shows. Sync finds stores through transcripts, and a
+    // project whose transcripts Claude Code has all deleted is reachable no other
+    // way; named here, its stored rows are re-measured like any other.
+    if (!process.env.AI_USAGE_DIR) env.AI_USAGE_PROJECT_STORE = path.join(DATA_DIR, "usage.ndjson");
     const child = spawn(process.execPath, [syncJs, "--days", "7"], {
       detached: true,
       stdio: "ignore",
-      env: { ...process.env },
+      env,
     });
     child.unref();
     console.log(`  sync: refreshing last 7 days in the background — the page updates as rows arrive\n`);

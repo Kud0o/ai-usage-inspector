@@ -253,9 +253,13 @@ function preserveComputedCost(next, previous, preserveRuns = true) {
   // A cost worked out under rates since found wrong for its model is not kept.
   // The incoming cost names the table revision that corrected them; a stored
   // cost from before it was never the provider's price, so the promise to keep
-  // what a turn cost at the time does not cover it.
-  if (typeof next.cost.supersedes === "number" && !(Number(previous.cost.rates) >= next.cost.supersedes)) {
-    return preserveRuns ? preserveRunCosts(next, previous) : next;
+  // what a turn cost at the time does not cover it. The corrected turn is taken
+  // whole, its runs included: keeping a run's older figure inside a recomputed
+  // total would leave the total and its parts disagreeing for good. --relabel
+  // promises never to change an amount, so it leaves this to a plain sync.
+  if (process.env.AI_USAGE_RELABEL !== "1"
+      && typeof next.cost.supersedes === "number" && !(Number(previous.cost.rates) >= next.cost.supersedes)) {
+    return next;
   }
   const preserved = (cost = previous.cost) => {
     const out = { ...next, cost };

@@ -507,6 +507,8 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 13px; color: var(--muted); text-transform
   box-shadow: var(--shadow); padding: 8px 10px; font-size: 11px; font-family: var(--mono);
   display: grid; gap: 3px;
 }
+/* These set their own display, which would otherwise outrank [hidden]. */
+.chart-tip[hidden], .chart-cursor[hidden], .chart-brush[hidden] { display: none; }
 .chart-tip[data-side="left"] { transform: translateX(-12%); }
 .chart-tip[data-side="right"] { transform: translateX(-88%); }
 .chart-tip b { font-family: var(--display); font-size: 12px; color: var(--text); }

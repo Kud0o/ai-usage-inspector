@@ -122,7 +122,8 @@ export async function refreshPricing({
   url = PRICING_URL,
   ttlMs = 0,
   now = Date.now(),
-  fetchImpl = globalThis.fetch,
+  // AI_USAGE_NO_PRICING_REFRESH=1 keeps every refresher off the network.
+  fetchImpl = process.env.AI_USAGE_NO_PRICING_REFRESH === "1" ? null : globalThis.fetch,
 } = {}) {
   if (typeof fetchImpl !== "function") {
     return { status: "no-fetch", rates: readCachedRates(file) };

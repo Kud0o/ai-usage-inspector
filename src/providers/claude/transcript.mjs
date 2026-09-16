@@ -239,7 +239,7 @@ function contextOf(messages, fallbackModel) {
   // A model this version has no window for is measured against a guess, and a
   // request larger than the guess proves the guess wrong: Claude's only window
   // above 200k is 1M. Better that than a context reported several times full.
-  if (modelInfo(model).estimated && used > max) max = 1_000_000;
+  if (!modelInfo(model).windowKnown && used > max) max = 1_000_000;
   return {
     contextTokens: used,
     contextMax: max,

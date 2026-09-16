@@ -16,7 +16,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // module and cannot start; every bundle is rewritten once to repair them.
 // 22: interactive time charts (readout, zoom) and a since/until date range.
 // 23: each subagent run's own context fill, beside the main thread's.
-export const VIEWER_VERSION = "23";
+// 24: chart overlays that stay hidden, zoom controls with cost alone, a zoom the
+// filters moved past dropped, and a dashboard that names its store to sync.
+export const VIEWER_VERSION = "24";
 
 // A project gets viewer/ and nothing else — no src/ tree beside it — so the
 // modules the bundled dashboard imports are copied in next to it, under the

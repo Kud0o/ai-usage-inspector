@@ -29,7 +29,10 @@ export { zeroCost, addCost };
 
 // Per-MTok rates. Cache prices follow input by the standard multipliers unless a
 // model publishes its own: Fable 5.1 and Mythos 5.1 price cache hits at 0.025x.
-function model(input, output, ctx, { cacheWrite5m, cacheWrite1h, cacheRead } = {}) {
+// `windowKnown` says whether contextMax is the model's real window or a guess.
+// It is separate from `estimated`, which is about the rate: a model can have a
+// fetched price and no known window, or a fetched window and a guessed price.
+function model(input, output, ctx, { cacheWrite5m, cacheWrite1h, cacheRead } = {}, windowKnown = true) {
   return {
     input,
     output,
@@ -37,6 +40,7 @@ function model(input, output, ctx, { cacheWrite5m, cacheWrite1h, cacheRead } = {
     cacheWrite1h: cacheWrite1h ?? input * 2,
     cacheRead: cacheRead ?? input * 0.1,
     contextMax: ctx,
+    windowKnown,
   };
 }
 
@@ -60,8 +64,8 @@ const TABLE = {
 
 // Unknown Claude models fall back to the current Opus tier. The rate is a
 // guess, so entries built from it carry `estimated` and any cost derived from
-// them is labelled "estimated" rather than "priced".
-const FALLBACK = { ...model(5, 25, 200_000), estimated: true };
+// them is labelled "estimated" rather than "priced". The window is a guess too.
+const FALLBACK = { ...model(5, 25, 200_000, {}, false), estimated: true };
 
 // Rates and context windows fetched from the docs, keyed like TABLE. Applied at
 // import from the on-disk cache; the viewer, install and sync refresh that
@@ -70,35 +74,43 @@ let OVERRIDES = {};
 
 const price = (n) => typeof n === "number" && Number.isFinite(n) && n >= 0;
 const tokens = (n) => typeof n === "number" && Number.isFinite(n) && n >= 1_000;
+const CACHE_KEYS = ["cacheWrite5m", "cacheWrite1h", "cacheRead"];
 
 /**
  * Merge fetched rates ({ id: { input, output, cacheWrite5m?, cacheWrite1h?,
- * cacheRead? } }) and context windows ({ id: tokens }) over the built-in table.
- * Sanity-checked: a non-numeric or negative figure is ignored, never poisoning a
- * model's pricing.
+ * cacheRead? } }) and context windows ({ id: tokens }) over what is known of each
+ * model: an earlier override, else the built-in entry, else the fallback. A price
+ * and a window are taken independently, so a refresh that brings only one of them
+ * never discards the other. A non-numeric or negative figure is ignored, never
+ * poisoning a model's pricing.
  */
 export function applyRemoteRates(rates, windows) {
   const r = rates && typeof rates === "object" ? rates : {};
   const w = windows && typeof windows === "object" ? windows : {};
   for (const id of new Set([...Object.keys(r), ...Object.keys(w)])) {
-    const base = TABLE[id];
+    const known = OVERRIDES[id] || TABLE[id] || null;
+    const current = known || FALLBACK;
     const fetched = r[id];
-    const ctx = tokens(w[id]) ? w[id] : (base && base.contextMax) || FALLBACK.contextMax;
-    if (fetched && price(fetched.input) && price(fetched.output)) {
-      // A cache price the page did not give is taken from the built-in entry
-      // while the fetched input still matches it: a cache written before cache
-      // prices were fetched must not pull Fable 5.1's cache hits back to 0.1x.
-      const same = base && base.input === fetched.input;
-      const cache = (key) => (price(fetched[key]) ? fetched[key] : same ? base[key] : undefined);
-      OVERRIDES[id] = model(fetched.input, fetched.output, ctx, {
-        cacheWrite5m: cache("cacheWrite5m"),
-        cacheWrite1h: cache("cacheWrite1h"),
-        cacheRead: cache("cacheRead"),
-      });
-    } else if (tokens(w[id])) {
-      // A window without a price: the model's own rates if the table has them,
-      // otherwise still the guessed rate — but no longer a guessed window.
-      OVERRIDES[id] = { ...(base || FALLBACK), contextMax: w[id] };
+    const hasPrice = Boolean(fetched && price(fetched.input) && price(fetched.output));
+    const hasWindow = tokens(w[id]);
+    if (!hasPrice && !hasWindow) continue;
+    const ctx = hasWindow ? w[id] : current.contextMax;
+    const windowKnown = hasWindow || Boolean(known && known.windowKnown);
+    if (hasPrice) {
+      // A cache price the page did not give keeps this model's own ratio to input,
+      // never the generic one: Fable 5.1's cache hits stay at 0.025x of whatever
+      // input is fetched. Only a model nothing is known about takes the default.
+      const cache = {};
+      for (const key of CACHE_KEYS) {
+        cache[key] = price(fetched[key])
+          ? fetched[key]
+          : known && known.input > 0 ? fetched.input * (known[key] / known.input) : undefined;
+      }
+      OVERRIDES[id] = model(fetched.input, fetched.output, ctx, cache, windowKnown);
+    } else {
+      // A window without a price: whatever rates are already known — an earlier
+      // fetch, the built-in entry, or still the guess — with the window now known.
+      OVERRIDES[id] = { ...current, contextMax: ctx, windowKnown };
     }
   }
 }
@@ -128,7 +140,7 @@ export function contextMax(modelId) {
 /** The window of a model this version actually knows — never the fallback guess. */
 export function knownContextMax(modelId) {
   const info = modelInfo(modelId);
-  return info.estimated ? null : info.contextMax;
+  return info.windowKnown ? info.contextMax : null;
 }
 
 /**

@@ -379,14 +379,21 @@ the first time the cache refreshes. The models page failing never holds back a r
 the windows already known are kept.
 
 `install` and `sync` refresh the Claude cache too, when it is more than 12 hours old, with a
-5-second bound per page: a machine that only ever runs the hook never starts the dashboard, and
+5-second bound per page, and wait an hour after a failed attempt before trying again (the
+dashboard, which asks with a ttl of 0, is never held back). Windows that arrive while the pricing
+page fails are kept even when no rates are cached yet: a machine that only ever runs the hook never starts the dashboard, and
 would otherwise price every new model on a guess for good. Codex and Cursor refresh only from the
 dashboard, because their refreshers take no timeout. `AI_USAGE_NO_PRICING_REFRESH=1` keeps every
 command off the network; the test suite runs with it.
 
-A model with no known window at all is measured against 200k, unless a request is larger than
+A fetched price and a fetched window are taken independently: a refresh bringing only one never
+discards the other, and a cache price the page omits keeps the model's own ratio to input rather
+than the generic one. Whether a window is known is tracked apart from whether a rate is: a model
+with a fetched price can still have a guessed window, and one with a fetched window a guessed
+price. A model whose window is a guess is measured against 200k, unless a request is larger than
 that — then against 1M, Claude's only larger window — so a context is never reported more than
-full. Context fill is per thread: a turn's figure is its main thread's last request, and each
+full. A context row is matched to model ids only within one table and only with the same column
+count, so a page redesign cannot attribute a window to the wrong model. Context fill is per thread: a turn's figure is its main thread's last request, and each
 subagent run carries its own `contextTokens`, `contextMax` and `contextFillPct`, measured on its
 own messages against its own model's window. The `context` field group strips and restores them
 on runs as on turns.
@@ -394,11 +401,16 @@ on runs as on turns.
 **Rate corrections.** A computed cost carries `rates`, the revision of the Claude rate table it
 was worked out under, and — for a model whose built-in rates a revision corrected — `supersedes`,
 that revision. A stored cost whose `rates` is older than the incoming cost's `supersedes` is
-worked out again instead of kept; every other stored cost with unchanged tokens stands, as before.
+worked out again instead of kept, and the turn is taken whole with its runs, so its total always
+equals its parts; every other stored cost with unchanged tokens stands, as before. `--relabel`
+never changes an amount, so it leaves such a correction to the next plain sync.
 Revision 2 corrected Opus 5 and Sonnet 5 (missing, so priced at the Opus-tier guess where no
 fetched rates existed, and labelled estimated) and Fable 5.1 and Mythos 5.1 (cache hits priced 4x
 too high everywhere). Repair epoch 3 reads every history once on upgrade, so each of those rows is
-reached.
+reached. Rows whose transcripts Claude Code has deleted are re-measured from the request size each
+stores. A project whose transcripts are all gone is found by no transcript, so its dashboard names
+its own store to the sync it starts (`AI_USAGE_PROJECT_STORE`), and that store is re-measured on
+every such sync; `--no-pricing-refresh` is passed on to that sync too.
 
 When unchanged turn usage preserves a computed cost, each run with unchanged usage also keeps
 its computed cost, matched recursively by `agentId`. A new or changed run keeps its fresh cost;
