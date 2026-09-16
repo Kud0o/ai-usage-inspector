@@ -349,6 +349,79 @@ are restored by `agentId`, as they are for the turn itself.
 The viewer adapts: cards, charts, table columns, drawer rows and filters for a disabled or
 absent field group do not render.
 
+## Chart explorer
+
+The viewer's chart code stays in `viewer/public/app.js`; it adds no imports or
+dependencies. Viewer bundle version **26** propagates the redesign. IBM Plex
+Sans/Mono load through the original Google Fonts links, with local fallbacks.
+Google Fonts is the dashboard's one external network service besides pricing
+(the stylesheet can request multiple font files). SVG colours are read through
+`cssv` using one computed-style snapshot per render and repaint on theme changes.
+
+`state.view` is the filtered turn population. `state.zoom` and `state.chartView`
+(`axis`, `grain`, `hidden`) are chart-only state; they never modify that population,
+stats or the turn table. Chart preferences persist through `persist()` in
+`ui.chartView` beside expanded rows; loading validates axis/grain enums and a
+bounded, deduplicated list of known token/context or valid provider series IDs.
+The zoom itself remains transient.
+Chart headline totals include every series in the shown range; legend totals show
+each series before toggling, while the plotted stack, mean and text alternative
+include visible series. Collapsed data tables build only on first opening, using
+the shared render model. Distribution charts and per-agent totals still use the
+entire filtered population. Turn usage/cost accessors retain their existing
+accounting; subagent runs are not added a second time.
+
+Dates follow the recorded timestamp's date portion, exactly like since/until.
+UTC arithmetic on these date-only keys avoids DST and browser-zone shifts;
+locale-formatted labels retain those dates. Calendar mode inserts zero-activity
+days between the first and last filtered dates. Active mode collapses those gaps.
+Auto grain is day through 120 displayed days, Monday-based week through 730, then
+calendar month. A manual choice overrides it. Week/month buckets are built *after*
+the zoom is applied and preserve actual first/last displayed dates, so partial
+periods neither import unseen turns nor widen the applied date filter.
+
+One turn scan collects daily values and full-view distributions/agent totals.
+`bucketPeriods` runs once per render; `prepareChartData` shares series, totals,
+means, peaks and date ticks across charts, readouts and lazy data tables. Intl
+formatters are reused instead of constructed per label or cell. `stackSeries`
+builds cost layers without mutating totals. `niceScale` supplies zero-based scales;
+`fmtAxis` uses compact locale-aware ticks independently of precise readouts and
+legends. `dateTicks` shows an unambiguous full year on the first tick and at year
+transitions, except a transition within half a tick spacing of either end, where the next tick carries the full date instead; phone endpoints retain the year when intermediate ticks are hidden.
+Tokens use four small multiples with independent scales and shared dates, so
+large cache-read volumes cannot obscure other types. Filled areas have no outline.
+Costs remain provider-stacked columns. Their dashed lines and readout
+comparisons use the arithmetic mean of visible series over displayed periods,
+including empty calendar periods. A partial week/month counts as one displayed
+period; this is not a normalized daily-rate comparison. Context shows an
+observation-weighted mean and a dashed peak line, with separate legend toggles and
+both values in readouts. Its headline is the observed mean over the shown range.
+It excludes missing values, breaks lines over empty periods, and expands beyond
+100% if an observation exceeds capacity. Missing context also
+does not enter the histogram's lowest bucket.
+
+The overview keeps the full filtered range and displays at most 240 peak-preserving
+columns. Native range sliders adjust its endpoints; pan buttons and Shift+arrows
+move the window while preserving width at boundaries. Main-chart drag endpoints
+include their whole displayed periods. Wheel and keyboard zoom clamp to the full
+range. A zoom outside the filtered data is discarded; applying a range uses the
+days actually shown. Tokens carry the shared reset/filter controls, falling back
+to cost, then context. Disabled field groups produce no corresponding chart,
+series, tooltip value or text-data column.
+
+The short interaction hint has a native help disclosure containing the complete
+shortcut list. Time charts support keyboard focus, arrows/Home/End for period readouts, +/− for
+zoom and Escape to reset. Focus is restored after redraws. Pointer movement updates
+only overlays, with tooltip content cached for the current period. Touch/pen use
+pointer capture with vertical page scrolling allowed, and cancellation clears
+overlays. Mouse hover/drag/wheel/double-click remain supported. Expandable data
+tables provide a text alternative. Donut slice and legend highlighting stays local
+to each card; legend entries are keyboard focusable and retain their share titles.
+
+Chart invariants are tested in `test/viewer-api.test.mjs`, including a 5,200-turn,
+320-day case, shared aggregation, lazy tables, formatting across locales and year
+boundaries, context means/peaks and validated preference persistence.
+
 ## Pricing refresh
 
 Per-model rates ship built-in, and when a project tracks cost each viewer start refreshes

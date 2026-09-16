@@ -3,7 +3,8 @@
 const $ = (s, r = document) => r.querySelector(s);
 
 // theme tokens read live from CSS vars so charts repaint correctly on light/dark
-const cssv = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+let chartColors = null;
+const cssv = (n) => chartColors ? (chartColors[n] ??= chartColors.style.getPropertyValue(n).trim()) : getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const palette = () => ["--accent", "--cyan", "--amber", "--violet", "--green", "--red", "--faint"].map(cssv);
 
 const state = {
@@ -13,6 +14,7 @@ const state = {
   filters: { search: "", provider: "", platform: "", workspace: "", model: "", mode: "", effort: "", since: "", until: "", ctx: 0 },
   zoom: null,                     // {from,to} day keys the time charts are showing;
                                   // a view of the same data, not a filter on it
+  chartView: { axis: "calendar", grain: "auto", hidden: [] },
   group: true,
   expanded: [],
   fields: {},                     // this project's stored-field flags
@@ -166,6 +168,7 @@ async function loadConfig() {
   if (ui.sort && ui.sort.key) state.sort = ui.sort;
   if (typeof ui.group === "boolean") state.group = ui.group;
   if (Array.isArray(ui.expanded)) state.expanded = ui.expanded.filter((key) => typeof key === "string");
+  state.chartView = validateChartView(ui.chartView);
   state.budgetMonthly = typeof ui.budgetMonthly === "number" && ui.budgetMonthly > 0 ? ui.budgetMonthly : null;
   state.fields = cfg.fields || {};
   state.enabled = !cfg.tracking || cfg.tracking.enabled !== false;
@@ -218,7 +221,7 @@ function persist() {
     fetch("/api/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ui: { filters: state.filters, sort: state.sort, group: state.group, expanded: state.expanded } }),
+      body: JSON.stringify({ ui: { filters: state.filters, sort: state.sort, group: state.group, expanded: state.expanded, chartView: validateChartView(state.chartView) } }),
     }).catch(() => {});
   }, 400);
 }
@@ -436,18 +439,239 @@ const shortModel = (m) => {
 };
 
 // ---------- charts ----------
+function validateChartView(value) {
+  const v = value && typeof value === "object" ? value : {};
+  return { axis: ["calendar", "active"].includes(v.axis) ? v.axis : "calendar",
+    grain: ["auto", "day", "week", "month"].includes(v.grain) ? v.grain : "auto",
+    hidden: Array.isArray(v.hidden) ? [...new Set(v.hidden.filter((id) => typeof id === "string" && /^(tokens:(input|output|cacheRead|cacheCreate)|context:(mean|peak)|cost:[a-z0-9_-]{1,48})$/.test(id)))].slice(0, 64) : [] };
+}
+// Intl objects are reusable. Never construct one per point or table cell.
+const dateFormats = new Map(), axisFormats = new Map();
+function dateFormatter(locale, shape) {
+  const key = `${locale || ""}:${shape}`;
+  if (!dateFormats.has(key)) dateFormats.set(key, new Intl.DateTimeFormat(locale, { timeZone: "UTC", month: "short", ...(shape !== "boundary" ? { day: "numeric" } : {}), ...(shape !== "short" ? { year: "numeric" } : {}) }));
+  return dateFormats.get(key);
+}
+function fmtAxis(value, kind = "tokens", locale) {
+  const digits = value && Math.abs(value) < 1 ? Math.min(6, Math.max(2, 1 - Math.floor(Math.log10(Math.abs(value))))) : 2;
+  const key = `${locale || ""}:${kind}:${digits}`;
+  if (!axisFormats.has(key)) axisFormats.set(key, new Intl.NumberFormat(locale, {
+    notation: "compact", maximumFractionDigits: digits,
+    ...(kind === "cost" ? { style: "currency", currency: "USD", minimumFractionDigits: 0 } : {}),
+  }));
+  return axisFormats.get(key).format(value) + (kind === "context" ? "%" : "");
+}
+const TOKEN_TYPES = [
+  { key: "input", label: "Input", color: "--accent" },
+  { key: "output", label: "Output", color: "--cyan" },
+  { key: "cacheRead", label: "Cache read", color: "--violet" },
+  { key: "cacheCreate", label: "Cache write", color: "--amber" },
+];
+const DAY_MS = 86400000;
+// Use the recorded date, as since/until do. UTC arithmetic on date-only keys
+// avoids DST and browser-zone shifts; timestamps are never reinterpreted here.
+const dateNumber = (key) => Date.parse(`${key}T00:00:00Z`);
+const dateKeyAt = (ms) => new Date(ms).toISOString().slice(0, 10);
+function calendarKeys(keys, axis) {
+  if (!keys.length || axis === "active") return keys;
+  const first = dateNumber(keys[0]), last = dateNumber(keys[keys.length - 1]);
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return keys;
+  return Array.from({ length: Math.round((last - first) / DAY_MS) + 1 }, (_, i) => dateKeyAt(first + i * DAY_MS));
+}
+function chartGrain(count, choice) {
+  return choice === "auto" ? (count > 730 ? "month" : count > 120 ? "week" : "day") : choice;
+}
+function periodKey(key, grain) {
+  if (grain === "month") return key.slice(0, 7) + "-01";
+  if (grain === "week") {
+    const ms = dateNumber(key), weekday = new Date(ms).getUTCDay();
+    return dateKeyAt(ms - ((weekday + 6) % 7) * DAY_MS); // Monday
+  }
+  return key;
+}
+function blankPeriod(key) {
+  return { key, from: key, to: key, tok: 0, cost: 0, n: 0, models: Object.create(null),
+    types: { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 }, providers: Object.create(null), ctxSum: 0, ctxN: 0, ctxMax: null };
+}
+function bucketPeriods(days, keys, grain) {
+  const map = new Map();
+  for (const key of keys) {
+    const bucket = periodKey(key, grain), d = days[key];
+    if (!map.has(bucket)) map.set(bucket, { ...blankPeriod(bucket), from: key });
+    const p = map.get(bucket); p.to = key;
+    if (d.ctxMax != null) p.ctxMax = Math.max(p.ctxMax ?? 0, d.ctxMax);
+    for (const field of ["tok", "cost", "n", "ctxSum", "ctxN"]) p[field] += d[field];
+    for (const field of ["types", "providers", "models"]) {
+      for (const [name, value] of Object.entries(d[field])) p[field][name] = (p[field][name] || 0) + value;
+    }
+  }
+  return [...map.values()];
+}
+function niceScale(maximum) {
+  const max = maximum > 0 && Number.isFinite(maximum) ? maximum : 1;
+  const raw = max / 4, unit = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].find((n) => n * unit >= raw) * unit;
+  const top = Math.ceil(max / step) * step;
+  return { max: top, ticks: Array.from({ length: Math.round(top / step) + 1 }, (_, i) => i * step) };
+}
+function dateTicks(keys, limit = 4, grain = "day", locale) {
+  if (!keys.length) return [];
+  const count = Math.min(keys.length, Math.max(2, limit));
+  const indices = [...new Set(Array.from({ length: count }, (_, i) => Math.round(i * (keys.length - 1) / Math.max(1, count - 1))))];
+  // Give year changes a real tick, replacing the nearest interior tick to avoid crowding. A change within
+  // half a tick spacing of either end would collide with that end's label, so the next tick names the year.
+  const gap = (keys.length - 1) / Math.max(1, count - 1) / 2;
+  for (let i = 1; i < keys.length; i++) if (keys[i].slice(0, 4) !== keys[i - 1].slice(0, 4) && i >= gap && keys.length - 1 - i >= gap) {
+    const candidates = indices.filter((j) => j > 0 && j < keys.length - 1);
+    const nearest = candidates.sort((a, b) => Math.abs(a - i) - Math.abs(b - i))[0];
+    if (nearest != null) indices[indices.indexOf(nearest)] = i;
+  }
+  let year = "";
+  return [...new Set(indices)].sort((a, b) => a - b).map((index) => {
+    const changed = keys[index].slice(0, 4) !== year; year = keys[index].slice(0, 4);
+    const shape = changed ? (index && grain !== "day" && keys[index - 1].slice(0, 4) !== year ? "boundary" : "full") : "short";
+    const date = new Date(dateNumber(keys[index]));
+    return { index, label: dateFormatter(locale, shape).format(date),
+      phoneLabel: dateFormatter(locale, index === 0 || year !== keys[0].slice(0, 4) ? "full" : "short").format(date) };
+  });
+}
+function chartSeries(periods, kind, providers = provsIn(state.view)) {
+  if (!has(kind)) return [];
+  if (kind === "tokens") return TOKEN_TYPES.map((t) => ({ id: `tokens:${t.key}`, label: t.label, color: cssv(t.color), values: periods.map((p) => p.types[t.key]) }));
+  if (kind === "cost") return providers.map((p) => ({ id: `cost:${p}`, label: p, color: provColor(p), values: periods.map((d) => d.providers[p] || 0) }));
+  return [{ id: "context:mean", label: "Mean context", color: cssv("--cyan"), values: periods.map((p) => p.ctxN ? p.ctxSum / p.ctxN : null) },
+    { id: "context:peak", label: "Peak context", color: cssv("--amber"), values: periods.map((p) => p.ctxMax) }];
+}
+function stackSeries(series) {
+  const totals = new Array(series[0]?.values.length || 0).fill(0);
+  const layers = series.map((s) => ({ ...s, points: s.values.map((value, i) => {
+    const bottom = totals[i]; totals[i] += value || 0;
+    return { bottom, top: totals[i] };
+  }) }));
+  return { totals, layers };
+}
+function toggleSeries(id) {
+  const hidden = state.chartView.hidden;
+  state.chartView.hidden = hidden.includes(id) ? hidden.filter((key) => key !== id) : [...hidden, id];
+  persist();
+  renderCharts();
+}
+function panZoom(keys, zoom, offset) {
+  if (!zoom || keys.length < 3) return null;
+  const shown = daysInZoom(keys, zoom), width = shown.length;
+  const start = Math.max(0, Math.min(keys.length - width, keys.indexOf(shown[0]) + Math.round(offset)));
+  return zoomFromIndices(keys, start, start + width - 1);
+}
+function chartControls(all, shown, grain) {
+  const select = (name, options, selected) => `<label>${name === "axis" ? "Time axis" : "Group by"}<select data-chart-option="${name}">${options.map(([value, label]) => `<option value="${value}"${value === selected ? " selected" : ""}>${label}</option>`).join("")}</select></label>`;
+  const metric = has("tokens") ? "tok" : has("cost") ? "cost" : "n";
+  const max = all.reduce((m, key) => Math.max(m, CHART_DAYS.days[key][metric]), 1);
+  // At most 240 overview columns, each preserving its bin's peak.
+  const stride = Math.max(1, Math.ceil(all.length / 240)), peaks = [];
+  for (let i = 0; i < all.length; i += stride) peaks.push(all.slice(i, i + stride).reduce((m, k) => Math.max(m, CHART_DAYS.days[k][metric]), 0));
+  const bars = peaks.map((value, i) => `<rect x="${i * 100 / peaks.length}" y="${30 - value / max * 28}" width="${100 / peaks.length}" height="${value / max * 28}"/>`).join("");
+  const start = Math.max(0, all.indexOf(shown[0])), end = Math.max(0, all.indexOf(shown[shown.length - 1]));
+  return `<div class="card span2 chart-controls"><div class="chart-heading"><div><h2>Usage patterns</h2><p>Explore the filtered turns. Chart views leave totals and the table intact.</p></div><div class="chart-options">${select("axis", [["calendar", "Calendar days"], ["active", "Active days"]], state.chartView.axis)}${select("grain", [["auto", `Auto · ${grain}`], ["day", "Day"], ["week", "Week"], ["month", "Month"]], state.chartView.grain)}</div></div>
+    ${all.length ? `<div class="chart-overview"><svg viewBox="0 0 100 32" preserveAspectRatio="none" aria-label="Full range overview: ${metric === "tok" ? "tokens" : metric === "cost" ? "cost" : "turns"}" role="img">${bars}<rect class="overview-window" x="${start / all.length * 100}" y="0" width="${(end - start + 1) / all.length * 100}" height="32"/></svg></div>
+    <div class="overview-controls"><label>From<input data-overview="from" aria-label="Overview start day" aria-valuetext="${esc(fmtDay(all[start]))}" type="range" min="0" max="${all.length - 1}" value="${start}"></label><label>To<input data-overview="to" aria-label="Overview end day" aria-valuetext="${esc(fmtDay(all[end]))}" type="range" min="0" max="${all.length - 1}" value="${end}"></label><button class="btn ghost" data-pan="-1" ${state.zoom ? "" : "disabled"} aria-label="Pan earlier">←</button><button class="btn ghost" data-pan="1" ${state.zoom ? "" : "disabled"} aria-label="Pan later">→</button></div>` : ""}
+    <p class="chart-note">${state.chartView.axis === "calendar" ? "Calendar spacing · empty days included" : "Active days only · gaps collapsed"} · ${grain === "week" ? "Monday weeks" : grain === "month" ? "Calendar months" : "Daily totals"} · recorded dates</p></div>`;
+}
+let chartModels = Object.create(null), sharedDateTicks = [];
+function prepareChartData(periods, grain, providers) {
+  sharedDateTicks = dateTicks(periods.map((p) => p.from), 4, grain);
+  chartModels = Object.create(null);
+  for (const kind of ["tokens", "cost", "context"]) {
+    const allSeries = chartSeries(periods, kind, providers);
+    for (const s of allSeries) s.total = s.values.reduce((a, b) => a + (b || 0), 0);
+    const series = allSeries.filter((s) => !state.chartView.hidden.includes(s.id));
+    const stack = stackSeries(series), total = stack.totals.reduce((a, b) => a + b, 0);
+    const ctxN = kind === "context" ? periods.reduce((a, p) => a + p.ctxN, 0) : 0;
+    chartModels[kind] = { allSeries, series, stack, average: total / (periods.length || 1),
+      mean: ctxN ? periods.reduce((a, p) => a + p.ctxSum, 0) / ctxN : null,
+      peak: periods.reduce((a, p) => p.ctxMax == null ? a : Math.max(a ?? 0, p.ctxMax), null) };
+  }
+}
+const chartFormat = (kind) => kind === "cost" ? fmtUsd : kind === "context" ? (v) => `${fmtInt(Math.round(v))}%` : fmtTok;
+function chartDataTable(kind) {
+  if (!has(kind)) return "";
+  const periods = CHART_DAYS.periods, series = chartModels[kind].series, format = chartFormat(kind);
+  return `<table class="agent-table"><thead><tr><th>Period</th><th>Turns</th>${series.map((s) => `<th>${esc(s.label)}</th>`).join("")}</tr></thead><tbody>${periods.map((p, i) => `<tr><td>${esc(fmtDay(p.from))}${p.to !== p.from ? ` – ${esc(fmtDay(p.to))}` : ""}</td><td>${fmtInt(p.n)}</td>${series.map((s) => `<td>${s.values[i] == null ? "—" : esc(format(s.values[i]))}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+}
+function chartPlot(periods, kind, series, stack, average, identity = kind) {
+  const n = periods.length, isContext = kind === "context";
+  const maximum = isContext ? series.reduce((max, s) => s.values.reduce((m, v) => Math.max(m, v || 0), max), 0) : stack.totals.reduce((a, b) => Math.max(a, b), 0);
+  const scale = isContext && maximum <= 100 ? { max: 100, ticks: [0, 25, 50, 75, 100] } : niceScale(maximum);
+  const W = 640, H = 160, x = (i) => (i + .5) / n * W, y = (v) => H - v / scale.max * H;
+  let plot = scale.ticks.map((t) => `<line x1="0" x2="${W}" y1="${y(t)}" y2="${y(t)}" stroke="${cssv("--line-2")}"/>`).join("");
+  if (isContext) {
+    for (const s of series) {
+      let path = "", previous = false;
+      for (let i = 0; i < n; i++) {
+        const value = s.values[i];
+        if (value == null) { previous = false; continue; }
+        path += `${previous ? "L" : "M"}${x(i)},${y(value)} `; previous = true;
+        if (n <= 60) plot += `<circle cx="${x(i)}" cy="${y(value)}" r="2.5" fill="${s.color}"/>`;
+      }
+      plot += `<path data-context="${s.id}" d="${path}" fill="none" stroke="${s.color}" stroke-width="2"${s.id === "context:peak" ? ' stroke-dasharray="5 3"' : ""}/>`;
+    }
+  } else for (const layer of stack.layers) {
+    if (kind === "tokens" && n > 1) {
+      const top = layer.points.map((p, i) => `${i ? "L" : "M"}${x(i)},${y(p.top)}`).join(" ");
+      const bottom = layer.points.map((p, i) => `L${x(i)},${y(p.bottom)}`).reverse().join(" ");
+      plot += `<path class="token-area" d="${top} ${bottom} Z" fill="${layer.color}" fill-opacity=".72"/>`;
+    } else plot += layer.points.map((p, i) => `<rect x="${x(i) - W / n * .36}" y="${y(p.top)}" width="${W / n * .72}" height="${(p.top - p.bottom) / scale.max * H}" fill="${layer.color}"/>`).join("");
+  }
+  if (!isContext && series.length) plot += `<line class="chart-average" x1="0" x2="${W}" y1="${y(average)}" y2="${y(average)}" stroke="${cssv("--text")}" stroke-dasharray="5 5" opacity=".55"/>`;
+  const axes = `<div class="chart-y">${scale.ticks.slice().reverse().map((v) => `<span>${esc(fmtAxis(v, kind))}</span>`).join("")}</div>`;
+  const labels = `<div class="chart-x">${sharedDateTicks.map((t) => `<span style="left:${(t.index + .5) / n * 100}%"><i class="date-desktop">${esc(t.label)}</i><i class="date-phone">${esc(t.phoneLabel)}</i></span>`).join("")}</div>`;
+  return `<div class="chart-frame">${axes}<div>${interactive(`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">${plot}</svg>`, periods.map((p) => p.key), identity)}${labels}</div></div>`;
+}
+function timeChart(periods, kind) {
+  if (!periods.length) return emptyChart();
+  const model = chartModels[kind], { allSeries, series, stack, average } = model;
+  const format = chartFormat(kind);
+  const legend = `<div class="legend series-legend">${allSeries.map((s) => {
+    const value = kind === "context" ? (s.id === "context:peak" ? model.peak : model.mean) : s.total;
+    return `<button type="button" data-series="${esc(s.id)}" aria-pressed="${!state.chartView.hidden.includes(s.id)}"><i style="background:${s.color}"></i>${esc(s.label)}<b>${value == null ? "—" : esc(format(value))}</b></button>`;
+  }).join("")}</div>`;
+  const note = kind === "context" ? "Mean and peak of recorded observations; gaps mean no measurement." : kind === "tokens" ? "Independent scales · shared dates · dashed period averages" : `Visible series · ${format(average)} average / ${CHART_DAYS.grain} (dashed).`;
+  const body = kind === "tokens" ? `<div class="token-multiples">${series.map((s) => `<section class="token-panel" aria-label="${s.label} tokens"><h4>${s.label}</h4>${chartPlot(periods, kind, [s], stackSeries([s]), s.total / periods.length, s.id)}</section>`).join("")}</div>` : chartPlot(periods, kind, series, stack, average);
+  return `<p class="chart-note">${series.length ? esc(note) : "All series hidden · select a legend entry to show it"}</p>${legend}${body}<details class="chart-data" data-chart-table="${kind}"><summary>View ${kind} data · ${fmtInt(periods.length)} periods</summary><div class="agent-wrap"></div></details>`;
+}
+
 function renderCharts() {
+  chartColors = { style: getComputedStyle(document.documentElement) };
+  try { renderChartContents(); } finally { chartColors = null; }
+}
+function renderChartContents() {
   const v = state.view;
-  // time series by day
-  const days = {};
+  // One turn scan supplies both time charts and full-view distributions.
+  const days = Object.create(null), modelCount = Object.create(null), modeCount = Object.create(null), skillCount = Object.create(null);
+  const agentStats = Object.create(null), modelNames = new Map(), buckets = new Array(10).fill(0);
   for (const e of v) {
-    const k = dayKey(e.ts); if (!k) continue;
-    days[k] = days[k] || { tok: 0, cost: 0, n: 0, models: {} };
-    days[k].tok += T_TOTAL(e); days[k].cost += COST(e); days[k].n++;
-    const m = shortModel(e.model);
+    const p = PROV(e), tokens = T_TOTAL(e), cost = COST(e);
+    if (!modelNames.has(e.model)) modelNames.set(e.model, shortModel(e.model));
+    const m = modelNames.get(e.model), mode = e.permissionMode || "—";
+    modelCount[m] = (modelCount[m] || 0) + 1; modeCount[mode] = (modeCount[mode] || 0) + 1;
+    for (const skill of e.skills || []) skillCount[skill] = (skillCount[skill] || 0) + 1;
+    if (Number.isFinite(e.contextFillPct)) buckets[Math.max(0, Math.min(9, Math.floor(e.contextFillPct / 10)))]++;
+    const agent = agentStats[p] ||= { turns: 0, prompts: 0, tok: 0, cost: 0, ms: 0 };
+    agent.turns++; if (!e.synthetic) agent.prompts++;
+    agent.tok += tokens; agent.cost += cost; agent.ms += e.durationMs || 0;
+    const k = dayKey(e.ts);
+    if (!days[k]) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(k) || !Number.isFinite(dateNumber(k))) continue;
+      days[k] = blankPeriod(k);
+    }
+    days[k].tok += tokens; days[k].cost += cost; days[k].n++;
+    for (const type of TOKEN_TYPES) days[k].types[type.key] += e.usage?.[type.key] || 0;
+    days[k].providers[p] = (days[k].providers[p] || 0) + cost;
+    if (Number.isFinite(e.contextFillPct)) { days[k].ctxSum += e.contextFillPct; days[k].ctxN++; days[k].ctxMax = Math.max(days[k].ctxMax ?? 0, e.contextFillPct); }
     if (m) days[k].models[m] = (days[k].models[m] || 0) + 1;
   }
-  const allKeys = Object.keys(days).sort();
+  const activeKeys = Object.keys(days).sort();
+  const allKeys = calendarKeys(activeKeys, state.chartView.axis);
+  for (const k of allKeys) days[k] ||= blankPeriod(k);
   // What the time charts show: every day, or the window zoomed into. The rest of
   // the dashboard keeps counting every turn in the view — a zoom is a closer
   // look, not a filter, until it is asked to become one.
@@ -456,50 +680,39 @@ function renderCharts() {
   // where its buttons would act on dates nobody can see.
   if (state.zoom && !allKeys.some((k) => k >= state.zoom.from && k <= state.zoom.to)) state.zoom = null;
   const keys = daysInZoom(allKeys, state.zoom);
-  CHART_DAYS = { days, allKeys, keys };
+  const grain = chartGrain(keys.length, state.chartView.grain);
+  const periods = bucketPeriods(days, keys, grain);
+  CHART_DAYS = { days, allKeys, keys, periods, grain };
+  const provs = provsIn(Object.keys(agentStats).map((provider) => ({ provider })));
+  prepareChartData(periods, grain, provs);
   const tok = keys.map((k) => days[k].tok);
   const cost = keys.map((k) => days[k].cost);
 
-  const modelCount = tally(v, (e) => shortModel(e.model), () => 1);
-  const modeCount = tally(v, (e) => e.permissionMode, () => 1);
-
-  // skills invoked across the filtered view
-  const skillCount = {};
-  for (const e of v) for (const s of e.skills || []) skillCount[s] = (skillCount[s] || 0) + 1;
   const skillsUsed = Object.keys(skillCount).length;
 
-  // context distribution (10 buckets)
-  const buckets = new Array(10).fill(0);
-  for (const e of v) { const b = Math.min(9, Math.floor((e.contextFillPct || 0) / 10)); buckets[b]++; }
-
   const cards = [];
-  if (has("tokens")) cards.push(`<div class="card span2">
-      <h3>tokens over time <b>${fmtTok(tok.reduce((a, b) => a + b, 0))}</b></h3>
-      ${areaChart(keys, tok, cssv("--accent"))}${zoomBar(allKeys, keys)}
+  if (has("tokens") || has("cost") || has("context")) cards.push(chartControls(allKeys, keys, grain));
+  if (has("tokens")) cards.push(`<div class="card span2 time-card">
+      <h3>tokens over time <b title="All token types in the shown range">${fmtTok(tok.reduce((a, b) => a + b, 0))}</b></h3>
+      ${timeChart(periods, "tokens")}${zoomBar(allKeys, keys)}
     </div>`);
-  if (has("context")) cards.push(`<div class="card"><h3>context fill distribution</h3>${histogram(buckets)}</div>`);
+  if (has("cost")) cards.push(`<div class="card span2 time-card"><h3>cost / ${grain} <b class="cost-b" title="All providers in the shown range">${fmtUsd(cost.reduce((a, b) => a + b, 0))}</b></h3>${timeChart(periods, "cost")}${has("tokens") ? "" : zoomBar(allKeys, keys)}</div>`);
+  if (has("context")) cards.push(`<div class="card time-card"><h3>context fill over time <b title="Mean of recorded observations in the shown range">${chartModels.context.mean == null ? "—" : chartFormat("context")(chartModels.context.mean)}</b></h3>${timeChart(periods, "context")}${has("tokens") || has("cost") ? "" : zoomBar(allKeys, keys)}</div>`);
+  if (has("context")) cards.push(`<div class="card"><h3>context fill distribution</h3><p class="chart-note">All filtered turns · hover or focus a bucket for its count and share</p>${histogram(buckets)}</div>`);
   cards.push(`<div class="card"><h3>permission mode</h3>${donut(modeCount, (x) => x + " turns")}</div>`);
   cards.push(`<div class="card"><h3>turns by model</h3>${donut(modelCount, (x) => x + " turns")}</div>`);
   if (has("skills") && skillsUsed) cards.push(`<div class="card"><h3>skills invoked <b>${skillsUsed}</b></h3>${donut(skillCount, (x) => x + "×")}</div>`);
   // The zoom controls live under the tokens chart; with tokens not kept, under cost.
-  if (has("cost")) cards.push(`<div class="card"><h3>cost / day <b class="cost-b">${fmtUsd(cost.reduce((a, b) => a + b, 0))}</b></h3>${barChart(keys, cost, cssv("--faint"), (x) => fmtUsd(x))}${has("tokens") ? "" : zoomBar(allKeys, keys)}</div>`);
   // Per-provider breakdowns — only when the view spans more than one provider.
-  const provs = provsIn(v);
   if (provs.length > 1) {
     const tokByProv = {}, costByProv = {};
-    for (const e of v) { const p = PROV(e); tokByProv[p] = (tokByProv[p] || 0) + T_TOTAL(e); costByProv[p] = (costByProv[p] || 0) + COST(e); }
-    cards.push(`<div class="card span2"><h3>by agent</h3>${agentTable(v)}</div>`);
+    for (const p of provs) { tokByProv[p] = agentStats[p].tok; costByProv[p] = agentStats[p].cost; }
+    cards.push(`<div class="card span2"><h3>by agent</h3>${agentTable(v, { provs, stat: agentStats })}</div>`);
     if (has("tokens")) cards.push(`<div class="card"><h3>tokens by provider</h3>${provDonut(tokByProv, (x) => fmtTok(x))}</div>`);
     if (has("cost")) cards.push(`<div class="card"><h3>cost by provider</h3>${provDonut(costByProv, (x) => fmtUsd(x))}</div>`);
   }
   $("#charts").innerHTML = cards.join("");
   wireCharts();
-}
-
-function axisLabels(keys) {
-  if (!keys.length) return "";
-  const first = keys[0].slice(5), last = keys[keys.length - 1].slice(5);
-  return `<div class="legend" style="justify-content:space-between"><span>${first}</span><span>${last}</span></div>`;
 }
 
 // The days each time chart is drawing, and the totals behind them, so a pointer
@@ -526,8 +739,8 @@ function dayIndexAt(count, ratio) {
  */
 function zoomFromIndices(allKeys, a, b) {
   if (allKeys.length < 3) return null;
-  let lo = Math.max(0, Math.min(a, b));
-  let hi = Math.min(allKeys.length - 1, Math.max(a, b));
+  let lo = Math.max(0, Math.min(allKeys.length - 1, Math.round(Math.min(a, b))));
+  let hi = Math.max(0, Math.min(allKeys.length - 1, Math.round(Math.max(a, b))));
   if (hi - lo < 1) { // a click, not a drag: open a small window around it
     lo = Math.max(0, lo - 1);
     hi = Math.min(allKeys.length - 1, lo + 2);
@@ -566,59 +779,50 @@ function dayTooltip(key) {
   return `<b>${esc(fmtDay(key))}</b>${rows.map(([k, val]) => `<span>${esc(k)}<i>${esc(val)}</i></span>`).join("")}`;
 }
 
+function periodTooltip(key, kind) {
+  const periods = CHART_DAYS.periods || [], p = periods.find((d) => d.key === key);
+  if (!p) return dayTooltip(key);
+  const base = kind.split(":")[0], model = chartModels[base];
+  const series = has(base) ? model.series.filter((s) => !kind.includes(":") || s.id === kind) : [];
+  const i = periods.indexOf(p), format = chartFormat(base);
+  const top = Object.entries(p.models).sort((a, b) => b[1] - a[1])[0];
+  const rows = [["turns", fmtInt(p.n)],
+    has("tokens") ? ["tokens", fmtTok(p.tok)] : null,
+    has("cost") ? ["cost", fmtUsd(p.cost)] : null,
+    ...series.map((s) => [s.label, s.values[i] == null ? "No measurement" : format(s.values[i])]),
+    top ? ["mostly", `${top[0]} (${fmtInt(top[1])})`] : null].filter(Boolean);
+  if (series.length && base !== "context") {
+    const total = kind.includes(":") ? series[0].values[i] : model.stack.totals[i];
+    const avg = kind.includes(":") ? series[0].total / periods.length : model.average;
+    rows.push(["vs visible period mean", avg ? `${comparisonFormat.format(total / avg - 1)}` : "—"]);
+  }
+  return `<b>${esc(fmtDay(p.from))}${p.from !== p.to ? ` – ${esc(fmtDay(p.to))}` : ""}</b>${rows.map(([label, value]) => `<span>${esc(label)}<i>${esc(value)}</i></span>`).join("")}`;
+}
+
 const fmtDay = (key) => {
-  const d = new Date(`${key}T00:00:00`);
-  return isNaN(d) ? key : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  const d = new Date(`${key}T00:00:00Z`);
+  return isNaN(d) ? key : dateFormatter(undefined, "full").format(d);
 };
+const comparisonFormat = new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 0, signDisplay: "always" });
 
 /** The state of a zoom, and the two things worth doing about it. */
 function zoomBar(allKeys, shown) {
   if (!allKeys.length) return "";
+  const help = `<details class="chart-help"><summary>Keyboard &amp; help</summary><p>Drag to zoom · scroll or +/− to scale · ←/→ to read · Home/End for endpoints · Shift+←/→ to pan · Escape or double-click to reset</p></details>`;
   if (!state.zoom) {
-    return `<div class="chart-zoom"><span class="hint">drag to zoom · scroll to scale · double-click to reset</span></div>`;
+    return `<div class="chart-zoom"><span class="hint">Drag to zoom · hover or tap to read</span>${help}</div>`;
   }
   return `<div class="chart-zoom">
-    <span class="range">${esc(fmtDay(shown[0]))} → ${esc(fmtDay(shown[shown.length - 1]))} · ${fmtInt(shown.length)} active ${shown.length === 1 ? "day" : "days"}</span>
+    <span class="range">${esc(fmtDay(shown[0]))} → ${esc(fmtDay(shown[shown.length - 1]))} · ${fmtInt(shown.length)} ${state.chartView.axis === "active" ? "active " : ""}${shown.length === 1 ? "day" : "days"}</span>
     <button type="button" class="btn ghost" data-zoom="filter">filter to this range</button>
     <button type="button" class="btn ghost" data-zoom="reset">show every day</button>
+    ${help}
   </div>`;
-}
-
-function areaChart(keys, vals, color) {
-  const W = 640, H = 150, n = vals.length;
-  if (!n) return emptyChart();
-  const max = Math.max(...vals, 1);
-  const x = (i) => (n === 1 ? W / 2 : (i / (n - 1)) * W);
-  const y = (val) => H - (val / max) * (H - 12) - 4;
-  let line = vals.map((val, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(val).toFixed(1)}`).join(" ");
-  const area = `${line} L${x(n - 1)},${H} L${x(0)},${H} Z`;
-  const dots = n <= 60 ? vals.map((val, i) => `<circle cx="${x(i)}" cy="${y(val)}" r="2.4" fill="${color}"/>`).join("") : "";
-  const svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="height:150px">
-    <defs><linearGradient id="ag" x1="0" x2="0" y1="0" y2="1">
-      <stop offset="0" stop-color="${color}" stop-opacity="0.32"/><stop offset="1" stop-color="${color}" stop-opacity="0"/>
-    </linearGradient></defs>
-    <path d="${area}" fill="url(#ag)"/><path d="${line}" fill="none" stroke="${color}" stroke-width="2"/>${dots}
-  </svg>`;
-  return interactive(svg, keys, "area") + axisLabels(keys);
-}
-
-function barChart(keys, vals, color, fmt) {
-  const n = vals.length; if (!n) return emptyChart();
-  const max = Math.max(...vals, 0.0001);
-  const bars = vals
-    .map((val, i) => {
-      const h = (val / max) * 86;
-      return `<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:5px">
-        <div style="width:100%;max-width:22px;height:${h}px;min-height:2px;background:${color};border-radius:3px 3px 0 0;opacity:.85"></div></div>`;
-    })
-    .join("");
-  const body = `<div style="display:flex;align-items:flex-end;gap:3px;height:96px">${bars}</div>`;
-  return interactive(body, keys, "bars") + axisLabels(keys);
 }
 
 /** Wrap a time chart in the layer the pointer talks to. */
 function interactive(body, keys, kind) {
-  return `<div class="chart" data-kind="${kind}" data-days="${esc(keys.join(","))}">
+  return `<div class="chart" tabindex="0" role="group" aria-label="${kind} time chart. Arrow keys read periods, plus and minus zoom, Shift with arrows pans, Escape resets. Data table follows." data-kind="${kind}" data-days="${esc(keys.join(","))}">
     ${body}
     <div class="chart-cursor" hidden></div>
     <div class="chart-brush" hidden></div>
@@ -636,14 +840,14 @@ function donut(map, fmt) {
   const arcs = entries
     .map(([k, v], i) => {
       const frac = v / total, len = frac * C, col = PAL[i % PAL.length];
-      const seg = `<circle class="donut-arc" r="${R}" cx="70" cy="70" fill="none" stroke="${col}" stroke-width="16"
+      const seg = `<circle class="donut-arc" data-share="${esc(k)}" r="${R}" cx="70" cy="70" fill="none" stroke="${col}" stroke-width="16"
         stroke-dasharray="${len.toFixed(2)} ${(C - len).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}"
         transform="rotate(-90 70 70)"><title>${esc(k)} · ${esc(fmt(v))} · ${sharePct(frac)}</title></circle>`;
       off += len; return seg;
     })
     .join("");
   const legend = entries
-    .map(([k, v], i) => `<span title="${esc(k)} · ${esc(fmt(v))} · ${sharePct(v / total)} of the total"><i style="background:${PAL[i % PAL.length]}"></i>${esc(k)} · ${fmt(v)}</span>`)
+    .map(([k, v], i) => `<span tabindex="0" data-share="${esc(k)}" title="${esc(k)} · ${esc(fmt(v))} · ${sharePct(v / total)} of the total"><i style="background:${PAL[i % PAL.length]}"></i>${esc(k)} · ${fmt(v)}</span>`)
     .join("");
   return `<div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap">
     <svg viewBox="0 0 140 140" style="width:128px;height:128px;flex:0 0 auto">${arcs}
@@ -656,12 +860,12 @@ function donut(map, fmt) {
 // Per-agent breakdown. Work delegated to another agent — a delegate skill
 // shelling out to another CLI — is spend on this project like any other, but it
 // lands under a different provider and would otherwise disappear into one total.
-function agentTable(rows) {
-  const provs = provsIn(rows);
+function agentTable(rows, prepared) {
+  const provs = prepared ? prepared.provs : provsIn(rows);
   if (!provs.length) return emptyChart();
-  const stat = {};
-  for (const p of provs) stat[p] = { turns: 0, prompts: 0, tok: 0, cost: 0, ms: 0 };
-  for (const e of rows) {
+  const stat = prepared ? prepared.stat : {};
+  if (!prepared) for (const p of provs) stat[p] = { turns: 0, prompts: 0, tok: 0, cost: 0, ms: 0 };
+  if (!prepared) for (const e of rows) {
     const s = stat[PROV(e)];
     if (!s) continue;
     s.turns += 1;
@@ -704,12 +908,12 @@ function provDonut(map, fmt) {
   let off = 0;
   const arcs = entries.map(([k, v]) => {
     const len = (v / total) * C, col = provColor(k);
-    const seg = `<circle class="donut-arc" r="${R}" cx="70" cy="70" fill="none" stroke="${col}" stroke-width="16"
+    const seg = `<circle class="donut-arc" data-share="${esc(k)}" r="${R}" cx="70" cy="70" fill="none" stroke="${col}" stroke-width="16"
       stroke-dasharray="${len.toFixed(2)} ${(C - len).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}"
       transform="rotate(-90 70 70)"><title>${esc(k)} · ${esc(fmt(v))} · ${sharePct(v / total)}</title></circle>`;
     off += len; return seg;
   }).join("");
-  const legend = entries.map(([k, v]) => `<span title="${esc(k)} · ${esc(fmt(v))} · ${sharePct(v / total)} of the total"><i style="background:${provColor(k)}"></i>${esc(k)} · ${fmt(v)}</span>`).join("");
+  const legend = entries.map(([k, v]) => `<span tabindex="0" data-share="${esc(k)}" title="${esc(k)} · ${esc(fmt(v))} · ${sharePct(v / total)} of the total"><i style="background:${provColor(k)}"></i>${esc(k)} · ${fmt(v)}</span>`).join("");
   return `<div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap">
     <svg viewBox="0 0 140 140" style="width:128px;height:128px;flex:0 0 auto">${arcs}
       <text x="70" y="66" text-anchor="middle" fill="${cssv("--text")}" font-family="var(--display)" font-size="20" font-weight="600">${entries.length}</text>
@@ -724,12 +928,12 @@ function histogram(buckets) {
   const bars = buckets
     .map((c, i) => {
       const h = (c / max) * 92, hot = i >= 8 ? cHot : i >= 5 ? cWarn : cCool;
-      return `<div title="${i * 10}–${i * 10 + 10}% of the window · ${fmtInt(c)} turns · ${sharePct(c / (total || 1))}" style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px">
+      return `<div class="hist-bucket" tabindex="0" aria-label="${i * 10} to ${i * 10 + 10}% context, ${fmtInt(c)} turns" title="${i * 10}–${i * 10 + 10}% of the window · ${fmtInt(c)} turns · ${sharePct(c / (total || 1))}" style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px">
         <div style="width:100%;height:${h}px;min-height:${c ? 2 : 0}px;background:${hot};border-radius:3px 3px 0 0"></div>
         <span style="font-family:var(--mono);font-size:8px;color:${cLabel}">${i * 10}</span></div>`;
     })
     .join("");
-  return `<div style="display:flex;align-items:flex-end;gap:3px;height:118px">${bars}</div>`;
+  return `<div class="histogram" style="display:flex;align-items:flex-end;gap:3px;height:118px">${bars}</div><p class="chart-note">Context fill % · recorded observations only</p>`;
 }
 
 const sharePct = (frac) => `${(frac * 100).toFixed(frac < 0.1 ? 1 : 0)}%`;
@@ -740,6 +944,45 @@ const emptyChart = () => `<div style="height:120px;display:grid;place-items:cent
 // Charts are redrawn whole on every change, so each render re-attaches. Listeners
 // belong to the elements they are drawn on and go with them.
 function wireCharts() {
+  const query = (selector) => document.querySelectorAll ? document.querySelectorAll(`#charts ${selector}`) : [];
+  for (const detail of query("[data-chart-table]")) detail.addEventListener("toggle", () => {
+    if (!detail.open || detail.dataset.loaded) return;
+    detail.querySelector(".agent-wrap").innerHTML = chartDataTable(detail.dataset.chartTable);
+    detail.dataset.loaded = "true";
+  });
+  for (const button of query("[data-series]")) button.addEventListener("click", () => {
+    const id = button.dataset.series; toggleSeries(id);
+    [...query("[data-series]")].find((node) => node.dataset.series === id)?.focus();
+  });
+  for (const select of query("[data-chart-option]")) select.addEventListener("change", () => {
+    state.chartView[select.dataset.chartOption] = select.value;
+    state.chartView = validateChartView(state.chartView);
+    persist();
+    renderCharts();
+    [...query("[data-chart-option]")].find((node) => node.dataset.chartOption === select.dataset.chartOption)?.focus();
+  });
+  for (const slider of query("[data-overview]")) slider.addEventListener("change", () => {
+    const all = CHART_DAYS.allKeys, keys = CHART_DAYS.keys;
+    const from = slider.dataset.overview === "from" ? Math.min(Number(slider.value), all.indexOf(keys[keys.length - 1])) : all.indexOf(keys[0]);
+    const to = slider.dataset.overview === "to" ? Math.max(Number(slider.value), all.indexOf(keys[0])) : all.indexOf(keys[keys.length - 1]);
+    state.zoom = zoomFromIndices(all, from, to); renderCharts();
+    [...query("[data-overview]")].find((node) => node.dataset.overview === slider.dataset.overview)?.focus();
+  });
+  for (const button of query("[data-pan]")) button.addEventListener("click", () => {
+    state.zoom = panZoom(CHART_DAYS.allKeys, state.zoom, Number(button.dataset.pan) * Math.max(1, Math.floor(CHART_DAYS.keys.length / 2)));
+    renderCharts();
+    [...query("[data-pan]")].find((node) => node.dataset.pan === button.dataset.pan)?.focus();
+  });
+  for (const card of query(".card")) {
+    const items = card.querySelectorAll("[data-share]");
+    for (const item of items) {
+      const highlight = (active) => { for (const peer of items) peer.classList.toggle("share-active", active && peer.dataset.share === item.dataset.share); };
+      item.addEventListener("mouseenter", () => highlight(true));
+      item.addEventListener("mouseleave", () => highlight(false));
+      item.addEventListener("focus", () => highlight(true));
+      item.addEventListener("blur", () => highlight(false));
+    }
+  }
   const charts = document.querySelectorAll ? document.querySelectorAll("#charts .chart") : [];
   for (const chart of charts) attachChart(chart);
   const buttons = document.querySelectorAll ? document.querySelectorAll("#charts [data-zoom]") : [];
@@ -759,6 +1002,18 @@ function wireCharts() {
   }
 }
 
+function chartKeyAction(key, shift, index, count) {
+  if (key === "Escape") return { reset: true };
+  if (key === "+" || key === "=") return { factor: .8 };
+  if (key === "-" || key === "_") return { factor: 1.25 };
+  if (key === "ArrowLeft" || key === "ArrowRight") {
+    const delta = key === "ArrowLeft" ? -1 : 1;
+    return shift ? { pan: delta } : { index: Math.max(0, Math.min(count - 1, index + delta)) };
+  }
+  if (key === "Home" || key === "End") return { index: key === "Home" ? 0 : count - 1 };
+  return null;
+}
+
 function attachChart(chart) {
   const days = (chart.dataset.days || "").split(",").filter(Boolean);
   const cursor = chart.querySelector(".chart-cursor");
@@ -770,16 +1025,41 @@ function attachChart(chart) {
     return box.width ? Math.max(0, Math.min(1, (event.clientX - box.left) / box.width)) : 0;
   };
   let dragFrom = null;
+  let selected = 0, lastTip = -1;
+  const periodIndex = (ratio) => Math.max(0, Math.min(days.length - 1, Math.floor(ratio * days.length)));
+  const show = (i, announce = false) => {
+    selected = i;
+    const at = (i + .5) / days.length * 100;
+    cursor.hidden = false; cursor.style.left = `${at}%`;
+    tip.hidden = false;
+    tip.setAttribute("aria-live", announce ? "polite" : "off");
+    if (lastTip !== i) { tip.innerHTML = periodTooltip(days[i], chart.dataset.kind); lastTip = i; }
+    tip.style.left = `${Math.max(10, Math.min(90, at))}%`;
+    tip.dataset.side = at > 70 ? "right" : at < 30 ? "left" : "center";
+  };
+  const redraw = () => {
+    const kind = chart.dataset.kind; renderCharts();
+    document.querySelector(`#charts .chart[data-kind="${kind}"]`)?.focus();
+  };
+  chart.addEventListener("focus", () => show(selected, true));
+  chart.addEventListener("blur", () => { tip.hidden = true; cursor.hidden = true; });
+  chart.addEventListener("keydown", (event) => {
+    const action = chartKeyAction(event.key, event.shiftKey, selected, days.length);
+    if (!action) return;
+    event.preventDefault();
+    if (action.index != null) { show(action.index, true); return; }
+    if (action.reset) state.zoom = null;
+    if (action.factor) state.zoom = zoomByFactor(CHART_DAYS.allKeys, state.zoom, action.factor, (selected + .5) / days.length);
+    if (action.pan) state.zoom = panZoom(CHART_DAYS.allKeys, state.zoom, action.pan * Math.max(1, Math.floor(CHART_DAYS.keys.length / 2)));
+    redraw();
+  });
 
   chart.addEventListener("mousemove", (event) => {
     const ratio = ratioAt(event);
-    const i = dayIndexAt(days.length, ratio);
+    const i = periodIndex(ratio);
     if (i < 0) return;
-    const at = days.length === 1 ? 50 : (i / (days.length - 1)) * 100;
-    cursor.hidden = false;
-    cursor.style.left = `${at}%`;
-    tip.hidden = false;
-    tip.innerHTML = dayTooltip(days[i]);
+    const at = (i + .5) / days.length * 100;
+    show(i);
     // Keep the card's edges: a tip near either end leans inward instead of
     // spilling out of the panel it belongs to.
     tip.style.left = `${Math.max(10, Math.min(90, at))}%`;
@@ -813,8 +1093,10 @@ function attachChart(chart) {
     // A drag too short to be deliberate is a click, and a click is not a zoom.
     if (Math.abs(to - from) < 0.01) return;
     const all = CHART_DAYS.allKeys;
-    const a = all.indexOf(days[dayIndexAt(days.length, from)]);
-    const b = all.indexOf(days[dayIndexAt(days.length, to)]);
+    const periods = CHART_DAYS.periods;
+    const first = periods[periodIndex(Math.min(from, to))], last = periods[periodIndex(Math.max(from, to))];
+    const a = all.indexOf(first.from);
+    const b = all.indexOf(last.to);
     const next = zoomFromIndices(all, a, b);
     if (next) { state.zoom = next; renderCharts(); }
   });
@@ -834,6 +1116,27 @@ function attachChart(chart) {
     state.zoom = next;
     renderCharts();
   }, { passive: false });
+  // Touch pans the page vertically; horizontal drags select a chart window.
+  // Mouse listeners remain for compatibility; pointer listeners handle touch/pen only.
+  chart.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "mouse") return;
+    dragFrom = ratioAt(event); chart.setPointerCapture(event.pointerId); show(periodIndex(dragFrom));
+  });
+  chart.addEventListener("pointermove", (event) => {
+    if (event.pointerType === "mouse" || dragFrom === null) return;
+    const ratio = ratioAt(event); show(periodIndex(ratio));
+    brush.hidden = false; brush.style.left = `${Math.min(ratio, dragFrom) * 100}%`;
+    brush.style.width = `${Math.abs(ratio - dragFrom) * 100}%`;
+  });
+  chart.addEventListener("pointerup", (event) => {
+    if (event.pointerType === "mouse" || dragFrom === null) return;
+    const ratio = ratioAt(event), from = dragFrom; dragFrom = null; brush.hidden = true;
+    if (Math.abs(ratio - from) < .02) return;
+    const periods = CHART_DAYS.periods, all = CHART_DAYS.allKeys;
+    state.zoom = zoomFromIndices(all, all.indexOf(periods[periodIndex(Math.min(from, ratio))].from), all.indexOf(periods[periodIndex(Math.max(from, ratio))].to));
+    renderCharts();
+  });
+  chart.addEventListener("pointercancel", () => { dragFrom = null; brush.hidden = true; tip.hidden = true; cursor.hidden = true; });
 }
 
 // ---------- table ----------

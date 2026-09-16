@@ -140,7 +140,7 @@ function viewerUi(records) {
     },
     querySelectorAll: () => [],
   };
-  const ctx = vm.createContext({ document, Intl, setTimeout, clearTimeout });
+  const ctx = vm.createContext({ document, Intl, setTimeout, clearTimeout, fetch: async () => ({ json: async () => ({}) }) });
   const source = fs.readFileSync(path.join(path.dirname(SERVER), "public", "app.js"), "utf8");
   vm.runInContext(source.slice(0, source.lastIndexOf("\nbind();")), ctx);
   ctx.records = structuredClone(records);
@@ -530,4 +530,438 @@ test("chart overlays that set their own display still hide", () => {
   for (const selector of [".chart-tip[hidden]", ".chart-cursor[hidden]", ".chart-brush[hidden]"]) {
     assert.ok(hidden.includes(selector), `${selector} has display: none`);
   }
+});
+
+// Chart explorer: semantic invariants and real listener paths, without a browser.
+const chartHTML = (ui) => ui.run('document.querySelector("#charts").innerHTML');
+
+test("chart scales enclose maxima with increasing zero-based ticks", () => {
+  const ui = chartUi([]);
+  for (const max of [0, .00004, .7, 1, 99, 123456789]) {
+    const scale = ui.run(`niceScale(${max})`);
+    assert.equal(scale.ticks[0], 0);
+    assert.ok(scale.max >= max && scale.max > 0);
+    assert.equal(scale.ticks.at(-1), scale.max);
+    assert.ok(scale.ticks.length >= 3 && scale.ticks.length <= 6);
+    assert.ok(scale.ticks.every((v, i, a) => i === 0 || v > a[i - 1]));
+  }
+});
+
+test("chart date ticks cover endpoints once and handle empty and single dates", () => {
+  const ui = chartUi([]);
+  ui.run(`globalThis.days = ${JSON.stringify(DAYS)}`);
+  assert.equal(ui.run('dateTicks([]).length'), 0);
+  assert.equal(ui.run('dateTicks(["2026-12-31"])[0].index'), 0);
+  const ticks = ui.run('dateTicks(days)');
+  assert.equal(ticks.length, 4);
+  assert.deepEqual(Array.from(ticks, (t) => t.index), [0, 10, 19, 29]);
+  assert.equal(new Set(ticks.map((t) => t.label)).size, 4);
+  assert.match(ticks[0].label, /26/);
+});
+
+test("chart calendar fills leap days and year boundaries while active mode keeps gaps", () => {
+  const ui = chartUi([]);
+  assert.deepEqual([...ui.run('calendarKeys(["2024-02-28", "2024-03-01"], "calendar")')], ["2024-02-28", "2024-02-29", "2024-03-01"]);
+  assert.deepEqual([...ui.run('calendarKeys(["2025-12-31", "2026-01-02"], "calendar")')], ["2025-12-31", "2026-01-01", "2026-01-02"]);
+  assert.equal(ui.run('calendarKeys(["2024-02-28", "2024-03-01"], "active").length'), 2);
+});
+
+test("chart Monday weeks and calendar months cross years without timezone shifts", () => {
+  const ui = chartUi([]);
+  assert.equal(ui.run('periodKey("2026-01-01", "week")'), "2025-12-29");
+  assert.equal(ui.run('periodKey("2026-01-04", "week")'), "2025-12-29");
+  assert.equal(ui.run('periodKey("2026-01-05", "week")'), "2026-01-05");
+  assert.equal(ui.run('periodKey("2025-12-31", "month")'), "2025-12-01");
+  assert.equal(ui.run('periodKey("2026-01-01", "month")'), "2026-01-01");
+  assert.equal(ui.run('periodKey(dayKey("2026-01-01T00:30:00+14:00"), "day")'), "2026-01-01");
+  assert.equal(ui.run('periodKey(dayKey("2025-12-31T23:30:00-12:00"), "day")'), "2025-12-31");
+  // Host-zone changes must not change calendar arithmetic or date tick labels.
+  const before = process.env.TZ;
+  try {
+    for (const zone of ["America/Los_Angeles", "Pacific/Kiritimati", "Africa/Cairo"]) {
+      process.env.TZ = zone;
+      assert.equal(ui.run('periodKey("2026-03-09", "week")'), "2026-03-09");
+      assert.equal(ui.run('dateTicks(["2026-01-01"])[0].label'), new Intl.DateTimeFormat(undefined, { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" }).format(new Date("2026-01-01T00:00:00Z")));
+    }
+  } finally { if (before === undefined) delete process.env.TZ; else process.env.TZ = before; }
+});
+
+test("chart automatic granularity stays bounded and manual choices win", () => {
+  const ui = chartUi([]);
+  assert.equal(ui.run('chartGrain(120, "auto")'), "day");
+  assert.equal(ui.run('chartGrain(121, "auto")'), "week");
+  assert.equal(ui.run('chartGrain(730, "auto")'), "week");
+  assert.equal(ui.run('chartGrain(731, "auto")'), "month");
+  assert.equal(ui.run('chartGrain(5000, "day")'), "day");
+});
+
+test("chart buckets retain exact totals and visible partial-period endpoints", () => {
+  const ui = chartUi(onDays(["2025-12-31", "2026-01-01", "2026-01-05"]));
+  ui.run('state.chartView.grain = "week"; renderCharts()');
+  assert.equal(ui.run('CHART_DAYS.periods.length'), 2);
+  assert.equal(ui.run('CHART_DAYS.periods[0].from'), "2025-12-31");
+  assert.equal(ui.run('CHART_DAYS.periods[0].to'), "2026-01-04");
+  assert.equal(ui.run('CHART_DAYS.periods.reduce((a,p)=>a+p.n,0)'), 3);
+  assert.equal(ui.run('CHART_DAYS.periods.reduce((a,p)=>a+p.tok,0)'), 36);
+  assert.equal(ui.run('CHART_DAYS.periods.reduce((a,p)=>a+p.cost,0)'), 3);
+  ui.run('state.chartView.grain = "month"; renderCharts()');
+  assert.deepEqual(Array.from(ui.run('CHART_DAYS.periods'), (p) => [p.key, p.n]), [["2025-12-01", 1], ["2026-01-01", 2]]);
+});
+
+test("chart token and provider stacks sum to the unstacked totals", () => {
+  const ui = chartUi(RECORDS.map((r) => ({ ...r, usage: { input: 13, output: 7, cacheRead: 101, cacheCreate: 17 } })));
+  ui.run('renderCharts()');
+  for (const [kind, field] of [["tokens", "tok"], ["cost", "cost"]]) {
+    const totals = ui.run(`stackSeries(chartSeries(CHART_DAYS.periods, "${kind}")).totals`);
+    assert.deepEqual([...totals], Array.from(ui.run('CHART_DAYS.periods'), (p) => p[field]));
+  }
+  assert.equal(ui.run('stackSeries(chartSeries(CHART_DAYS.periods, "tokens")).layers[3].points[0].top'), 414);
+  assert.equal(ui.run('stackSeries(chartSeries(CHART_DAYS.periods, "tokens")).layers[1].points[0].bottom'), 39);
+});
+
+test("chart legend toggles change visible layers but never stats table or filtered turns", () => {
+  const ui = chartUi(RECORDS);
+  ui.run('renderStats(); renderTable(); renderCharts()');
+  const stats = ui.run('document.querySelector("#stats").innerHTML'), table = ui.html();
+  ui.run('toggleSeries("tokens:input"); toggleSeries("cost:codex")');
+  assert.equal(ui.run('state.view.length'), 3);
+  assert.equal(ui.run('state.filters.since'), "");
+  assert.equal(ui.run('document.querySelector("#stats").innerHTML'), stats);
+  assert.equal(ui.html(), table);
+  assert.match(chartHTML(ui), /data-series="tokens:input" aria-pressed="false"/);
+  ui.run('renderStats(); renderTable()');
+  assert.equal(ui.run('document.querySelector("#stats").innerHTML'), stats);
+  assert.equal(ui.html(), table);
+  ui.run('toggleSeries("tokens:input")');
+  assert.match(chartHTML(ui), /data-series="tokens:input" aria-pressed="true"/);
+});
+
+test("chart disabled field groups hide series readouts and text alternatives", () => {
+  const ui = chartUi(RECORDS);
+  ui.run('state.fields = {tokens:false,cost:false,context:false}; renderCharts()');
+  for (const kind of ["tokens", "cost", "context"]) {
+    assert.equal(ui.run(`chartSeries(CHART_DAYS.periods,"${kind}").length`), 0);
+    assert.doesNotMatch(chartHTML(ui), new RegExp(`data-kind="${kind}"|View ${kind} data`));
+  }
+  assert.doesNotMatch(ui.run('periodTooltip("2026-08-10", "tokens")'), /tokens|cost|Input|Cache/);
+});
+
+test("chart missing context is a gap and its mean weights observations not days", () => {
+  const ui = chartUi([{ ...RECORDS[0], contextFillPct: 0 }, { ...RECORDS[1], contextFillPct: 90 }, { ...RECORDS[2], ts: "2026-08-12T12:00:00Z" }]);
+  ui.run('renderCharts()');
+  assert.deepEqual([...ui.run('chartSeries(CHART_DAYS.periods,"context")[0].values')], [45, null, null]);
+  assert.match(chartHTML(ui), /No measurement|gaps mean no measurement/);
+  ui.run('state.chartView.grain = "week"; renderCharts()');
+  assert.equal(ui.run('chartSeries(CHART_DAYS.periods,"context")[0].values[0]'), 45);
+  assert.match(chartHTML(ui), /0\u201310% of the window \u00b7 1 turns/);
+});
+
+test("chart readout compares visible series against a zero-safe period mean", () => {
+  const ui = chartUi(onDays(["2026-06-01", "2026-06-03"]));
+  ui.run('renderCharts()');
+  assert.match(ui.run('periodTooltip("2026-06-01","tokens")'), /\+50%/);
+  assert.match(ui.run('periodTooltip("2026-06-02","tokens")'), /-100%/);
+  ui.run('state.chartView.hidden = TOKEN_TYPES.map(t=>`tokens:${t.key}`); renderCharts()');
+  assert.match(chartHTML(ui), /All series hidden/);
+  assert.doesNotMatch(ui.run('periodTooltip("2026-06-01","tokens")'), /NaN|Infinity|vs visible/);
+});
+
+test("chart pan and index windows clamp at both edges without losing width", () => {
+  const ui = chartUi([]);
+  ui.run(`globalThis.days = ${JSON.stringify(DAYS)}`);
+  assert.deepEqual({ ...ui.run('panZoom(days,{from:days[10],to:days[14]},-100)') }, {from:DAYS[0],to:DAYS[4]});
+  assert.deepEqual({ ...ui.run('panZoom(days,{from:days[10],to:days[14]},100)') }, {from:DAYS[25],to:DAYS[29]});
+  assert.equal(ui.run('panZoom(days,null,1)'), null);
+  assert.equal(ui.run('zoomFromIndices(days,100,120).to'), DAYS[29]);
+  assert.equal(ui.run('zoomFromIndices(days,-20,-10).from'), DAYS[0]);
+});
+
+test("chart keyboard actions navigate clamp zoom pan and reset", () => {
+  const ui = chartUi([]);
+  assert.equal(ui.run('chartKeyAction("ArrowLeft",false,0,10).index'), 0);
+  assert.equal(ui.run('chartKeyAction("ArrowRight",false,9,10).index'), 9);
+  assert.equal(ui.run('chartKeyAction("ArrowRight",false,4,10).index'), 5);
+  assert.equal(ui.run('chartKeyAction("ArrowLeft",true,4,10).pan'), -1);
+  assert.equal(ui.run('chartKeyAction("Home",false,4,10).index'), 0);
+  assert.equal(ui.run('chartKeyAction("End",false,4,10).index'), 9);
+  assert.equal(ui.run('chartKeyAction("+",false,4,10).factor'), .8);
+  assert.equal(ui.run('chartKeyAction("-",false,4,10).factor'), 1.25);
+  assert.equal(ui.run('chartKeyAction("Escape",false,4,10).reset'), true);
+  assert.equal(ui.run('chartKeyAction("Tab",false,4,10)'), null);
+});
+
+// Minimal event target, including the same listeners used by the browser.
+function chartEvents(ui) {
+  ui.run(`
+    globalThis.parts = Object.fromEntries([".chart-tip",".chart-cursor",".chart-brush"].map(k=>[k,{hidden:true,style:{},dataset:{},setAttribute(){}}]));
+    globalThis.chart = {dataset:{kind:"tokens",days:CHART_DAYS.periods.map(p=>p.key).join(",")},listeners:{},
+      querySelector:s=>parts[s],addEventListener(t,fn){this.listeners[t]=fn}, getBoundingClientRect:()=>({left:0,width:100}),setPointerCapture(){}};
+    globalThis.redraws=0; globalThis.focused=0;
+    globalThis.savedRender=renderCharts; renderCharts=()=>{redraws++};
+    document.querySelector=()=>({focus(){focused++}});
+    attachChart(chart);
+    globalThis.fire=(type, props={})=>chart.listeners[type]({clientX:50,button:0,preventDefault(){},...props});
+  `);
+}
+
+test("chart keyboard listener updates readout without redrawing and restores focus on zoom", () => {
+  const ui = chartUi(onDays(DAYS)); ui.run('renderCharts()'); chartEvents(ui);
+  ui.run('fire("focus"); fire("keydown",{key:"ArrowRight"})');
+  assert.match(ui.run('parts[".chart-tip"].innerHTML'), /Jun 2, 2026/);
+  assert.equal(ui.run('redraws'), 0);
+  ui.run('fire("keydown",{key:"+"})');
+  assert.ok(ui.run('state.zoom'));
+  assert.equal(ui.run('focused'), 1);
+  ui.run('fire("keydown",{key:"Escape"})');
+  assert.equal(ui.run('state.zoom'), null);
+});
+
+test("chart mouse drag selects full period endpoints and hover never redraws", () => {
+  const ui = chartUi(onDays(DAYS)); ui.run('state.chartView.grain="week"; renderCharts()'); chartEvents(ui);
+  ui.run('fire("mousemove",{clientX:30})');
+  assert.equal(ui.run('redraws'), 0);
+  assert.equal(ui.run('parts[".chart-cursor"].style.left'), "30%");
+  ui.run('fire("mousedown",{clientX:25}); fire("mouseup",{clientX:50})');
+  assert.deepEqual({ ...ui.run('state.zoom') }, {from:"2026-06-08",to:"2026-06-21"});
+});
+
+test("chart touch drags select periods and cancelled gestures clear overlays", () => {
+  const ui = chartUi(onDays(DAYS)); ui.run('state.chartView.grain="week"; renderCharts()'); chartEvents(ui);
+  ui.run('fire("pointerdown",{pointerType:"touch",pointerId:1,clientX:25}); fire("pointermove",{pointerType:"touch",clientX:50})');
+  assert.equal(ui.run('parts[".chart-brush"].hidden'), false);
+  assert.equal(ui.run('parts[".chart-cursor"].style.left'), "50%");
+  ui.run('fire("pointerup",{pointerType:"touch",clientX:50})');
+  assert.deepEqual({ ...ui.run('state.zoom') }, {from:"2026-06-08",to:"2026-06-21"});
+  ui.run('fire("pointerdown",{pointerType:"touch",pointerId:1}); fire("pointercancel")');
+  assert.equal(ui.run('parts[".chart-tip"].hidden'), true);
+  assert.equal(ui.run('parts[".chart-brush"].hidden'), true);
+});
+
+test("chart filter button applies the shown dates of a clipped weekly window", () => {
+  const ui = chartUi(onDays(DAYS));
+  ui.run(`state.chartView.grain="week"; state.zoom={from:"2026-05-29",to:"2026-06-12"};renderCharts();
+    globalThis.button={dataset:{zoom:"filter"},addEventListener(t,fn){this.click=fn}};
+    document.querySelectorAll=s=>s==="#charts [data-zoom]"?[button]:[];
+    reflect=()=>{}; persist=()=>{}; wireCharts(); button.click();`);
+  assert.equal(ui.run('state.filters.since'), "2026-06-01");
+  assert.equal(ui.run('state.filters.until'), "2026-06-12");
+  assert.equal(ui.run('state.view.length'), 12);
+});
+
+test("chart overview and select listeners change only the chart view", () => {
+  const ui = chartUi(onDays(DAYS));
+  ui.run(`renderCharts();
+    globalThis.slider={dataset:{overview:"from"},value:"10",addEventListener(t,fn){this.change=fn},focus(){}};
+    globalThis.select={dataset:{chartOption:"grain"},value:"month",addEventListener(t,fn){this.change=fn},focus(){}};
+    document.querySelectorAll=s=>s==="#charts [data-overview]"?[slider]:s==="#charts [data-chart-option]"?[select]:[];
+    wireCharts(); slider.change(); select.change();`);
+  assert.equal(ui.run('state.zoom.from'), DAYS[10]);
+  assert.equal(ui.run('state.chartView.grain'), "month");
+  assert.equal(ui.run('state.view.length'), 30);
+  assert.equal(ui.run('state.filters.since'), "");
+});
+
+test("chart donut shares link slices and keyboard legends with escaped labels", () => {
+  const ui = chartUi([]);
+  const html = ui.run('donut({"<model>":3,other:1},fmtInt)');
+  assert.match(html, /data-share="&lt;model&gt;"/);
+  assert.match(html, /tabindex="0" data-share="&lt;model&gt;"/);
+  assert.match(html, /75% of the total/);
+  assert.match(ui.run('provDonut({claude:3,codex:1},fmtInt)'), /data-share="codex"/);
+});
+
+test("chart empty single-day and long views stay finite with bounded overview", () => {
+  const ui = chartUi([]); ui.run('renderCharts()');
+  assert.match(chartHTML(ui), /no data in range/);
+  ui.run('state.view=records=[{ts:"2026-06-01T00:00:00Z",usage:{input:1}}];renderCharts()');
+  assert.doesNotMatch(chartHTML(ui), /NaN|Infinity/);
+  ui.run('state.view=Array.from({length:5200},(_,i)=>({ts:dateKeyAt(dateNumber("2025-01-01")+(i%320)*DAY_MS)+"T12:00:00Z",usage:{input:13,output:2},provider:i%2?"claude":"codex"}));renderCharts()');
+  assert.equal(ui.run('CHART_DAYS.grain'), "week");
+  assert.ok(ui.run('CHART_DAYS.periods.length') < 48);
+  const overview = chartHTML(ui).match(/class="chart-overview">([\s\S]*?)<\/svg>/)[1];
+  assert.ok((overview.match(/<rect/g) || []).length <= 241);
+  assert.equal(ui.run('CHART_DAYS.periods.reduce((a,p)=>a+p.n,0)'), 5200);
+});
+
+test("chart styling supports reduced motion and phone reflow", () => {
+  const publicDir = path.join(path.dirname(SERVER), "public");
+  const css = fs.readFileSync(path.join(publicDir, "styles.css"), "utf8");
+  assert.match(css, /prefers-reduced-motion: reduce/);
+  assert.match(css, /\.chart \{ touch-action: pan-y; \}/);
+  assert.match(css, /\.charts \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+  assert.match(css, /\.chart:focus-visible/);
+});
+
+test("chart linked donut focus highlights only its matching slice and clears on blur", () => {
+  const ui = chartUi([]);
+  ui.run(`
+    globalThis.items=["a","a","b"].map(key=>({dataset:{share:key},active:false,listeners:{},addEventListener(t,fn){this.listeners[t]=fn},classList:{toggle(name,value){items.find(x=>x.classList===this).active=value}}}));
+    const card={querySelectorAll:()=>items};
+    document.querySelectorAll=s=>s==="#charts .card"?[card]:[];wireCharts();items[0].listeners.focus();`);
+  assert.deepEqual([...ui.run('items.map(x=>x.active)')], [true,true,false]);
+  ui.run('items[0].listeners.blur()');
+  assert.deepEqual([...ui.run('items.map(x=>x.active)')], [false,false,false]);
+});
+
+test("chart context over capacity remains visible on an expanded scale", () => {
+  const ui = chartUi([{...RECORDS[0],contextFillPct:150}]);
+  ui.run('renderCharts()');
+  const html=ui.run('timeChart(CHART_DAYS.periods,"context")');
+  assert.match(html, /150%/);
+  assert.doesNotMatch(html, /cy="-/);
+});
+
+test("round two compact axes omit padding and retain small nonzero ticks", () => {
+  const ui = chartUi([]);
+  for (const [value, kind, expected] of [[150e6,"tokens","150M"],[100e6,"tokens","100M"],[0,"tokens","0"],[80,"cost","$80"],[0,"cost","$0"],[.005,"cost","$0.005"]]) {
+    assert.equal(ui.run(`fmtAxis(${value},"${kind}","en-US")`), expected);
+  }
+  assert.equal(ui.run('fmtAxis(150e6,"tokens","de-DE")'), new Intl.NumberFormat("de-DE", {notation:"compact",maximumFractionDigits:2}).format(150e6));
+  assert.equal(ui.run('fmtUsd(80)'), "$80.00", "readouts keep precision");
+  assert.equal(ui.run('fmtTok(150e6)'), "150.00M", "legend formatting stays precise");
+});
+
+test("round two date ticks distinguish years across grains locales and phone endpoints", () => {
+  const ui = chartUi([]);
+  ui.run('globalThis.dates=calendarKeys(["2025-11-20","2026-06-08"],"calendar")');
+  for (const locale of ["en-US", "en-GB", "de-DE", "ar-EG"]) {
+    for (const grain of ["day","week","month"]) {
+      const ticks = ui.run(`dateTicks(dates,4,"${grain}","${locale}")`);
+      const format = (date, options) => new Intl.DateTimeFormat(locale,{timeZone:"UTC",month:"short",...options}).format(new Date(date+"T00:00:00Z"));
+      assert.equal(ticks[0].label, format("2025-11-20",{day:"numeric",year:"numeric"}));
+      const boundary = ticks.find(t=>t.index===42);
+      assert.ok(boundary, "Jan 1 gets a boundary tick");
+      assert.equal(boundary.label, format("2026-01-01",{...(grain==="day"?{day:"numeric"}:{}),year:"numeric"}));
+      assert.equal(ticks.at(-1).label, format("2026-06-08",{day:"numeric"}));
+      assert.equal(ticks.at(-1).phoneLabel, format("2026-06-08",{day:"numeric",year:"numeric"}));
+    }
+  }
+});
+
+test("a year change near an end does not crowd the endpoint label and the next tick names the year", () => {
+  const ui = chartUi([]);
+  // 44 Monday weeks from Nov 17, 2025: the year changes at index 7, next to the first tick.
+  ui.run('globalThis.weeks=Array.from({length:44},(_,i)=>new Date(Date.UTC(2025,10,17+7*i)).toISOString().slice(0,10))');
+  const ticks = ui.run('dateTicks(weeks,4,"week","en-US")');
+  const spacing = 43 / 3;
+  for (const t of ticks.slice(1, -1)) assert.ok(t.index >= spacing / 2 && 43 - t.index >= spacing / 2, `tick ${t.index} crowds an end`);
+  const firstNewYear = ticks.find((t) => ui.run(`weeks[${t.index}]`).startsWith("2026"));
+  const format = (date, options) => new Intl.DateTimeFormat("en-US",{timeZone:"UTC",month:"short",...options}).format(new Date(date+"T00:00:00Z"));
+  assert.equal(firstNewYear.label, format(ui.run(`weeks[${firstNewYear.index}]`), {day:"numeric",year:"numeric"}), "a mid-year week keeps its day");
+});
+
+test("round two aggregates once and shares models without hover recomputation", () => {
+  const ui = chartUi(onDays(DAYS));
+  ui.run(`globalThis.calls={bucket:0,prepare:0,series:0,ticks:0,styles:0,tables:0};
+    const bucket=bucketPeriods,prepare=prepareChartData,series=chartSeries,ticks=dateTicks,table=chartDataTable;
+    bucketPeriods=(...a)=>{calls.bucket++;return bucket(...a)};
+    prepareChartData=(...a)=>{calls.prepare++;return prepare(...a)};
+    chartSeries=(...a)=>{calls.series++;return series(...a)};
+    dateTicks=(...a)=>{calls.ticks++;return ticks(...a)};
+    chartDataTable=(...a)=>{calls.tables++;return table(...a)};
+    getComputedStyle=()=>{calls.styles++;return {getPropertyValue:()=>""}};renderCharts();
+    for(let i=0;i<20;i++)periodTooltip(CHART_DAYS.periods[0].key,"tokens:input");`);
+  assert.deepEqual({...ui.run('calls')},{bucket:1,prepare:1,series:3,ticks:1,styles:1,tables:0});
+});
+
+test("round two lazy data tables build on first opening from the shown model", () => {
+  const ui = chartUi(RECORDS); ui.run('renderCharts()');
+  for (const match of chartHTML(ui).matchAll(/<details class="chart-data"[\s\S]*?<\/details>/g)) assert.doesNotMatch(match[0], /<tbody>/);
+  ui.run(`globalThis.content={innerHTML:""};globalThis.builds=0;const original=chartDataTable;
+    chartDataTable=(...a)=>{builds++;return original(...a)};
+    globalThis.detail={open:false,dataset:{chartTable:"tokens"},querySelector:()=>content,addEventListener(t,fn){this.toggle=fn}};
+    document.querySelectorAll=s=>s==="#charts [data-chart-table]"?[detail]:[];wireCharts();detail.toggle();`);
+  assert.equal(ui.run('builds'),0);
+  ui.run('detail.open=true;detail.toggle();detail.toggle()');
+  assert.equal(ui.run('builds'),1);
+  assert.match(ui.run('content.innerHTML'),/<th>Cache read<\/th>/);
+  assert.match(ui.run('content.innerHTML'),/<td>3<\/td>/);
+  ui.run('state.fields.tokens=false');
+  assert.equal(ui.run('chartDataTable("tokens")'),"");
+});
+
+test("round two token small multiples give each magnitude its own unoutlined plot", () => {
+  const ui = chartUi([{...RECORDS[0],usage:{input:10,output:2,cacheCreate:1,cacheRead:1000000}}, {...RECORDS[1],ts:"2026-08-11T12:00:00Z",usage:{input:8,output:3,cacheCreate:2,cacheRead:800000}}]);
+  ui.run('renderCharts()');
+  const html=chartHTML(ui);
+  assert.equal((html.match(/class="token-panel"/g)||[]).length,4);
+  for(const kind of ["input","output","cacheCreate","cacheRead"]) assert.match(html,new RegExp(`data-kind="tokens:${kind}"`));
+  const areas=[...html.matchAll(/<path class="token-area"[^>]+>/g)].map(m=>m[0]);
+  assert.equal(areas.length,4);
+  assert.ok(areas.every(area=>!area.includes("stroke=")));
+  assert.match(ui.run('periodTooltip("2026-08-10","tokens:input")'),/Input<i>10/);
+  assert.doesNotMatch(ui.run('periodTooltip("2026-08-10","tokens:input")'),/Cache read<i>/);
+  ui.run('toggleSeries("tokens:cacheRead")');
+  assert.doesNotMatch(chartHTML(ui),/data-kind="tokens:cacheRead"/);
+  assert.equal(ui.run('state.view.length'),2);
+  const css=fs.readFileSync(path.join(path.dirname(SERVER),"public","styles.css"),"utf8");
+  assert.match(css,/\.token-panel \.chart-x span:not\(:first-child\):not\(:last-child\) \{ display: none; \}/);
+  assert.match(css,/\.token-panel \.chart-tip \{ max-width: 260px; \}/);
+});
+
+test("round two context headline and series use weighted mean and period peak", () => {
+  const ui=chartUi([{...RECORDS[0],ts:"2026-01-01T00:00:00Z",contextFillPct:0},{...RECORDS[1],ts:"2026-01-01T01:00:00Z",contextFillPct:90},{...RECORDS[2],ts:"2026-01-02T12:00:00Z",contextFillPct:30},{...RECORDS[0],ts:"2026-01-03T12:00:00Z"}]);
+  ui.run('state.chartView.grain="week";renderCharts()');
+  assert.equal(ui.run('CHART_DAYS.periods[0].ctxMax'),90);
+  assert.equal(ui.run('chartModels.context.mean'),40);
+  assert.equal(ui.run('chartModels.context.peak'),90);
+  assert.match(chartHTML(ui),/title="Mean of recorded observations in the shown range">40%/);
+  const tip=ui.run('periodTooltip("2025-12-29","context")');
+  assert.match(tip,/Mean context<i>40%/);assert.match(tip,/Peak context<i>90%/);
+  ui.run('state.zoom={from:"2026-01-02",to:"2026-01-03"};renderCharts()');
+  assert.equal(ui.run('chartModels.context.mean'),30);
+  ui.run('state.chartView.grain="day";renderCharts()');
+  assert.deepEqual([...ui.run('chartModels.context.allSeries[1].values')],[30,null]);
+  ui.run('toggleSeries("context:peak")');
+  assert.doesNotMatch(chartHTML(ui),/data-context="context:peak"/);
+});
+
+test("round two validates chart preferences and bounds stored series IDs", () => {
+  const ui=chartUi([]);
+  assert.deepEqual(JSON.parse(ui.run('JSON.stringify(validateChartView(null))')),{axis:"calendar",grain:"auto",hidden:[]});
+  const value=ui.run('validateChartView({axis:"fake",grain:"year",hidden:["tokens:input","tokens:input","tokens:reasoning","context:peak","cost:codex","__proto__",{},"cost:<bad>"]})');
+  assert.equal(value.axis,"calendar");assert.equal(value.grain,"auto");
+  assert.deepEqual([...value.hidden],["tokens:input","context:peak","cost:codex"]);
+  assert.equal(ui.run('validateChartView({hidden:Array.from({length:100},(_,i)=>"cost:p"+i)}).hidden.length'),64);
+});
+
+test("round two saves and restores chart preferences through config ui", async () => {
+  const ui=chartUi(RECORDS);
+  ui.run(`globalThis.saved=null;setTimeout=fn=>{fn()};fetch=(url,opts)=>{saved=JSON.parse(opts.body);return Promise.resolve()};
+    state.chartView={axis:"active",grain:"month",hidden:[]};toggleSeries("tokens:cacheRead");`);
+  const stored=JSON.parse(ui.run('JSON.stringify(saved.ui.chartView)'));
+  assert.deepEqual(stored,{axis:"active",grain:"month",hidden:["tokens:cacheRead"]});
+  ui.run('state.chartView={};applySettingsVisibility=()=>{};fetch=async()=>({json:async()=>saved})');
+  await ui.run('loadConfig()');
+  assert.deepEqual(JSON.parse(ui.run('JSON.stringify(state.chartView)')),stored);
+  assert.equal(ui.run('state.view.length'),3);
+});
+
+test("round two chart option changes persist and help keeps shortcuts disclosed", () => {
+  const ui=chartUi(onDays(DAYS));
+  ui.run(`renderCharts();globalThis.saves=0;persist=()=>{saves++};
+    globalThis.select={dataset:{chartOption:"axis"},value:"active",addEventListener(t,fn){this.change=fn},focus(){}};
+    document.querySelectorAll=s=>s==="#charts [data-chart-option]"?[select]:[];wireCharts();select.change();`);
+  assert.equal(ui.run('saves'),1);
+  const hint=ui.run('zoomBar(CHART_DAYS.allKeys,CHART_DAYS.keys)');
+  assert.match(hint,/<span class="hint">Drag to zoom · hover or tap to read<\/span>/);
+  assert.match(hint,/<details class="chart-help"><summary>Keyboard &amp; help<\/summary>/);
+  assert.match(hint,/Shift\+←\/→ to pan/);
+});
+
+test("round two served chart strings have no lost question-mark separators", async () => {
+  const res=await request(port,"/app.js");assert.equal(res.status,200);
+  const chartSource=res.text.slice(res.text.indexOf("// ---------- charts"),res.text.indexOf("// ---------- table"));
+  const staticText=[...chartSource.matchAll(/>([^<>\n]*)</g)].map(m=>m[1].replace(/\$\{[^}]*\}/g,"")).join("\n");
+  assert.doesNotMatch(staticText,/[\p{L}%] \? \p{L}/u);
+  assert.match(res.text,/Context fill % · recorded observations only/);
+  for (const file of ["app.js","styles.css","index.html"]) {
+    const text=fs.readFileSync(path.join(path.dirname(SERVER),"public",file),"utf8");
+    assert.doesNotMatch(text,/\uFFFD/);
+  }
+});
+
+test("round two restores the original Plex font links", async () => {
+  const res=await request(port,"/");
+  for(const line of ['<link rel="preconnect" href="https://fonts.googleapis.com" />','<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />','<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />']) assert.ok(res.text.includes(line));
 });

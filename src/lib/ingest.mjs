@@ -18,7 +18,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 23: each subagent run's own context fill, beside the main thread's.
 // 24: chart overlays that stay hidden, zoom controls with cost alone, a zoom the
 // filters moved past dropped, and a dashboard that names its store to sync.
-export const VIEWER_VERSION = "24";
+// 25: calendar chart explorer, stacked series, overview and accessible readouts.
+// 26: faster shared chart models, token small multiples, context peaks and saved chart preferences.
+export const VIEWER_VERSION = "26";
 
 // A project gets viewer/ and nothing else — no src/ tree beside it — so the
 // modules the bundled dashboard imports are copied in next to it, under the

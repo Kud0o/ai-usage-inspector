@@ -6,7 +6,7 @@
 
 ![Node](https://img.shields.io/badge/Node-%3E%3D18-339933?logo=node.js&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-success)
-![Tests](https://img.shields.io/badge/tests-319-success)
+![Tests](https://img.shields.io/badge/tests-354-success)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 </div>
@@ -202,7 +202,7 @@ node .ai-usage/viewer/server.mjs --no-pricing-refresh   # do not fetch rates on 
 ```
 
 - **Summary cards** — prompts, tokens, active time, first-response latency, top model, busiest workspace, this-month cost against an optional budget. With more than one agent in view, cost carries a per-agent split and a **by agent** breakdown appears.
-- **Charts** — tokens over time, context-fill distribution, permission mode, turns by model, skills invoked, cost per day, and per-agent splits. Point at a day on either time chart to read its turns, tokens, cost and most-used model; drag across days to zoom both, scroll to widen or narrow the window, and double-click to see every day again. A zoom is only a closer look — the rest of the dashboard keeps counting every turn — until **filter to this range** makes it the date filter. Donut slices and legend entries show their share of the total.
+- **Charts** — a calendar explorer with labelled axes, gridlines, independently scaled token-type charts and provider-stacked costs, mean/peak context-fill trends and distribution, and model, permission, skill and provider shares. Calendar days include empty dates; switch to active days to collapse gaps. Day/week/month grouping is automatic or manual. Toggle series, compare a period with its visible-series average, open an on-demand text data table, and use the overview's range sliders and pan buttons to explore. Hover or tap for a readout; drag to zoom, scroll or press **+/−** to scale, **←/→** to read, **Shift+←/→** to pan, and **Escape** or double-click to reset. Zoom and legend changes leave stats and turn rows intact; only **filter to this range** applies the shown dates to since/until. Donut slices and keyboard-focusable legends highlight each other and retain share titles. Chart axis, grouping and legend preferences persist per viewer. Charts reflow on phones, respect reduced motion, and retain IBM Plex typography through Google Fonts.
 - **Filter bar** — provider, platform, workspace, model, mode, effort, a since/until date range, minimum context %, and free-text search. Export the filtered view as CSV or JSON.
 - **Table and detail drawer** — grouped by session, labelled with the session's name, then prompt, then subagent run and any run it launched. A branch nests under the session it came from, and a Codex agent thread under the turn that spawned it. A prompt's figures already include its runs; each run row shows its own share, and the drawer shows every run's tokens, cost and time beside the main thread's share, with rendered Markdown, usage, timing, cost, and metadata per turn.
 
