@@ -5,7 +5,7 @@ import { beforeEach, afterEach } from "node:test";
 
 // Set defaults before provider imports, and isolate each test's environment too.
 const base = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-tests-"));
-const directories = ["APPDATA", "LOCALAPPDATA", "XDG_DATA_HOME", "XDG_RUNTIME_DIR"];
+const directories = ["APPDATA", "LOCALAPPDATA", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR"];
 const keys = ["HOME", "USERPROFILE", "CODEX_HOME", "AI_USAGE_DIR", "AI_USAGE_SCAN_STATE_FILE", ...directories];
 const initial = keys.map((key) => process.env[key]);
 const restore = (values) => keys.forEach((key, i) => {

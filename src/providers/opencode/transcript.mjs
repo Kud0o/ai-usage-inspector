@@ -4,14 +4,26 @@
 // Realities handled:
 //  - Cost + tokens are real (OpenCode computes and stores them), so nothing is
 //    estimated. Per-assistant-message `data` JSON carries
-//      { modelID, cost, tokens:{ input, output, reasoning, cache:{ read, write } } }
+//      { providerID, modelID, cost, tokens:{ input, output, reasoning, cache:{ read, write } } }
 //    accessed defensively (field aliases) so schema drift degrades, not breaks.
+//  - One assistant message can hold several model requests; each request ends in
+//    a part of type "step-finish" carrying that request's own tokens. Context
+//    fill is the LARGEST single request's input + cache read, not the summed
+//    turn — an agentic loop resends a growing context, so the sum would overstate
+//    the peak a window is actually filled.
 //  - When per-message data isn't usable (older build / parts absent), we fall
 //    back to ONE session-level record built from the authoritative `session`
-//    table columns (tokens_*, cost, model) — correct totals, coarser grain.
+//    table columns (tokens_*, cost, model) — correct totals, coarser grain, with
+//    the counts that the existing messages explain and the first user prompt.
 //  - OpenCode stores a single total cost per message, not an input/output split,
 //    so the record's cost breakdown carries `total` with zeroed components.
-import { readSession } from "./store.mjs";
+//  - A subagent run is a child session whose parent_id names its parent. Its
+//    rows carry parentSessionId + agent; the parent's task-tool parts name the
+//    children it spawned. Each session stays its own record (as for Codex).
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { readSession, parentChainDepth } from "./store.mjs";
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
@@ -41,6 +53,7 @@ function msgUsage(data) {
 
 const roleOf = (data) => (data && (data.role || data.type)) || null;
 const modelOf = (data) => (data && (data.modelID || data.model || data.modelId)) || null;
+const providerOf = (data) => (data && (data.providerID || data.providerId || data.provider)) || null;
 
 // OpenCode stores session.model as a JSON string, e.g.
 // '{"id":"deepseek-v4-flash-free","providerID":"opencode"}'. Reduce it to the
@@ -61,6 +74,17 @@ function cleanModel(model) {
   return model;
 }
 
+// The provider id a model field carries (session.model JSON / message data).
+function modelProvider(model) {
+  if (model && typeof model === "object") return providerOf(model);
+  if (typeof model !== "string" || !model || model[0] !== "{") return null;
+  try {
+    return providerOf(JSON.parse(model));
+  } catch {
+    return null;
+  }
+}
+
 // Concatenate the text of a message's parts (skip tool/other part types).
 function partsText(parts) {
   let text = "";
@@ -74,15 +98,140 @@ function partsText(parts) {
   return { text, tools };
 }
 
-// Very small context-window lookup by model substring; 0 (unknown) is fine —
-// the dashboard just shows 0% context fill for that turn.
-function contextMax(model) {
+// The child sessions a message's task-tool parts name. state.metadata normally
+// holds the child's id; it can be missing, or an object carrying the id.
+function taskChildren(parts) {
+  const children = [];
+  for (const p of parts || []) {
+    if (!p || typeof p !== "object" || p.type !== "tool") continue;
+    if (String(p.tool ?? p.name ?? "") !== "task") continue;
+    const meta = p.state && p.state.metadata;
+    if (typeof meta === "string" && meta) children.push(meta);
+    else if (meta && typeof meta === "object" && meta.sessionId) children.push(String(meta.sessionId));
+  }
+  return children;
+}
+
+// How many of a message's tool parts are task (subagent) calls.
+function taskCalls(parts) {
+  let n = 0;
+  for (const p of parts || []) {
+    if (!p || typeof p !== "object" || p.type !== "tool") continue;
+    if (String(p.tool ?? p.name ?? "") === "task") n++;
+  }
+  return n;
+}
+
+// OpenCode caches its model catalogue at <XDG_CACHE_HOME|~/.cache>/opencode/
+// models.json, shaped { "<providerID>": { models: { "<modelID>": { limit:
+// { context, output } } } } }. Read at most once per path per process; tolerate
+// it being absent or malformed.
+const modelsByPath = new Map();
+
+function modelsJsonPath() {
+  const xdg = process.env.XDG_CACHE_HOME;
+  const base = xdg && xdg.trim() ? xdg : path.join(os.homedir(), ".cache");
+  return path.join(base, "opencode", "models.json");
+}
+
+function loadModelsJson() {
+  const file = modelsJsonPath();
+  if (modelsByPath.has(file)) return modelsByPath.get(file);
+  let models = {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (parsed && typeof parsed === "object") models = parsed;
+  } catch {}
+  modelsByPath.set(file, models);
+  return models;
+}
+
+function modelsWindow(providerId, modelId) {
+  const provider = loadModelsJson()[providerId];
+  const model = provider && provider.models && provider.models[modelId];
+  const context = model && model.limit && Number(model.limit.context);
+  return Number.isFinite(context) && context > 0 ? context : null;
+}
+
+// Context-window lookup: the request's providerID+modelID in models.json first,
+// a handful of name substrings as a fallback, then null — an unknown window is
+// stored as null, never as a 0 that reads like a real measurement.
+function contextMax(providerId, model) {
+  const fromCatalog = modelsWindow(providerId, model);
+  if (fromCatalog !== null) return fromCatalog;
   const m = String(model || "").toLowerCase();
   if (/gemini|gpt-4\.1|o[0-9]/.test(m)) return 1_000_000;
   if (/claude|sonnet|opus|haiku/.test(m)) return 200_000;
   if (/gpt-4o|gpt-4|gpt-5/.test(m)) return 128_000;
-  return 0;
+  return null;
 }
+
+// One assistant message can hold several model requests; each ends in a
+// step-finish part carrying that request's tokens. When a message has no
+// step-finish parts, its own summed tokens stand in as the single request.
+function messageRequests(msgData, parts) {
+  const requests = [];
+  for (const p of parts || []) {
+    if (!p || typeof p !== "object" || p.type !== "step-finish") continue;
+    const u = msgUsage(p);
+    if (u) requests.push(u);
+  }
+  if (requests.length) return requests;
+  const u = msgUsage(msgData);
+  return u ? [u] : [];
+}
+
+// The largest single request's context across some assistant messages, with the
+// provider/model that request ran under (read from the message that held it).
+function peakContext(messages, partsByMsg) {
+  let peak = null;
+  for (const m of messages) {
+    if (roleOf(m.data) !== "assistant") continue;
+    for (const r of messageRequests(m.data, partsByMsg.get(m.id))) {
+      const ctx = r.input + r.cacheRead;
+      if (peak === null || ctx > peak.ctx) {
+        peak = { ctx, provider: providerOf(m.data) || null, model: cleanModel(modelOf(m.data)) || null };
+      }
+    }
+  }
+  return peak;
+}
+
+// Counts a session rollup can honestly claim from the messages that exist.
+function sessionCounts(messages, partsByMsg) {
+  let apiCalls = 0;
+  let toolCalls = 0;
+  let subagentCalls = 0;
+  for (const m of messages) {
+    if (roleOf(m.data) !== "assistant") continue;
+    apiCalls++;
+    const parts = partsByMsg.get(m.id) || [];
+    for (const p of parts) {
+      if (!p || typeof p !== "object") continue;
+      const t = p.type;
+      if (t === "tool" || t === "tool-invocation" || t === "tool_use") {
+        toolCalls++;
+        if (String(p.tool ?? p.name ?? "") === "task") subagentCalls++;
+      }
+    }
+  }
+  return { apiCalls, subagentCalls, toolCalls, thinkingBlocks: 0 };
+}
+
+// The first user message's text carries the turn's prompt; fall back to the
+// session-input rows, then the caller appends the session title.
+function firstUserPrompt(messages, partsByMsg, inputs) {
+  for (const m of messages) {
+    if (roleOf(m.data) !== "user") continue;
+    const { text } = partsText(partsByMsg.get(m.id));
+    if (text) return text;
+  }
+  return (inputs[0] && inputs[0].prompt) || "";
+}
+
+// OpenCode names an untitled session "New session - <ts>" and its child sessions
+// "Child session - <ts>"; those placeholder names are not real names.
+const PLACEHOLDER_NAME = /^(New|Child) session - \d{4}-\d{2}-\d{2}T/;
 
 /**
  * Parse a session into turn records. `ref` is the opaque transcript reference:
@@ -97,21 +246,45 @@ export async function buildTurns(ref, opts = {}) {
 
   const cwd = (ref && ref.cwd) || opts.cwd || (session && session.directory) || null;
   const sessionModel = cleanModel(session && session.model);
-  const sessionName = typeof session?.title === "string" && session.title.trim() ? session.title : null;
+  const sessionName =
+    typeof session?.title === "string" && session.title.trim() && !PLACEHOLDER_NAME.test(session.title.trim())
+      ? session.title
+      : null;
+
+  // A child session (parent_id set) nests under its parent; depth is how far its
+  // parent chain reaches back to a root session.
+  const hierarchy = {};
+  if (session && session.parent_id) {
+    hierarchy.parentSessionId = session.parent_id;
+    hierarchy.agent = {
+      kind: "subagent",
+      nickname: session.agent || null,
+      path: null,
+      depth: await parentChainDepth(session.id),
+    };
+  }
 
   // Segment at user messages; attach following assistant messages.
   const turns = [];
   let cur = null;
   for (const m of messages) {
     const role = roleOf(m.data);
-    const { text, tools } = partsText(partsByMsg.get(m.id));
+    const parts = partsByMsg.get(m.id) || [];
+    const { text, tools } = partsText(parts);
     if (role === "user") {
-      cur = { prompt: text, response: "", model: null, usage: null, usageCalls: 0, cost: 0, apiCalls: 0, toolCalls: tools, ts: m.ts, endTs: m.ts };
+      cur = {
+        prompt: text, response: "", model: null, usage: null, usageCalls: 0, cost: 0,
+        apiCalls: 0, toolCalls: tools, ts: m.ts, endTs: m.ts,
+        ctxPeak: 0, requestProvider: null, requestModel: null,
+        subagentCalls: 0, spawnedAgents: new Set(),
+      };
       turns.push(cur);
     } else if (role === "assistant" && cur) {
       cur.response += text;
       cur.toolCalls += tools;
       cur.apiCalls++;
+      cur.subagentCalls += taskCalls(parts);
+      for (const child of taskChildren(parts)) cur.spawnedAgents.add(child);
       cur.endTs = m.ts || cur.endTs;
       cur.model = cur.model || cleanModel(modelOf(m.data));
       cur.cost += num(m.data && m.data.cost);
@@ -124,6 +297,15 @@ export async function buildTurns(ref, opts = {}) {
         cur.usage.reasoning += u.reasoning;
         cur.usage.cacheRead += u.cacheRead;
         cur.usage.cacheWrite += u.cacheWrite;
+      }
+      // The real peak context is the largest single request in the turn.
+      for (const r of messageRequests(m.data, parts)) {
+        const ctx = r.input + r.cacheRead;
+        if (ctx > cur.ctxPeak || cur.requestProvider === null) {
+          if (ctx > cur.ctxPeak) cur.ctxPeak = ctx;
+          cur.requestProvider = providerOf(m.data) || cur.requestProvider;
+          cur.requestModel = cleanModel(modelOf(m.data)) || cur.requestModel;
+        }
       }
     }
   }
@@ -141,18 +323,23 @@ export async function buildTurns(ref, opts = {}) {
           usage: t.usage || { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
           cost: t.cost,
           apiCalls: t.apiCalls,
+          subagentCalls: t.subagentCalls,
           toolCalls: t.toolCalls,
+          spawnedAgents: [...t.spawnedAgents],
+          requestProvider: t.requestProvider || modelProvider(session && session.model),
+          requestModel: t.requestModel || sessionModel,
+          ctxPeak: t.ctxPeak,
           ts: t.ts,
           endTs: t.endTs,
         },
-        { sessionId, sessionName, cwd, index: i },
+        { sessionId, sessionName, hierarchy, cwd, index: i },
       ),
     );
   }
 
   // Any missing assistant usage makes per-turn accounting incomplete. Do not
   // invent an allocation: emit one authoritative session rollup instead.
-  return [sessionRecord(session, inputs, { sessionId, sessionName, cwd })];
+  return [sessionRecord(session, messages, partsByMsg, inputs, { sessionId, sessionName, hierarchy, cwd })];
 }
 
 const promptFor = (inputs, i) => (inputs[i] && inputs[i].prompt) || (inputs[0] && inputs[0].prompt) || "";
@@ -170,8 +357,8 @@ function finalizeTurn(t, ctx) {
     webSearch: 0,
     webFetch: 0,
   };
-  const ctxTokens = usage.input + usage.cacheRead;
-  const ctxMax = contextMax(t.model);
+  const ctxTokens = t.ctxPeak;
+  const ctxMax = contextMax(t.requestProvider, t.requestModel);
   const total = num(t.cost);
   const ts = isoOrNull(t.ts);
   const endTs = isoOrNull(t.endTs) || ts;
@@ -179,6 +366,7 @@ function finalizeTurn(t, ctx) {
     id: `${ctx.sessionId}:${ctx.index}`,
     sessionId: ctx.sessionId,
     sessionName: ctx.sessionName,
+    hierarchy: ctx.hierarchy,
     cwd: ctx.cwd,
     model: t.model || null,
     prompt: t.prompt || "",
@@ -190,11 +378,12 @@ function finalizeTurn(t, ctx) {
     ctxTokens,
     ctxMax,
     cost: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total, source: "provider" },
-    counts: { apiCalls: t.apiCalls, subagentCalls: 0, toolCalls: t.toolCalls, thinkingBlocks: 0 },
+    counts: { apiCalls: t.apiCalls, subagentCalls: t.subagentCalls, toolCalls: t.toolCalls, thinkingBlocks: 0 },
+    spawnedAgents: t.spawnedAgents && t.spawnedAgents.length ? [...t.spawnedAgents] : null,
   });
 }
 
-function sessionRecord(session, inputs, ctx) {
+function sessionRecord(session, messages, partsByMsg, inputs, ctx) {
   const s = session || {};
   const usage = {
     input: num(s.tokens_input),
@@ -207,25 +396,30 @@ function sessionRecord(session, inputs, ctx) {
     webSearch: 0,
     webFetch: 0,
   };
-  const ctxTokens = usage.input + usage.cacheRead;
+  const peak = peakContext(messages, partsByMsg);
+  const ctxTokens = peak ? peak.ctx : null;
+  const ctxMax = peak
+    ? contextMax(peak.provider || modelProvider(s.model), peak.model || cleanModel(s.model))
+    : null;
   const ts = isoOrNull(s.time_created);
   const endTs = isoOrNull(s.time_updated) || ts;
   return record({
     id: `${ctx.sessionId}:0`,
     sessionId: ctx.sessionId,
     sessionName: ctx.sessionName,
+    hierarchy: ctx.hierarchy,
     cwd: ctx.cwd,
     model: cleanModel(s.model),
-    prompt: (inputs[0] && inputs[0].prompt) || s.title || "",
+    prompt: firstUserPrompt(messages, partsByMsg, inputs) || s.title || "",
     response: "",
     ts,
     endTs,
     durationMs: ts && endTs ? Math.max(0, Date.parse(endTs) - Date.parse(ts)) : 0,
     usage,
     ctxTokens,
-    ctxMax: contextMax(cleanModel(s.model)),
+    ctxMax,
     cost: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total: num(s.cost), source: "provider" },
-    counts: { apiCalls: 0, subagentCalls: 0, toolCalls: 0, thinkingBlocks: 0 },
+    counts: sessionCounts(messages, partsByMsg),
     quality: "session-rollup",
   });
 }
@@ -238,6 +432,8 @@ function record(r) {
     sessionId: r.sessionId,
     sessionName: r.sessionName,
     sessionTitle: null,
+    ...(r.hierarchy && r.hierarchy.parentSessionId ? { parentSessionId: r.hierarchy.parentSessionId, agent: r.hierarchy.agent } : {}),
+    ...(r.spawnedAgents && r.spawnedAgents.length ? { spawnedAgents: r.spawnedAgents } : {}),
     cwd: r.cwd,
     slug: null,
     gitBranch: null,
@@ -260,7 +456,9 @@ function record(r) {
     usage: r.usage,
     contextTokens: r.ctxTokens,
     contextMax: r.ctxMax,
-    contextFillPct: r.ctxMax ? Math.round((r.ctxTokens / r.ctxMax) * 1000) / 10 : 0,
+    contextFillPct: r.ctxTokens != null && r.ctxMax
+      ? Math.round((r.ctxTokens / r.ctxMax) * 1000) / 10
+      : null,
     counts: r.counts,
     cost: r.cost,
     ...(r.quality ? { quality: r.quality } : {}),

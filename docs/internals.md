@@ -303,6 +303,24 @@ session's messages into per-prompt turns, and reads exact tokens and cost straig
 database. If per-message accounting is incomplete it falls back to OpenCode's authoritative
 per-session rollup rather than inventing zeros for the missing turns.
 
+One assistant message can cover several model requests, each ending in a `step-finish` part
+with its own token breakdown. Usage and cost are summed across the turn, but **context fill
+uses the largest single request**, not the sum, and the turn's window comes from OpenCode's
+cached model catalogue (`<XDG_CACHE_HOME|~/.cache>/opencode/models.json`), keyed by
+provider + model id; a model that catalogue cannot size stores `null` `contextMax` and
+`contextFillPct`, never a `0` that reads like a real measurement.
+
+A subagent OpenCode spawns is a child session whose `parent_id` names the parent. Every turn
+of such a session carries `parentSessionId` and `agent` (kind subagent, nickname from the
+session's agent field, depth counting the parent chain). In the parent session, the turn whose
+`task` tool call launched the child carries `spawnedAgents`, which is how the dashboard nests
+the child under the turn that launched it; the child's own numbers are left exactly as
+recorded. Sessions OpenCode never names keep `sessionName` `null` so the UI falls back to the
+session id — the placeholder titles "New session - <ts>" and "Child session - <ts>" are not
+shown as names. When a session is cut off mid-turn (its run is still live or crashed before
+writing a final response), the whole session becomes one `session-rollup` row that still fills
+in the counts and the first user prompt so the run is not silently empty.
+
 **Cline / Roo Code / Kilo Code** — one lineage sharing one on-disk format, so
 [`src/providers/clinefamily/`](../src/providers/clinefamily/) covers all three. Tokens and
 cost come from each task's `api_req_started` entries in `ui_messages.json`; the model and
@@ -684,6 +702,12 @@ for the whole pool.
   their numbers stay as recorded.
 - **Cursor multi-root workspaces** are not resolved; only `workspace.json`'s single
   `folder` is read.
+- **OpenCode model catalogue ages until the process re-indexes.** The context window comes from
+  `opencode/models.json`, read once per path per parse run, so a model installed after the run
+  began is sized by name heuristics or left `null` until the next run picks the file up.
+- **An OpenCode run that is still live cannot separate turns.** A session cut off mid-response
+  becomes one `session-rollup` row holding the running totals, so a live or crashed run is not
+  split into guessed turns.
 
 The `package.json` files allowlist ships `install.mjs`, `src/`, `viewer/`, `README.md`, and
 `docs/` (plus npm's package metadata and license). The packaging regression runs

@@ -208,6 +208,36 @@ test("viewer tree keeps branches, child sessions and runs attached without count
   assert.equal((ui.html().match(/class="run-row"/g) || []).length, 2, "run expansion survives grouping toggle");
 });
 
+test("viewer nests an opencode subagent session under its parent and its spawning turn", () => {
+  const parent = {
+    provider: "opencode", sessionId: "op", id: "op:0", ts: "2026-08-11T09:00:00.000Z",
+    prompt: "map the schema", promptChars: 15, response: "done", responseChars: 4,
+    model: "union-alpha", usage: { input: 4, output: 1 }, cost: { total: 2, source: "provider" },
+    sessionName: "Schema map", spawnedAgents: ["oc"],
+  };
+  const child = {
+    provider: "opencode", sessionId: "oc", id: "oc:0", ts: "2026-08-11T09:01:00.000Z",
+    prompt: "read the tables", promptChars: 14, response: "ok", responseChars: 2,
+    model: "union-alpha", usage: { input: 1, output: 1 }, cost: { total: 0.5, source: "provider" },
+    parentSessionId: "op", agent: { kind: "subagent", nickname: "Mapper", path: null, depth: 1 },
+  };
+  const ui = viewerUi([parent, child]);
+  ui.run("renderTable()");
+  // Sessions start open: the child nests inside the parent's group rather than floating as its own.
+  assert.equal((ui.html().match(/class="group"/g) || []).length, 1, "one group, child nests");
+  assert.equal(ui.run("state.view.length"), 2, "event totals still see both sessions");
+  ui.run("state.expanded = records.map((e) => turnTreeKey(e)); renderTable()");
+  const html = ui.html();
+  assert.match(html, /subagent · Mapper/);
+  assert.ok(html.indexOf('data-session="op"') < html.indexOf("subagent · Mapper"), "child header follows spawning turn");
+  assert.match(html, /\+ agents \$0\.500/);
+  assert.match(html, /1 turns · \$2\.000/, "parent header excludes the child session cost");
+  ui.run("state.group = false; renderTable()");
+  assert.match(ui.html(), /↳ agent/, "ungrouped opencode child keeps its agent marker");
+  assert.match(ui.html(), /title="Context window unknown">—/, "an unknown window reads as unknown, not 0%");
+  assert.doesNotMatch(ui.html(), /<b class="mono">0%<\/b>/, "no 0% bar for an unmeasured turn");
+});
+
 test("viewer run cards subtract every own share, escape text, and tolerate omitted groups", () => {
   const e = { ...RECORDS[0], usage: { input: 100, output: 40, cacheCreate: 10, cacheRead: 20 }, cost: { total: 1 },
     subagents: [{ agentType: "<planner>", description: '<img src=x onerror="bad()">', background: true,

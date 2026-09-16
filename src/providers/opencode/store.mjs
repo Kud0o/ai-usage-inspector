@@ -127,6 +127,28 @@ export async function readSession(sessionId) {
   return result.value;
 }
 
+/** How many parent links a session's parent_id chain reaches back to a root. */
+export async function parentChainDepth(sessionId) {
+  const opened = await openROStatus(dbPath(), { schema: SESSION_SCAN_SCHEMA });
+  if (opened.status !== "ok") return 0;
+  const db = opened.db;
+  try {
+    let depth = 0;
+    let id = sessionId;
+    for (;;) {
+      const result = await queryGet(db, "SELECT parent_id FROM session WHERE id = ?", id);
+      if (result.status !== "ok" || !result.row) break;
+      const parentId = result.row.parent_id;
+      if (!parentId) break;
+      depth++;
+      id = parentId;
+    }
+    return depth;
+  } finally {
+    try { db.close(); } catch {}
+  }
+}
+
 /** OpenCode is "present" when its data dir (or db) exists. */
 export function detect() {
   try {

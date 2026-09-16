@@ -1211,7 +1211,7 @@ function rowHtml(e, depth = 0, children = false) {
     <td class="col-mode"><span class="tag ${esc(e.permissionMode)}">${esc(e.permissionMode)}</span></td>
     <td class="num col-in">${valueHtml(e.usage?.input, fmtTok)}</td>
     <td class="num col-out">${valueHtml(e.usage?.output, fmtTok)}</td>
-    <td class="num col-context">${ctxBar(e.contextFillPct)}</td>
+    <td class="num col-context">${typeof e.contextFillPct === "number" ? ctxBar(e.contextFillPct) : '<span class="muted" title="Context window unknown">—</span>'}</td>
     <td class="num cost-cell col-cost">${COST_ESTIMATED(e) ? `<span class="est-mark" title="${esc(estReason(e))}">≈</span>` : ""}${valueHtml(e.cost?.total, fmtUsd)}</td>
     <td class="prompt-cell col-prompt">${!state.group && e.parentSessionId ? '<span class="tag">↳ agent</span> ' : ""}${agents}${auto}${chip}${esc(e.promptPreview)}</td>
   </tr>`;
@@ -1258,7 +1258,7 @@ function renderTable() {
   for (const g of groups.values()) g.head = sessionHead(g.items);
   for (const g of groups.values()) {
     const e = g.head;
-    const sid = PROV(e) === "codex" ? e.parentSessionId : PROV(e) === "claude" ? e.branchOf : null;
+    const sid = (PROV(e) === "codex" || PROV(e) === "opencode") ? e.parentSessionId : PROV(e) === "claude" ? e.branchOf : null;
     const parent = sid && groups.get(sessionKey(e, sid));
     if (!parent) continue;
     // A malformed relationship must not hide an entire cycle of sessions.
@@ -1266,7 +1266,7 @@ function renderTable() {
     while (ancestor && ancestor !== g) ancestor = ancestor.parent;
     if (ancestor) continue;
     g.parent = parent;
-    g.childAgent = PROV(e) === "codex";
+    g.childAgent = PROV(e) === "codex" || PROV(e) === "opencode";
     g.turn = g.childAgent ? parent.items.find((row) => row.spawnedAgents?.includes(e.sessionId)) : null;
     parent.children.push(g);
   }
@@ -1274,7 +1274,7 @@ function renderTable() {
   const costTotal = (items) => items.some((e) => e.cost?.total == null) ? null : items.reduce((n, e) => n + e.cost.total, 0);
   const renderGroup = (g, depth = 0) => {
     const e = g.head, key = "session:" + g.key;
-    const child = PROV(e) === "codex" && e.parentSessionId;
+    const child = (PROV(e) === "codex" || PROV(e) === "opencode") && e.parentSessionId;
     const label = child ? `${esc(e.agent?.kind || "spawned")} · ${e.agent?.nickname ? esc(e.agent.nickname) : sessionLabel(e)}`
       : `${g.parent ? "branch · " : ""}${sessionLabel(e)}`;
     const orphan = !g.parent && (child || e.branchOf);

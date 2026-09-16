@@ -155,11 +155,21 @@ test("one aggregate directory spelled two ways settles one repair on Windows", {
 });
 
 // 2.6.0 changes where rows live and how branches and subagent runs count, so an
-// install that already repaired at the previous epoch owes one more full read.
+// install that already repaired at an earlier epoch still owes one more full read.
 test("an upgrade from an install repaired at an earlier epoch asks again", async (t) => {
   const file = tmpState(t);
-  fs.writeFileSync(file, JSON.stringify({ schema: 1, providers: {}, installedRepairEpoch: REPAIR_EPOCH - 1 }));
+  fs.writeFileSync(file, JSON.stringify({ schema: 1, providers: {}, installedRepairEpoch: REPAIR_EPOCH - 2 }));
   assert.equal(await recordInstall({ file, upgrading: true, providerIds: ["claude"] }), true);
   assert.equal(repairDue("claude", { file }), REPAIR_EPOCH);
   assert.ok(REPAIR_EPOCH >= 2);
+});
+
+// The epoch that rewrites OpenCode rows repairs only OpenCode's history: the
+// agents that settled the previous epoch are asked for nothing new.
+test("an upgrade from an install repaired at the previous epoch asks opencode only", async (t) => {
+  const file = tmpState(t);
+  fs.writeFileSync(file, JSON.stringify({ schema: 1, providers: {}, installedRepairEpoch: REPAIR_EPOCH - 1 }));
+  assert.equal(await recordInstall({ file, upgrading: true, providerIds: ["opencode", "claude", "codex", "cursor"] }), true);
+  assert.equal(repairDue("opencode", { file }), REPAIR_EPOCH);
+  for (const id of ["claude", "codex", "cursor"]) assert.equal(repairDue(id, { file }), null);
 });

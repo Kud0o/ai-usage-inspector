@@ -17,7 +17,13 @@ export const SCAN_STATUSES = new Set(["ok", "locked", "unsupported-schema", "mis
 // 3: Opus 5, Sonnet 5, Fable 5.1 and Mythos 5.1 measured against their 1M
 // windows, each subagent run's context measured on its own, and the costs those
 // models were given under wrong rates worked out again (2.8.0).
-export const REPAIR_EPOCH = 3;
+// 4: OpenCode rows rewritten the old way — summed context, 0 for an unknown
+// window, unlinked subagent sessions — are re-read (2.9.1).
+export const REPAIR_EPOCH = 4;
+
+// Which agents' stored rows each epoch's changes touch. Epochs before this map
+// existed touched every provider, so a missing entry repairs them all.
+const REPAIR_PROVIDERS_BY_EPOCH = Object.freeze({ 4: ["opencode"] });
 
 // A repair covers the rows one destination holds: each project's own files, or
 // the pooled copy in an aggregate AI_USAGE_DIR. Settling one says nothing about
@@ -193,10 +199,11 @@ export async function markRepaired(providerId, repairEpoch, { file = scanStatePa
 }
 
 /**
- * Note an install. Replacing an app older than REPAIR_EPOCH asks each agent found
- * here for one full read of its history. A fresh install owes nothing — no row
- * has been written the old way — and reading everything would import history the
- * user never asked for. Returns whether a repair was requested.
+ * Note an install. Replacing an app older than REPAIR_EPOCH asks each agent whose
+ * rows the crossed epochs touched for one full read of its history. A fresh
+ * install owes nothing — no row has been written the old way — and reading
+ * everything would import history the user never asked for. Returns whether a
+ * repair was requested.
  */
 export async function recordInstall({ upgrading = false, providerIds = [], file = scanStatePath() } = {}) {
   return mutateJson(file, (state) => {
@@ -204,11 +211,22 @@ export async function recordInstall({ upgrading = false, providerIds = [], file 
     next.schema = 1;
     next.providers = next.providers && typeof next.providers === "object" ? { ...next.providers } : {};
     const installed = Number(next.installedRepairEpoch) || 0;
-    const requested = Boolean(upgrading) && installed < REPAIR_EPOCH && providerIds.length > 0;
-    if (requested) {
+    let requested = false;
+    if (upgrading && installed < REPAIR_EPOCH && providerIds.length > 0) {
+      const owed = new Set();
+      for (let epoch = installed + 1; epoch <= REPAIR_EPOCH; epoch++) {
+        const providers = REPAIR_PROVIDERS_BY_EPOCH[epoch];
+        if (providers == null) {
+          for (const id of providerIds) owed.add(id);
+        } else {
+          for (const id of providers) owed.add(id);
+        }
+      }
       for (const id of providerIds) {
+        if (!owed.has(id)) continue;
         const previous = next.providers[id] && typeof next.providers[id] === "object" ? next.providers[id] : {};
         next.providers[id] = { ...previous, repairRequested: REPAIR_EPOCH };
+        requested = true;
       }
     }
     next.installedRepairEpoch = Math.max(installed, REPAIR_EPOCH);

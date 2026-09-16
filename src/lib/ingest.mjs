@@ -20,7 +20,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // filters moved past dropped, and a dashboard that names its store to sync.
 // 25: calendar chart explorer, stacked series, overview and accessible readouts.
 // 26: faster shared chart models, token small multiples, context peaks and saved chart preferences.
-export const VIEWER_VERSION = "26";
+// 27: opencode subagent sessions nest under their parent like codex's do.
+export const VIEWER_VERSION = "27";
 
 // A project gets viewer/ and nothing else — no src/ tree beside it — so the
 // modules the bundled dashboard imports are copied in next to it, under the
