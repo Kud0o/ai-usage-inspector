@@ -1,3 +1,4 @@
+import "../test-support/isolate.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -52,6 +53,34 @@ async function withDataDir(dir, fn) {
 
 const asst = (m, cost, tok) => ({ role: "assistant", modelID: m, cost, tokens: tok });
 const textPart = (mid, sid, ts, t) => ({ message_id: mid, session_id: sid, time_created: ts, data: { type: "text", text: t } });
+
+test("OpenCode titles name every turn and session rollup, with blank titles null", needsSqlite, async () => {
+  const titles = ["Synthetic session", "", "  ", null];
+  const sessions = titles.flatMap((title, i) => [true, false].map((perTurn) => ({
+    id: `name-${i}-${perTurn}`, directory: "K:/synthetic", model: "gpt-5", title, cost: 0.03,
+    tokens_input: 30, tokens_output: 3, tokens_reasoning: 0, tokens_cache_read: 0, tokens_cache_write: 0,
+    time_created: 1_700_000_000_000, time_updated: 1_700_000_001_000,
+  })));
+  const messages = sessions.filter((s) => s.id.endsWith("true")).flatMap((s) => [1, 2].flatMap((n) => [
+    { id: `${s.id}-u${n}`, session_id: s.id, time_created: s.time_created + n * 10, data: { role: "user" } },
+    { id: `${s.id}-a${n}`, session_id: s.id, time_created: s.time_created + n * 10 + 1, data: asst("gpt-5", 0.01, { input: 10, output: 1 }) },
+  ]));
+  const dir = makeDb({ sessions, messages });
+  try {
+    await withDataDir(dir, async (m) => {
+      for (const session of sessions) {
+        const turns = await m.buildTurns({ sessionId: session.id });
+        assert.equal(turns.length, session.id.endsWith("true") ? 2 : 1);
+        for (const turn of turns) {
+          assert.equal(turn.sessionName, session.title?.trim() ? session.title : null);
+          assert.equal(turn.sessionTitle, null);
+        }
+      }
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("OpenCode parses per-message turns with exact tokens and cost", needsSqlite, async () => {
   const t0 = Date.parse("2026-07-23T10:00:00Z");

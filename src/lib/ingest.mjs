@@ -12,7 +12,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Bump when the bundled viewer changes so existing projects refresh their copy
 // on the next prompt (after the user re-installs the app via npx).
-export const VIEWER_VERSION = "19";
+export const VIEWER_VERSION = "20";
 
 // The file a user double-clicks to see their dashboard, so nobody has to open a
 // terminal and remember a path. It is deliberately thin: it only runs
@@ -85,6 +85,13 @@ function ensureBundle(cwd) {
     }
     const cfgFile = path.join(base, "config.json");
     fs.mkdirSync(base, { recursive: true });
+    // Usage records carry prompt and response text. A folder that ignores itself
+    // stays out of `git add -A` in any repository it lands in. An ignore file that
+    // is already there is the user's decision and is left as it is.
+    const ignoreFile = path.join(base, ".gitignore");
+    if (!fs.existsSync(ignoreFile)) {
+      fs.writeFileSync(ignoreFile, "# Written by AI Usage Inspector: keeps usage records, prompts included, out of git.\n*\n");
+    }
     let cfg = {};
     try { cfg = JSON.parse(fs.readFileSync(cfgFile, "utf8")) || {}; } catch {}
     let changed = false;
@@ -95,29 +102,61 @@ function ensureBundle(cwd) {
   } catch {}
 }
 
-// Shared tail: tag, field-select, upsert, bundle. Returns turns written.
-async function storeTurns(turns, cwd, cfg, sessionId, precondition = null, transcriptId = null) {
-  const label = workspaceLabel(cwd);
-  for (const t of turns) t.workspace = label;
+const isDirectory = (p) => {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+};
 
+/**
+ * The folder a session's rows belong to: the one it started in.
+ *
+ * A hook reports wherever the agent is when a turn ends, and Claude Code moves a
+ * desktop session into any project subfolder its own commands `cd` into. Stored
+ * under that folder, a whole session was copied into the subfolder beside the
+ * original. The first turn names where the session began, which is also what a
+ * sweep uses, so the two paths agree. A start folder that no longer exists gives
+ * way to the next folder a turn names, then to the caller's, so a project that
+ * moved keeps recording. With no folder left, the session is stale history.
+ */
+function homeFolder(group, fallback) {
+  const own = group.filter((t) => t.copied !== true);
+  const named = (own.length ? own : group).map((t) => t.cwd).filter((c) => typeof c === "string" && c);
+  // Aggregate mode creates nothing in the project, so a folder need not exist.
+  if (process.env.AI_USAGE_DIR) return named[0] || fallback || null;
+  return named.find(isDirectory) || (fallback && isDirectory(fallback) ? fallback : null);
+}
+
+// Shared tail: group, place, field-select, upsert, bundle. Returns turns written.
+async function storeTurns(turns, fallbackCwd, sessionId, precondition = null, transcriptId = null) {
   // One transcript can hold turns of more than one session, and each session is
   // replaced on its own: written under the first, the others were appended beside
   // their earlier copies on every re-read. A turn that names no session belongs
   // to the one the caller identified.
-  const fallback = sessionId || (turns[0] && turns[0].sessionId);
+  const fallbackSession = sessionId || (turns[0] && turns[0].sessionId);
   const sessions = new Map();
   for (const t of turns) {
-    const sid = t.sessionId || fallback;
+    const sid = t.sessionId || fallbackSession;
     if (!sid) continue;
     if (!sessions.has(sid)) sessions.set(sid, []);
     sessions.get(sid).push(t);
   }
-  if (!sessions.size) return 0;
 
   let written = 0;
+  const configs = new Map();
+  const homes = new Set();
   for (const [sid, group] of sessions) {
-    const slim = group.map((t) => applyFieldSelection(t, cfg.fields));
-    const n = await upsertSession(workspaceFile(cwd), sid, slim, {
+    const home = homeFolder(group, fallbackCwd);
+    if (!home) continue;
+    // Per-project tracking config gates the project the rows go to.
+    if (!configs.has(home)) configs.set(home, await ensureProjectConfig(home));
+    const cfg = configs.get(home);
+    if (!isEnabled(cfg)) continue;
+    const workspace = workspaceLabel(home);
+    const slim = group.map((t) => applyFieldSelection({ ...t, workspace }, cfg.fields));
+    const n = await upsertSession(workspaceFile(home), sid, slim, {
       precondition,
       // A field turned off stops new recording; it does not erase what is stored.
       preserveFields: (r, prior) => preserveStoredFields(r, prior, cfg.fields),
@@ -130,8 +169,9 @@ async function storeTurns(turns, cwd, cfg, sessionId, precondition = null, trans
       throw err;
     }
     written += n;
+    homes.add(home);
   }
-  ensureBundle(cwd);
+  for (const home of homes) ensureBundle(home);
   return written;
 }
 
@@ -143,14 +183,7 @@ export async function ingest(provider, raw) {
   const { sessionId, cwd, transcriptPath, opts } = provider.normalizePayload(raw);
   if (!transcriptPath || !cwd) return 0;
 
-  // Hook path: cwd is known up front, so gate on config before parsing.
-  const cfg = await ensureProjectConfig(cwd);
-  if (!isEnabled(cfg)) return 0;
-
-  // await: some providers' parsers are async (cursor reads SQLite).
-  const turns = await provider.buildTurns(transcriptPath, opts || {});
-  if (!turns.length) return 0;
-  return storeTurns(turns, cwd, cfg, sessionId, null, transcriptIdOf(provider, transcriptPath));
+  return ingestTranscript(provider, { transcriptPath, cwd, sessionId, opts });
 }
 
 /**
@@ -165,7 +198,11 @@ function transcriptStamp(provider, transcriptPath) {
   if (provider && typeof provider.stampTranscript === "function") {
     try {
       return provider.stampTranscript(transcriptPath);
-    } catch {
+    } catch (err) {
+      if (provider.id === "claude") {
+        err.scanStatus = "locked";
+        throw err;
+      }
       return null;
     }
   }
@@ -208,32 +245,21 @@ export async function ingestTranscript(provider, { transcriptPath, cwd, sessionI
   // pass: the scan mark does not advance, so the next sweep re-reads it whole.
   const before = transcriptStamp(provider, transcriptPath);
   const turns = await provider.buildTurns(transcriptPath, opts || {});
-  if (!turns.length) return 0;
   if (before !== null && transcriptStamp(provider, transcriptPath) !== before) {
     const err = new Error("transcript changed while being parsed");
     err.scanStatus = "locked";
     err.transcriptMoved = true;
     throw err;
   }
+  if (!turns.length) return 0;
 
-  const effCwd = cwd || turns[0].cwd;
-  if (!effCwd) return 0;
-  // Skip projects whose directory no longer exists (stale history) — except in
-  // aggregate mode, where records pool centrally and no folder is created in cwd.
-  if (!process.env.AI_USAGE_DIR) {
-    try {
-      if (!fs.statSync(effCwd).isDirectory()) return 0;
-    } catch {
-      return 0;
-    }
-  }
-
-  const cfg = await ensureProjectConfig(effCwd);
-  if (!isEnabled(cfg)) return 0;
+  // Rows go where each session started. A session none of whose folders still
+  // exists is stale history and is skipped, except in aggregate mode, where
+  // records pool centrally and nothing is created in the project.
   // Checked again under the write lock: config work and the lock queue both take
   // time, and the agent may have appended a turn in the meantime.
   return storeTurns(
-    turns, effCwd, cfg, sessionId,
+    turns, cwd || null, sessionId,
     () => before === null || transcriptStamp(provider, transcriptPath) === before,
     transcriptIdOf(provider, transcriptPath),
   );

@@ -88,6 +88,41 @@ position-based id identifies which stored row a continuation replaces, but block
 on nothing — it may have been another turn's — so a continuation turn deleted before its id was
 qualified can reappear once; deleting it again sticks.
 
+A session's rows belong to the folder it started in: the first folder its own turns name that still
+exists. Turns marked `copied: true` are ignored unless every turn in the session is copied.
+A hook reports wherever the agent is when a turn ends, and Claude Code moves a desktop
+session into any project subfolder its own commands `cd` into, so storing under the hook's folder
+copied whole sessions into subfolders beside the original. The sweep already used the first turn's
+folder, so the hook and the sweep now agree. The hook's folder is used only when no folder a turn
+names still exists, so a project that moved keeps recording.
+
+`/branch` and `--fork-session` copy earlier turns into a new Claude session and keep each message's
+uuid, so a branch's transcript holds turns its original already stored. The holder with the most
+tokens keeps the turn, with the original winning ties; branch labels still follow the session
+arbitration. Each new Claude row persists `transcriptFirstTs`, the first timestamped entry in
+its source transcript. `firstEntryDirection` uses the earliest known source stamp across each
+session's rows, including already stored continuation files; a later file's opening is not treated
+as the session's birth. Both sides need evidence, the stamps must differ, and the earlier source
+must reach back to the shared turn. This settles direction even inside the old 60-second window.
+`branchResolution` is `resolved` only with that evidence, otherwise `unresolved`.
+
+Without that evidence (including 2.5.0 rows), the previous rules remain: a prompt more than a
+minute older than the source's first entry is marked `copied`; a mark on only one side settles
+it. Where the marks agree and only one side has been read by this version, that side keeps the
+turn: rows an older version wrote name no first entry, and a batch skipped on timing alone is
+never written, so a later pass of the same repair could not put it back. Otherwise compare own
+turns before the shared history, then continuation timing, with a session holding only shared
+turns preferred. Normal ingestion retains the stored holder on a
+heuristic tie. Cleanup sorts session IDs before arbitration, uses a lexical final tie-break for
+ownership and equally recent parent labels, and breaks home-folder timestamp ties by normalized
+path, so discovery order cannot reverse removal decisions. An incoming copy is skipped only if
+a stored holder has at
+least as many tokens; an original takes a turn back only if its incoming row has at least as many.
+Otherwise the richer stored row stays and the incoming row is dropped, while `branchOf` still
+follows arbitration. Token totals use the sum of numeric usage fields, including subagent work.
+A turn deleted under the original does not come back through a branch. Only a message uuid can be a
+copy: other ids are built from the session and cannot collide, and other providers are left alone.
+
 ## Scan windows
 
 Scan-based providers (Cursor, OpenCode) do not rescan a fixed window. Each keeps a durable
@@ -106,6 +141,45 @@ save transcripts that moved while being read, which belong to a live session its
 again. `sync.mjs` honours the same repair, so machines that never sweep (`--local`,
 `autoSweep: false`) settle it the first time the dashboard starts. A repair is settled per
 destination: a pass into an aggregate `AI_USAGE_DIR` does not count for the rows each project holds.
+
+Before either `worker.rescan` or `sync` ingests an owed Claude repair, it discovers candidate stores
+and backs up those containing Claude rows under their file locks. A failed backup ingests nothing
+and leaves the repair owed. This preserves the rows that the repair read itself can replace.
+
+After ingestion, cleanup removes what older versions stored twice
+([`src/lib/copies.mjs`](../src/lib/copies.mjs)). Only Claude rows are eligible. Cross-folder removal
+requires the same key in the session's home store with at least as many tokens; a richer copy is
+kept and counted in `keptRicher`. Branch collapse is planned over all candidate stores together,
+using `planCollapseCopies`, and retains the richest holder, with the original winning ties.
+`collapseCopies` retains its existing `{ records, removed }` API.
+
+Cleanup acquires every candidate usage and tombstone lock in sorted order before the first
+mutation. A timeout aborts without removing any rows. Explicit sync takes the same provider
+scan lease as the worker and releases only its own lease in `finally`; a refused lease skips
+discovery, repair, and cleanup. The deterministic arbitration is an independent defence.
+
+Before dropping a branch row, cleanup backs it up and records a durable tombstone with
+`reason: "copy"`. It blocks only that provider/session/turn key. Unlike user-deletion tombstones,
+it does not suppress the UUID in other sessions. Aggregate stores share one tombstone file;
+project stores keep their own. We chose suppression over cross-store lookups on every ingest:
+a temporary missing or inaccessible owner must not silently recreate double counting. The cost
+is deliberate recovery if the surviving store is later deleted: restore its backup, or remove
+the losing key's copy tombstone and re-import. Keep the suppression file when removing empty
+usage files. Backups include pre-existing tombstone bytes before they change.
+
+Each file's mutation re-reads the potential holders under that file's lock. Snapshot evidence
+cannot authorize a deletion: a row may go only while a freshly read survivor holds at least as
+much work for the same turn. If evidence is missing, both rows stay. `mutateNdjson`'s
+`onBeforeWrite(currentText)` hook backs up the exact replacement bytes while still holding the lock.
+Backups live in `~/.ai-usage-inspector/backups/<timestamp>-<unique-id>/`; `manifest.json` is updated
+atomically after every backup and before changing its source, so interruption leaves every changed
+file identified. Pre-ingestion and cleanup snapshots share the repair's backup directory.
+
+The outcome is written to `~/.ai-usage-inspector/copy-cleanup.json`. `emptyStores` and sync's
+guidance name only an emptied **`.ai-usage` directory**, or the aggregate file in `AI_USAGE_DIR`
+mode. The store holds no rows and that usage directory or aggregate file can be deleted; the
+project directory is never offered for deletion. Cleanup deletes no directories. A failed cleanup
+leaves the repair owed.
 
 ## Sweeping for hookless work
 
@@ -153,6 +227,17 @@ question can be answered without a window. Only Claude and Codex hand over a fil
 Cursor, OpenCode and the Cline family pass an opaque reference into their own store and supply their
 own `stampTranscript()`, so the guard is not silently inert for them.
 
+Claude now supplies `stampTranscript()` too. Its snapshot covers the parent, the sorted subagent
+file membership, each `.jsonl`, and each `.meta.json` sidecar, by size and mtime.
+Discovery compares the newest dependency or directory mtime, so background completion, sidecar
+updates, and removals can rediscover an unchanged parent. A dependency that cannot even be
+stat-ed is returned for ingest to fail and retry. One that stats but cannot be read fails where
+it is read — the parse throws, the scan reports failure, and its watermark stays behind it — so a
+partial parse is never certified either way. Hook ingestion uses the same guarded path. The
+snapshot deliberately does not hash file contents: a sweep stamps every transcript on the machine,
+and reading hundreds of megabytes of history to learn that nothing changed costs more than the
+scan it guards.
+
 A scan claim carries an owner token. Without one, any result could release whichever lease happened
 to be held — including a scan that overran its own lease and returned after another worker took it.
 
@@ -172,12 +257,15 @@ unchanged, in either direction, and still refuses a different amount — that is
 | Reality of the transcript | Handling |
 |---|---|
 | One assistant message spans many streamed lines sharing `message.id` | Dedupe by id; keep the final usage |
-| Subagents live in separate `.../<session>/subagents/*.jsonl` files | Attribute to the parent prompt via `promptId` |
+| Each subagent run is its own `.../<session>/subagents/agent-<id>.jsonl`, beside `agent-<id>.meta.json` naming the tool call that launched it | The run belongs to the turn — or the run — whose message made that call, and is kept there as a tree with its own tokens, cost, model and time |
+| Runs written before sidecars existed carry only their prompt's `promptId`, and a slash command writes its command line, output and expanded prompt as entries of one prompt | Such a run goes to the last turn of its prompt that did any work, never to each of them |
 | Subagents may run a cheaper model | Price each message at its own model |
 | After `/compact`, earlier prompts are written again under the same uuid | A replayed uuid opens no turn, so the real turn keeps its tokens |
+| The session's name is a `custom-title` line written again as the session goes on; an unnamed session gets `ai-title` lines | The last of each per entry `sessionId` (falling back to the file's session) becomes that session's `sessionName` and `sessionTitle` |
 
-`counts.subagentCalls` is the number of subagent *files* (one per Task invocation), not a
-flattened count of their assistant messages.
+A turn's `usage` and `cost` include every run beneath it, counted once, while each run in its
+`subagents` array carries its own share, its children excluded. `counts.subagentCalls` is the number
+of runs in the tree, not a flattened count of their assistant messages.
 
 **OpenAI Codex** — rollout files carry cumulative token totals.
 [`src/providers/codex/transcript.mjs`](../src/providers/codex/transcript.mjs) segments the
@@ -190,6 +278,15 @@ which rows. Its turns count from zero again, so in that file an id built from a 
 fallback, or Codex's own `rollout-N` — is qualified with the rollout id and keeps the old one as
 `legacyId`. Codex's UUID turn ids are unique on their own and never change. Rollouts Codex has
 moved to `archived_sessions` are read as well.
+
+An agent Codex spawns, and a guardian thread, is its own thread with its own rollout, whose
+`session_meta` names its `parent_thread_id`. Every turn of such a thread carries `parentSessionId`
+and `agent` (`kind` spawned or guardian, nickname, path, role, depth). In the parent's rollout the
+`spawn_agent` call completes with an `item_completed` record whose `SubAgentActivity` item names the
+child in `agent_thread_id`; the turn it completed in carries `spawnedAgents`, which is how the
+dashboard nests the child under the turn that launched it. The child's numbers are left exactly as
+recorded. A thread's name comes from Codex's `session_index.jsonl`, the latest entry for it winning.
+OpenCode's session title and Cursor's composer name become `sessionName` the same way.
 
 **Cursor** — the stop hook is only a trigger.
 [`src/providers/cursor/`](../src/providers/cursor/) scans Cursor's local SQLite stores
@@ -241,9 +338,13 @@ A **global defaults template** lives at `~/.ai-usage-inspector/config.json`
   `config.json` governs the pool, with global defaults filling only fields it does not set.
 
 **Field groups** are `text` (prompt/response), `tokens`, `cost`, `context`, `timing`
-(duration + first-response latency), `skills`, `counts`, and `meta` (git branch, cli
-version, slug, tier, effort). A disabled group is **stripped before writing**; already
-stored data is left as-is, and `text` off keeps the character counts but drops the text.
+(duration + first-response latency), `skills`, `counts`, `subagents` (the run tree), and
+`meta` (git branch, cli version, slug, tier, effort, session names). A disabled group is
+**stripped before writing**; already stored data is left as-is, and `text` off keeps the
+character counts but drops the text.
+Turning `text`, `tokens`, `cost`, `timing` or `counts` off also strips each run's description,
+usage, cost, duration or counts, respectively, recursively. On re-read, existing disabled fields
+are restored by `agentId`, as they are for the turn itself.
 
 The viewer adapts: cards, charts, table columns, drawer rows and filters for a disabled or
 absent field group do not render.
@@ -270,6 +371,25 @@ turns recorded after the cache last updated. The hook path reads the cache local
 never makes a network call. New models are picked up automatically; their context window
 falls back to a default until the built-in table is updated.
 
+When unchanged turn usage preserves a computed cost, each run with unchanged usage also keeps
+its computed cost, matched recursively by `agentId`. A new or changed run keeps its fresh cost;
+when the turn cost is recomputed, all runs keep their fresh costs. The viewer clamps the displayed
+main-thread share at zero for older inconsistent data.
+
+## Viewer expansion state
+
+`state.expanded` stores keys toggled away from their defaults: sessions start open; turns and
+runs start closed. Clicking flips membership, never appends a duplicate. Persistence removes keys
+that match no session, turn or run in the current view and retains at most 500 distinct keys.
+Descendant keys remain valid while their ancestors are collapsed.
+
+## Test isolation
+
+Every test file imports `test-support/isolate.mjs` before application modules. It isolates home,
+application-data and scan-state locations, clears `AI_USAGE_DIR` during tests, and restores saved
+environment values. Rollout tests use a temporary `CODEX_HOME`; the transcript parser reads that
+setting at call time. No shipped module imports this helper.
+
 ## Dashboard API
 
 The viewer is a small HTTP service, so the data is scriptable without the UI:
@@ -278,7 +398,7 @@ The viewer is a small HTTP service, so the data is scriptable without the UI:
 |---|---|
 | `GET /api/status` | process identity: `app`, launcher `nonce`, `dataDir`, and connected-client count |
 | `GET /api/events` | every record as list items (280-char previews, no full text) |
-| `GET /api/search?q=` | full-text match over the stored prompt/response; returns matching record keys |
+| `GET /api/search?q=` | full-text match over stored prompts/responses, session names, agent nicknames, and subagent run types and descriptions; returns matching record keys |
 | `POST /api/export` | `{keys:[...]}` -> the complete records, prompt and response included |
 | `GET /api/event/:id?provider=&session=` | one full record; provider and session pick the right one when an id repeats across sessions |
 | `GET /api/stream` | server-sent events; emits `change` when the data dir is written |
@@ -293,6 +413,7 @@ src/worker.mjs             detached spool consumer: parse, scan, write, retry
 src/sync.mjs               backfill/sync existing provider history
 src/lib/ingest.mjs         provider-neutral flow: normalize -> buildTurns -> upsert -> bundle
 src/lib/store.mjs          owner-token locks, atomic upsert, tombstones, cost preservation
+src/lib/copies.mjs         one-time removal of turns stored twice, backed up first
 src/lib/scan-state.mjs     per-provider scan high-water marks + scan health
 src/lib/config.mjs         tracking/field config (copied into each project bundle)
 src/lib/paths.mjs          data dir / cwd-encoding helpers
@@ -311,6 +432,7 @@ test/                      regression tests for every provider, store, spool, AP
 
 ```sh
 npm test      # Node's built-in runner, no dependencies
+node test-support/review2-mutations.mjs  # reversible rule mutations + SHA-256 restoration check
 ```
 
 ## Opening it without a terminal
@@ -413,15 +535,34 @@ for the whole pool.
 
 ## Known limits
 
+- **A session spanning sources can span stores.** Home selection is per parsed source, not a
+  durable session-wide registry. Codex now prefers `session_meta.cwd` over the hook fallback,
+  but continuation rollouts with different recorded folders can still place one session in
+  multiple project stores. The broader one-home-across-all-sources change is intentionally deferred.
+- **Branch direction can remain unresolved.** Missing/equal first-entry stamps, or continuation-only
+  sources starting after the shared history, use the previous timing heuristic and retain
+  `branchResolution: "unresolved"`. Old rows are not treated as proof of session birth.
+- **Copy suppression outlives its owner.** Deleting the surviving store does not resurrect a
+  branch copy. Recovery requires restoring the owner or explicitly clearing its losing copy
+  tombstone and re-importing. Removing an empty project's entire `.ai-usage` folder also removes
+  that folder's tombstones and permits re-import; retain `tombstones.json` to retain suppression.
+
 - **`encCwd` collisions.** In aggregate mode a project's filename is its path with
   separators flattened to `-`, so `/a-b/c` and `/a/b-c` collide. Rare, and pinned by a test
   so any fix has to be deliberate.
-- **Claude `effortLevel`** is read from `settings.json` at capture time, so a rebuilt turn
-  gets today's setting rather than the one it ran under. Sync passes none at all.
+- **Claude `effortLevel`** is read from `settings.json` when a hook captures a turn, so a
+  rebuilt turn gets the setting current at that hook rather than the one it ran under.
+  A sweep reads no setting and keeps what the hook recorded.
 - **Codex subagent threads repeat inherited history.** A child thread's rollout holds records
   below `subagent_history_start_ordinal` that Codex copies from its parent, and they are read as
   the child's own turns. Some are provably copies of the parent's turns, but most cannot be
   matched to anything the parent recorded, so nothing is skipped yet: dropping them could delete
-  usage recorded nowhere else.
+  usage recorded nowhere else. The dashboard nests child threads under their parent while
+  their numbers stay as recorded.
 - **Cursor multi-root workspaces** are not resolved; only `workspace.json`'s single
   `folder` is read.
+
+The `package.json` files allowlist ships `install.mjs`, `src/`, `viewer/`, `README.md`, and
+`docs/` (plus npm's package metadata and license). The packaging regression runs
+`npm pack --dry-run --json` with isolated npm configuration/cache, verifies every runtime file,
+and rejects `test/` and `test-support/`.

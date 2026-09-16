@@ -12,7 +12,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { HOME, encCwd } from "../../lib/paths.mjs";
-import { buildTurns as buildClaudeTurns } from "./transcript.mjs";
+import { buildTurns as buildClaudeTurns, transcriptSnapshot } from "./transcript.mjs";
 import { applyRemoteRates } from "./pricing.mjs";
 import { refreshPricing as refreshRemote } from "./remote-pricing.mjs";
 
@@ -82,6 +82,10 @@ export function buildTurns(transcriptPath, opts = {}) {
   return buildClaudeTurns(transcriptPath, opts);
 }
 
+export function stampTranscript(transcriptPath) {
+  return transcriptSnapshot(transcriptPath).stamp;
+}
+
 /** Which transcript a batch came from, for the store: the session file's name. */
 export function transcriptId(transcriptPath) {
   return typeof transcriptPath === "string" ? path.basename(transcriptPath, ".jsonl") || null : null;
@@ -116,8 +120,12 @@ export function discoverTranscripts({ sinceMs = 0 } = {}) {
       if (!f.isFile() || !f.name.endsWith(".jsonl")) continue;
       const fp = path.join(dir, f.name);
       try {
-        if (fs.statSync(fp).mtimeMs >= sinceMs) out.push({ transcriptPath: fp, opts: {} });
-      } catch {}
+        if (transcriptSnapshot(fp).mtimeMs >= sinceMs) out.push({ transcriptPath: fp, opts: {} });
+      } catch {
+        // Return unreadable parents too: ingest reports failure, keeping the
+        // scan watermark behind this dependency until it can be read.
+        out.push({ transcriptPath: fp, opts: {} });
+      }
     }
   }
   return out;

@@ -1,3 +1,4 @@
+import "../test-support/isolate.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -27,12 +28,26 @@ function sandbox(t) {
   fs.mkdirSync(project, { recursive: true });
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
 
-  const run = (args, cwd = project) =>
-    spawnSync(process.execPath, [INSTALLER, ...args], {
-      cwd,
-      encoding: "utf8",
-      env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
-    });
+  const run = (args, cwd = project) => {
+    const stdout = path.join(home, "install.stdout");
+    const stderr = path.join(home, "install.stderr");
+    // File descriptors also work where a Windows sandbox refuses synchronous pipes.
+    const out = fs.openSync(stdout, "w");
+    const err = fs.openSync(stderr, "w");
+    let result;
+    try {
+      result = spawnSync(process.execPath, [INSTALLER, ...args], {
+        cwd,
+        stdio: ["ignore", out, err],
+        env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
+      });
+    } finally {
+      fs.closeSync(out);
+      fs.closeSync(err);
+    }
+    assert.ifError(result.error);
+    return { ...result, stdout: fs.readFileSync(stdout, "utf8"), stderr: fs.readFileSync(stderr, "utf8") };
+  };
 
   return {
     home,

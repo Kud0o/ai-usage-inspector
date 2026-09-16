@@ -1,3 +1,4 @@
+import "../test-support/isolate.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -11,6 +12,143 @@ function writeJsonl(file, records) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, records.map((r) => JSON.stringify(r)).join("\n") + "\n");
 }
+
+function hierarchyRollout(meta = {}) {
+  const rec = (type, payload) => ({ timestamp: "2026-09-01T10:00:00.000Z", type, payload });
+  return [
+    rec("session_meta", { id: "synthetic-thread", model: "gpt-5", ...meta }),
+    ...[1, 2, 3].flatMap((n) => [
+      rec("event_msg", { type: "task_started", turn_id: `turn-${n}` }),
+      rec("event_msg", { type: "user_message", message: `synthetic prompt ${n}` }),
+      rec("event_msg", { type: "token_count", info: {
+        total_token_usage: { input_tokens: n * 1000, cached_input_tokens: n * 100, output_tokens: n * 20, reasoning_output_tokens: n * 5 },
+      } }),
+    ]),
+  ];
+}
+
+test("rollout names use the Codex home selected at parse time", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-codex-name-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  process.env.CODEX_HOME = dir;
+  writeJsonl(path.join(dir, "session_index.jsonl"), [{ id: "synthetic-thread", thread_name: "Isolated name", updated_at: "2026-09-01T12:00:00Z" }]);
+  const file = path.join(dir, "rollout.jsonl");
+  writeJsonl(file, hierarchyRollout());
+  assert.equal(buildTurns(file)[0].sessionName, "Isolated name");
+});
+
+test("Codex child hierarchy stamps every turn without changing inherited history or accounting", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-codex-hierarchy-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "rollout-test.jsonl");
+  writeJsonl(file, hierarchyRollout({ source: "cli" }));
+  const ordinary = buildTurns(file);
+  assert.equal(ordinary.length, 3);
+  assert.ok(ordinary[0].cost.total > 0);
+  for (const turn of ordinary) {
+    assert.equal(Object.hasOwn(turn, "parentSessionId"), false);
+    assert.equal(Object.hasOwn(turn, "agent"), false);
+  }
+  for (const [meta, parent, agent] of [
+    [{ parent_thread_id: "parent", source: { subagent: { thread_spawn: {
+      parent_thread_id: "parent", depth: 2, agent_path: "/root/nested", agent_nickname: "nested", agent_role: "reviewer",
+    } } }, agent_nickname: "top", agent_path: "/root/top", forked_from_id: "fork", subagent_history_start_ordinal: 7 },
+    "parent", { kind: "spawned", nickname: "top", path: "/root/top", role: "reviewer", depth: 2 }],
+    [{ source: { subagent: { thread_spawn: { parent_thread_id: "nested-parent", agent_nickname: "nested", agent_path: "/root/nested", depth: 0 } } } },
+    "nested-parent", { kind: "spawned", nickname: "nested", path: "/root/nested", role: null, depth: 0 }],
+    [{ parent_thread_id: "parent", source: { subagent: { other: "guardian" } } },
+    "parent", { kind: "guardian", nickname: null, path: null, role: null, depth: null }],
+  ]) {
+    const records = hierarchyRollout(meta);
+    writeJsonl(file, records);
+    const child = buildTurns(file);
+    assert.equal(child.length, 3, "inherited turns are retained");
+    for (const turn of child) {
+      assert.equal(turn.parentSessionId, parent);
+      assert.deepEqual(turn.agent, agent);
+    }
+    const { source, parent_thread_id, ...plainMeta } = records[0].payload;
+    writeJsonl(file, [{ ...records[0], payload: plainMeta }, ...records.slice(1)]);
+    const plain = buildTurns(file);
+    assert.deepEqual(child.map(({ parentSessionId, agent, ...turn }) => turn), plain,
+      "all existing fields, ids, usage, cost and rows stay identical");
+  }
+});
+
+test("Codex parent links unique children only on the turn where spawning completed", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-codex-spawn-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "rollout-test.jsonl");
+  const child = "00000000-0000-4000-8000-000000000001";
+  const second = "00000000-0000-4000-8000-000000000002";
+  const unrelated = "00000000-0000-4000-8000-000000000003";
+  const records = hierarchyRollout({ source: "exec" });
+  records.splice(4, 0, { type: "response_item", payload: {
+    type: "function_call", name: "spawn_agent", call_id: "spawn-1", arguments: '{"task_name":"synthetic"}',
+  } });
+  const completed = (id, agentId, kind = "started") => ({ type: "event_msg", payload: {
+    type: "item_completed", thread_id: "synthetic-thread", turn_id: "turn-2",
+    item: { type: "SubAgentActivity", id, kind, agent_thread_id: agentId, agent_path: "/root/synthetic" },
+  } });
+  records.splice(8, 0,
+    { type: "response_item", payload: { type: "function_call", name: "collaboration.spawn_agent", call_id: "spawn-2", arguments: '{}' } },
+    completed("spawn-1", child),
+    completed("spawn-2", second),
+    completed("spawn-1", child),
+    completed("unrelated", unrelated),
+    completed("spawn-1", unrelated, "completed"),
+    { type: "response_item", payload: { type: "function_call_output", call_id: "spawn-1", output: '{"task_name":"synthetic"}' } },
+  );
+  writeJsonl(file, records);
+  const turns = buildTurns(file);
+  assert.equal(turns.length, 3);
+  assert.equal(Object.hasOwn(turns[0], "spawnedAgents"), false);
+  assert.deepEqual(turns[1].spawnedAgents, [child, second]);
+  assert.equal(Object.hasOwn(turns[2], "spawnedAgents"), false);
+  writeJsonl(file, records.map((r) => r.type === "session_meta" ? { ...r, payload: { id: "synthetic-thread", model: "gpt-5" } } : r));
+  assert.deepEqual(buildTurns(file), turns, "source metadata does not change parent accounting");
+});
+
+test("Codex names use the newest index entry, later ties, and one read per parse", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-codex-names-"));
+  const saved = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  t.after(() => {
+    if (saved === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = saved;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  const parser = await import(`../src/providers/codex/transcript.mjs?names=${Date.now()}`);
+  const file = path.join(home, "rollout-test.jsonl");
+  const index = path.join(home, "session_index.jsonl");
+  writeJsonl(file, hierarchyRollout());
+  const unnamed = parser.buildTurns(file);
+  assert.deepEqual(unnamed.map((r) => [r.sessionName, r.sessionTitle]), [[null, null], [null, null], [null, null]]);
+  const entry = (thread_name, updated_at, id = "synthetic-thread") => ({ id, thread_name, updated_at });
+  writeJsonl(index, [
+    entry("Newest", "2026-09-03T10:00:00Z"),
+    entry("Older", "2026-09-01T10:00:00Z"),
+    entry("Other thread", "2026-09-04T10:00:00Z", "other"),
+  ]);
+  assert.deepEqual(parser.buildTurns(file).map((r) => r.sessionName), ["Newest", "Newest", "Newest"]);
+  fs.appendFileSync(index, JSON.stringify(entry("Tie winner", "2026-09-03T12:00:00+02:00")) + "\n");
+  const read = fs.readFileSync;
+  let indexReads = 0;
+  const spy = t.mock.method(fs, "readFileSync", function (file, ...args) {
+    if (file === index) indexReads++;
+    return read.call(this, file, ...args);
+  });
+  const named = parser.buildTurns(file);
+  spy.mock.restore();
+  assert.equal(indexReads, 1);
+  assert.deepEqual(named.map((r) => [r.sessionName, r.sessionTitle]), [["Tie winner", null], ["Tie winner", null], ["Tie winner", null]]);
+  assert.deepEqual(named.map((r) => ({ ...r, sessionName: null })), unnamed);
+  fs.appendFileSync(index, "malformed json\n");
+  assert.deepEqual(parser.buildTurns(file).map((r) => r.sessionName), ["Tie winner", "Tie winner", "Tie winner"],
+    "one torn line does not hide the names on every other line");
+  writeJsonl(index, [entry("Other", "2026-09-01T00:00:00Z", "other")]);
+  assert.deepEqual(parser.buildTurns(file).map((r) => r.sessionName), [null, null, null]);
+});
 
 test("modern Codex events track real prompts and cumulative token deltas", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-codex-parser-"));

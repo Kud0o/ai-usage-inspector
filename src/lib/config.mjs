@@ -15,8 +15,8 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-// The eight selectable field groups (all on by default).
-export const FIELD_GROUPS = ["text", "tokens", "cost", "context", "timing", "skills", "counts", "meta"];
+// The selectable field groups (all on by default).
+export const FIELD_GROUPS = ["text", "tokens", "cost", "context", "timing", "skills", "counts", "subagents", "meta"];
 
 export function globalConfigPath() {
   return path.join(os.homedir(), ".ai-usage-inspector", "config.json");
@@ -197,8 +197,48 @@ const GROUP_KEYS = {
   timing: ["durationMs", "endTs", "firstResponseMs"],
   skills: ["skills"],
   counts: ["counts"],
-  meta: ["slug", "gitBranch", "cliVersion", "entrypoint", "serviceTier", "speed", "effortLevel"],
+  subagents: ["subagents"],
+  meta: ["slug", "gitBranch", "cliVersion", "entrypoint", "serviceTier", "speed", "effortLevel", "sessionName", "sessionTitle"],
 };
+
+// A subagent run carries its own share of what these groups control, so turning
+// one off has to reach inside the run tree as well.
+const RUN_GROUP_KEYS = {
+  counts: ["counts"],
+  text: ["description"],
+  tokens: ["usage"],
+  cost: ["cost"],
+  timing: ["durationMs", "endTs"],
+};
+
+function runKeysOff(fields) {
+  const keys = [];
+  for (const [g, ks] of Object.entries(RUN_GROUP_KEYS)) if (fields && fields[g] === false) keys.push(...ks);
+  return keys;
+}
+
+function stripRuns(runs, keys) {
+  return runs.map((run) => {
+    const out = { ...run };
+    for (const k of keys) delete out[k];
+    if (Array.isArray(out.subagents)) out.subagents = stripRuns(out.subagents, keys);
+    return out;
+  });
+}
+
+function restoreRuns(runs, previous, keys) {
+  const byAgent = new Map((Array.isArray(previous) ? previous : [])
+    .filter((run) => run && run.agentId != null)
+    .map((run) => [run.agentId, run]));
+  return runs.map((run) => {
+    const prior = byAgent.get(run.agentId);
+    if (!prior) return run;
+    const out = { ...run };
+    for (const k of keys) if (out[k] === undefined && prior[k] !== undefined) out[k] = prior[k];
+    if (Array.isArray(out.subagents)) out.subagents = restoreRuns(out.subagents, prior.subagents, keys);
+    return out;
+  });
+}
 
 // Return a shallow clone of `record` with disabled groups' keys removed.
 export function applyFieldSelection(record, fields) {
@@ -206,6 +246,8 @@ export function applyFieldSelection(record, fields) {
   for (const g of FIELD_GROUPS) {
     if (fields && fields[g] === false) for (const k of GROUP_KEYS[g]) delete out[k];
   }
+  const nested = runKeysOff(fields);
+  if (nested.length && Array.isArray(out.subagents)) out.subagents = stripRuns(out.subagents, nested);
   return out;
 }
 
@@ -228,5 +270,12 @@ export function preserveStoredFields(next, previous, fields) {
       if (out[k] === undefined && previous[k] !== undefined) out[k] = previous[k];
     }
   }
+  const nested = runKeysOff(fields);
+  if (nested.length && Array.isArray(out.subagents) && Array.isArray(previous.subagents)) {
+    out.subagents = restoreRuns(out.subagents, previous.subagents, nested);
+  }
+  // Only a hook can see the effort setting; a sweep reads the transcript alone,
+  // and its blank used to replace what the hook had recorded.
+  if (out.effortLevel == null && previous.effortLevel != null) out.effortLevel = previous.effortLevel;
   return out;
 }

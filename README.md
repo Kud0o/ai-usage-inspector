@@ -6,7 +6,7 @@
 
 ![Node](https://img.shields.io/badge/Node-%3E%3D18-339933?logo=node.js&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-success)
-![Tests](https://img.shields.io/badge/tests-149-success)
+![Tests](https://img.shields.io/badge/tests-287-success)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 </div>
@@ -45,6 +45,7 @@ same ingest step.
 
 - **Multi-agent, one table** — seven agents side by side, with provider filters, badges, charts, and cost/token splits.
 - **Per-prompt detail** — prompt and response text, input/output/cache/reasoning tokens, model, permission mode, context fill %, USD cost, duration, first-response latency, skills, and tool/subagent counts where the agent exposes them.
+- **Sessions as a tree** — each subagent run sits under the prompt that launched it, with its own tokens, cost, model and time, and runs it launched sit under it. A branched or forked Claude session sits under the session it came from, and a Codex agent thread under its parent. Every turn is counted once, and sessions show the name you gave them.
 - **Stays out of your agent’s way** — the hook writes the payload to a spool file and exits; a detached worker does the parsing and writing. It reads stdin with a 150 ms idle cutoff and a two-second ceiling, so it returns even if the agent leaves the pipe open.
 - **Yours, locally** — records live in your project, tracking can be turned off per project, and whole field groups (including the prompt text) can be stripped before anything is written. Turning a group off stops new recording; rows you already collected keep what they have.
 - **Live dashboard** — the page follows the data as it is recorded, with full-text search, CSV/JSON export, and an optional monthly budget.
@@ -90,7 +91,10 @@ cd <your project>
 node .ai-usage/viewer/server.mjs   # -> http://localhost:4317
 ```
 
-Add `.ai-usage/` to that project's `.gitignore` so the records are not committed.
+The records include your prompts, so `.ai-usage/` keeps itself out of git: it writes its own
+`.gitignore`, and `git add -A` leaves it alone. Files a repository already tracks stay tracked;
+`git rm -r --cached .ai-usage` stops that. To commit the records on purpose, change that
+`.gitignore` — a file that is already there is never rewritten.
 
 ```sh
 npx -y ai-usage-inspector --update      # upgrade
@@ -101,8 +105,8 @@ npx -y ai-usage-inspector --uninstall   # remove the hooks
 
 | Agent | Where the numbers come from | Registered in | Notes |
 |---|---|---|---|
-| Claude Code | `~/.claude/projects/.../*.jsonl` | `~/.claude/settings.json` | Exact usage, streamed-message dedupe, subagent attribution, skills |
-| OpenAI Codex | `~/.codex/sessions/.../rollout-*.jsonl`, `~/.codex/archived_sessions/` | `~/.codex/hooks.json` | Cumulative token deltas per turn |
+| Claude Code | `~/.claude/projects/.../*.jsonl` | `~/.claude/settings.json` | Exact usage, streamed-message dedupe, subagent runs as a tree, branches counted once, session names, skills |
+| OpenAI Codex | `~/.codex/sessions/.../rollout-*.jsonl`, `~/.codex/archived_sessions/` | `~/.codex/hooks.json` | Cumulative token deltas per turn, agent threads nested under their parent, thread names |
 | Cursor | `state.vscdb` SQLite stores | `~/.cursor/hooks.json` | Needs Node >= 22.5. Estimates tokens when Cursor stores no exact counts |
 | OpenCode | `~/.local/share/opencode/opencode.db` | `~/.config/opencode/plugins/` | Needs Node >= 22.5. Tokens **and cost as OpenCode recorded them**; a session whose per-message accounting is incomplete is stored as one rolled-up row |
 | Cline · Roo · Kilo | `<VSCode>/User/globalStorage/<extId>/tasks/` | none — scan only | Tokens and cost as the extension recorded them. VS Code extensions cannot run a turn-end hook, so these arrive on sync or on the sweep any other agent triggers |
@@ -154,6 +158,40 @@ costed, the installer marks each agent it finds for a single read of its whole h
 stored the old way are rewritten; the next sweep, or the dashboard's start-up sync, does it. A
 fresh install owes nothing, and imports no history you did not ask for.
 
+Upgrading to 2.6.0 also removes what older versions stored twice: a session copied into a
+subfolder's store when the agent had moved there, and turns a branch or fork copied from its
+original, including branches in different projects. Cleanup removes only Claude rows, and only
+when a fresh read under the changed file's lock verifies a surviving copy with at least as many
+tokens. Cross-folder copies require that evidence in the session's home store; richer copies
+are kept and reported. Branches keep the richest row, with the original winning ties, even when
+the `branchOf` label follows a different ownership decision. Copied history does not choose a
+branch's home folder unless all its turns are copied.
+
+Manual sync and automatic sweeps share a scan lease. Cleanup locks every candidate usage file
+and suppression file before changing any row; failure to acquire any lock aborts the cleanup.
+Ownership and final tie-breaks are independent of discovery order. New Claude rows retain their
+transcript's first-entry timestamp, and the earliest known source across a session's continuations
+settles direction before the older timing heuristic. Missing or ambiguous evidence stays explicitly
+unresolved; 2.5.0 rows retain the previous heuristic.
+
+Branch-copy removal is durable: the losing store keeps a copy tombstone, so a later hook or sync
+cannot recreate it. If the surviving store is later deleted, the suppressed copy will not return
+on its own; restore the surviving store from backup, or deliberately remove the relevant copy
+tombstone before re-importing. Keep tombstones when deleting an empty usage file.
+
+Claude discovery also follows changes in subagent transcripts and metadata sidecars, even after
+the parent stops changing. Both hooks and scans validate the complete input before writing;
+unreadable dependencies fail for retry. Codex uses its recorded session folder before a hook's
+fallback folder; different continuation files can still name different folders (see Known limits).
+
+Candidate Claude stores are backed up **before the repair read**, and a failed backup leaves
+the repair owed without ingesting anything. Cleanup also backs up the exact bytes it replaces
+under the file's lock. Backups live in `~/.ai-usage-inspector/backups/`, with a recovery manifest
+updated before each file changes. The outcome is written to
+`~/.ai-usage-inspector/copy-cleanup.json`. If a store holds no rows, the report and `sync` name
+its **`.ai-usage` folder** for optional deletion (or its aggregate file in `AI_USAGE_DIR` mode).
+The project folder is never the deletion target.
+
 ## The dashboard
 
 ```sh
@@ -166,12 +204,18 @@ node .ai-usage/viewer/server.mjs --no-pricing-refresh   # do not fetch rates on 
 - **Summary cards** — prompts, tokens, active time, first-response latency, top model, busiest workspace, this-month cost against an optional budget. With more than one agent in view, cost carries a per-agent split and a **by agent** breakdown appears.
 - **Charts** — tokens over time, context-fill distribution, permission mode, turns by model, skills invoked, cost per day, and per-agent splits.
 - **Filter bar** — provider, platform, workspace, model, mode, effort, date, minimum context %, and free-text search. Export the filtered view as CSV or JSON.
-- **Table and detail drawer** — grouped by workspace → session → prompt, with rendered Markdown, usage, timing, cost, and metadata per turn.
+- **Table and detail drawer** — grouped by session, labelled with the session's name, then prompt, then subagent run and any run it launched. A branch nests under the session it came from, and a Codex agent thread under the turn that spawned it. A prompt's figures already include its runs; each run row shows its own share, and the drawer shows every run's tokens, cost and time beside the main thread's share, with rendered Markdown, usage, timing, cost, and metadata per turn.
+
 - **Settings** — per project: tracking on/off, which field groups to store, monthly budget.
 - **Delete** — remove the filtered records or a single prompt, with confirmation and the space the records freed. A small tombstone is kept for each, so a re-sync cannot resurrect it.
 
+Session groups start open and can be closed again. Saved expansion preferences retain at most
+500 distinct keys for sessions, turns and runs in the current view. Claude names and generated
+titles belong to each session, even when one transcript contains several sessions.
+
 Search matches the **whole stored prompt and response**, not the 280-character preview the
-table shows, and JSON export fetches the full stored records — falling back to those previews, and saying so, if that fetch fails. The page subscribes to a change
+table shows, as well as session names and subagent run descriptions, and JSON export fetches the
+full stored records — falling back to those previews, and saying so, if that fetch fails. The page subscribes to a change
 feed and refreshes itself as the worker records new turns.
 
 > The dashboard serves your prompt text and exposes a delete API, so it binds to
@@ -187,9 +231,13 @@ Everything for a project stays inside that project:
 |-- usage.ndjson     one JSON record per prompt
 |-- tombstones.json  records you deleted, so a later sync cannot bring them back
 |-- config.json      tracking, stored fields, and saved view settings
+|-- .gitignore       keeps all of this out of git
 |-- Open dashboard.cmd   double-click to open the dashboard (.command / .sh elsewhere)
 `-- viewer/          a copy of the dashboard; run it in place
 ```
+
+A session's records stay in the project folder it started in, even when the agent moves into a
+subfolder along the way or you resume the session from somewhere else.
 
 Machine-wide state lives once, outside your projects, in `~/.ai-usage-inspector/`: the
 installed `app/`, the hook `spool/` (normally empty), `scan-state.json`, and cached pricing
@@ -204,8 +252,10 @@ public pricing pages when it starts, which `--no-pricing-refresh` turns off.
 
 **Tracking is on by default and per project.** Turn it off, or strip whole field groups —
 `text` (the prompt and response themselves), `tokens`, `cost`, `context`, `timing`,
-`skills`, `counts`, `meta` — from that project's dashboard settings or its `config.json`. A
-disabled group is stripped *before* anything is written. See
+`skills`, `counts`, `subagents` (the run tree), `meta` (session names among them) — from that
+project's dashboard settings or its `config.json`. A disabled group is stripped *before* anything
+is written, from the subagent runs too, including nested `counts`. Already stored values are
+retained on a re-read while that group is disabled. See
 [configuration in depth](docs/internals.md#configuration-in-depth).
 
 **Combined dashboard:** point `AI_USAGE_DIR` at a shared folder, for both the hook and the
@@ -279,7 +329,10 @@ from — and that decides what a re-sync may do with it:
 
 A cost this tool worked out is a fact about the rates on the day the turn ran, so re-importing
 history does not quietly restate it at today's rates — pass `--reprice` when you want that. The
-promise covers rates, not tokens: when a re-read counts different tokens for a turn — an earlier
+same rule preserves computed costs of runs with unchanged usage, matched recursively by agent
+ID, whenever the turn's computed cost is preserved. A recomputed turn keeps fresh run costs.
+The viewer clamps the displayed main-thread share to zero if older data has larger run totals.
+The promise covers rates, not tokens: when a re-read counts different tokens for a turn — an earlier
 capture was incomplete, or an older version gave them to the wrong turn — its cost is worked out
 again for the tokens really there. If a row is
 labelled `estimated` and you now know the real rate, `--relabel` refreshes the provenance and
@@ -304,8 +357,11 @@ windows and retry bounds these paths run under.
   the continuation is written as if the user had typed it. Those turns are marked `⟳` and counted
   separately from prompts — the work they did is real and its cost is included, but nobody asked for
   it in those words.
-- **`effort` is Claude-specific**, and read from settings at capture time. Other agents
-  leave it blank unless they expose it.
+- **`effort` is Claude-specific**, and read from settings when a hook captures the turn; a later
+  sync keeps what the hook recorded. Other agents leave it blank unless they expose it.
+- **Codex agent threads keep the history they inherit.** Codex copies part of a parent thread into
+  each child it spawns, and those turns are still counted as the child's. The dashboard nests the
+  child under its parent, but its numbers are as recorded until that copying can be told apart.
 - **`context fill %`** uses the latest request's input size over the known model context
   window; unknown windows fall back to a default.
 - **First-response latency** is transcript-granularity timing, not a model-side metric.
@@ -317,3 +373,6 @@ More, including the rougher edges: [Internals](docs/internals.md).
 ## License
 
 [MIT](LICENSE)
+
+The npm package includes the installer, runtime source, viewer, README, and documentation.
+Regression tests and test-support utilities remain in the repository.

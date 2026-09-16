@@ -12,7 +12,9 @@ export const SCAN_STATUSES = new Set(["ok", "locked", "unsupported-schema", "mis
 // A change to how turns are identified or costed reaches a stored row only when
 // its session is read again, and the transcripts behind old rows are not kept for
 // ever — so an upgrade across it asks each agent for one full read.
-export const REPAIR_EPOCH = 1;
+// 1: turns kept per transcript (2.5.0). 2: one home per session, branches and
+// subagent runs counted once, copies in other folders removed (2.6.0).
+export const REPAIR_EPOCH = 2;
 
 // A repair covers the rows one destination holds: each project's own files, or
 // the pooled copy in an aggregate AI_USAGE_DIR. Settling one says nothing about

@@ -218,7 +218,10 @@ function toListItem(e) {
 // or it silently misses every hit past the preview cut-off.
 function matchesQuery(e, q) {
   if (!q) return true;
-  const hay = [e.prompt, e.response, e.slug, e.workspace, e.model]
+  const runText = (runs) => (Array.isArray(runs) ? runs : []).flatMap((run) =>
+    [run.agentType, run.description, ...runText(run.subagents)]);
+  const hay = [e.prompt, e.response, e.slug, e.workspace, e.model,
+    e.sessionName, e.sessionTitle, e.agent?.nickname, ...runText(e.subagents)]
     .map((v) => (typeof v === "string" ? v : ""))
     .join("\n")
     .toLowerCase();

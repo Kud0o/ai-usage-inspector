@@ -1,3 +1,4 @@
+import "../test-support/isolate.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -6,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import vm from "node:vm";
 import { runtimePaths } from "../viewer/runtime.mjs";
 
 const SERVER = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "viewer", "server.mjs");
@@ -15,11 +17,16 @@ const RECORDS = [
     provider: "claude", sessionId: "s1", id: "s1:0", ts: "2026-08-10T10:00:00.000Z",
     prompt: LONG_PROMPT, promptChars: LONG_PROMPT.length, response: "answered", responseChars: 8,
     model: "claude-sonnet-4-5", usage: { input: 10, output: 2 }, cost: { total: 1, source: "priced" },
+    sessionName: "Named constellation", sessionTitle: "Generated orbit", branchOf: "original-session",
+    counts: { subagentCalls: 2 },
+    subagents: [{ agentId: "a1", agentType: "planner", description: "Plan changes", cost: { total: 0.2 },
+      subagents: [{ agentId: "a2", agentType: "reviewer", description: "Nested lighthouse inspection", cost: { total: 0.1 } }] }],
   },
   {
     provider: "codex", sessionId: "s2", id: "s2:0", ts: "2026-08-10T11:00:00.000Z",
     prompt: "short one", promptChars: 9, response: "ok", responseChars: 2,
     model: "gpt-test", usage: { input: 5, output: 1 }, cost: { total: 2, source: "priced" },
+    spawnedAgents: ["s9"],
   },
   // The Claude turn's id again, in another session: a Codex subagent thread
   // repeats its parent's turn ids.
@@ -27,6 +34,7 @@ const RECORDS = [
     provider: "codex", sessionId: "s9", id: "s1:0", ts: "2026-08-10T12:00:00.000Z",
     prompt: "same id, another session", promptChars: 24, response: "", responseChars: 0,
     model: "gpt-test", usage: { input: 1, output: 1 }, cost: { total: 0.5, source: "priced" },
+    parentSessionId: "s2", agent: { kind: "spawned", nickname: "Quartz", path: "/root/review", role: "reviewer", depth: 1 },
   },
 ];
 
@@ -95,6 +103,172 @@ test("/api/events ships previews, never the full stored text", async () => {
   assert.equal("prompt" in long, false, "full prompt must not ride along in the list");
   assert.equal(long.promptPreview.length, 280);
   assert.equal(long.promptChars, LONG_PROMPT.length, "true size still reported");
+});
+
+test("/api/events preserves session and recursive agent metadata", async () => {
+  const res = await request(port, "/api/events");
+  assert.equal(res.status, 200);
+  for (const field of ["subagents", "sessionName", "sessionTitle", "branchOf", "parentSessionId", "agent", "spawnedAgents"]) {
+    const fixture = RECORDS.find((e) => Object.hasOwn(e, field));
+    assert.ok(fixture, `fixture exercises ${field}`);
+    const item = res.json.find((e) => e.provider === fixture.provider && e.sessionId === fixture.sessionId && e.id === fixture.id);
+    assert.deepEqual(item[field], fixture[field], `list retains ${field}`);
+  }
+});
+
+for (const [field, query, provider, session, id] of [
+  ["sessionName", "named constellation", "claude", "s1", "s1:0"],
+  ["sessionTitle", "generated orbit", "claude", "s1", "s1:0"],
+  ["nested description", "lighthouse inspection", "claude", "s1", "s1:0"],
+  ["nested agentType", "reviewer", "claude", "s1", "s1:0"],
+  ["agent nickname", "quartz", "codex", "s9", "s1:0"],
+]) {
+  test(`/api/search matches ${field}`, async () => {
+    const res = await request(port, "/api/search?q=" + encodeURIComponent(query));
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.keys, [JSON.stringify([provider, session, id])]);
+  });
+}
+
+function viewerUi(records) {
+  const nodes = new Map();
+  const document = {
+    addEventListener: () => {},
+    querySelector: (s) => {
+      if (!nodes.has(s)) nodes.set(s, { innerHTML: "", hidden: false, listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; } });
+      return nodes.get(s);
+    },
+    querySelectorAll: () => [],
+  };
+  const ctx = vm.createContext({ document, Intl, setTimeout, clearTimeout });
+  const source = fs.readFileSync(path.join(path.dirname(SERVER), "public", "app.js"), "utf8");
+  vm.runInContext(source.slice(0, source.lastIndexOf("\nbind();")), ctx);
+  ctx.records = structuredClone(records);
+  vm.runInContext("state.all = records; state.view = records;", ctx);
+  return { run: (code) => vm.runInContext(code, ctx), html: () => document.querySelector("#rows").innerHTML };
+}
+
+test("viewer session toggles close and reopen without accumulating keys", () => {
+  const ui = viewerUi(RECORDS);
+  ui.run('bind(); persist = () => {}; renderTable(); globalThis.key = "session:" + sessionKey(records[0]);');
+  const click = '$("#rows").listeners.click({ target: { closest: () => ({ dataset: { tree: key } }) } })';
+  ui.run(click);
+  assert.equal(ui.run("isExpanded(key)"), false);
+  ui.run(click);
+  assert.equal(ui.run("isExpanded(key)"), true);
+  assert.equal(ui.run("state.expanded.length"), 0);
+  ui.run('key = turnTreeKey(records[0]);');
+  ui.run(click);
+  ui.run(click);
+  assert.equal(ui.run("state.expanded.length"), 0);
+});
+
+test("viewer persistence prunes stale expansion keys and caps unique live keys", () => {
+  const ui = viewerUi(Array.from({ length: 600 }, (_, i) => ({ ...RECORDS[0], id: `turn-${i}` })));
+  ui.run('globalThis.saved = null; setTimeout = (fn) => { fn(); }; fetch = (url, opts) => { saved = JSON.parse(opts.body); return Promise.resolve(); }; renderTable();');
+  ui.run('state.expanded = ["gone", ...records.map(turnTreeKey), turnTreeKey(records[0])]; persist();');
+  assert.equal(ui.run("saved.ui.expanded.length"), 500);
+  assert.equal(ui.run('saved.ui.expanded.includes("gone")'), false);
+  assert.equal(ui.run("new Set(saved.ui.expanded).size"), 500);
+  ui.run('state.view = []; renderTable(); persist();');
+  assert.equal(ui.run("saved.ui.expanded.length"), 0);
+});
+
+test("viewer clamps the main thread share when old run costs exceed the turn", () => {
+  const ui = viewerUi([{ ...RECORDS[0], cost: { total: .01 } }]);
+  assert.match(ui.run("subagentSection(records[0])"), /<dt>cost<\/dt><dd>\$0\.000<\/dd>/);
+});
+
+test("viewer tree keeps branches, child sessions and runs attached without counting display rows", () => {
+  const parent = { ...RECORDS[1], sessionName: "Parent" };
+  const child = RECORDS[2];
+  const original = { ...RECORDS[0], branchOf: undefined };
+  const branch = { ...original, sessionId: "branch", id: "branch:0", branchOf: "s1", sessionName: "Branch", subagents: undefined };
+  const ui = viewerUi([parent, child, original, branch]);
+  ui.run("renderTable()");
+  // Sessions start open, so their turns show as they always did; a branch nests in
+  // its open original, while runs and spawned agents wait behind a turn's expander.
+  assert.equal((ui.html().match(/class="group"/g) || []).length, 3, "two top-level sessions and the branch inside one");
+  assert.doesNotMatch(ui.html(), /spawned · Quartz/, "a spawned agent waits behind its turn");
+  assert.match(ui.html(), /aria-expanded="false"/);
+  ui.run("state.expanded = records.map((e) => turnTreeKey(e)); renderTable()");
+  const html = ui.html();
+  assert.match(html, /spawned · Quartz/);
+  assert.match(html, /branch · Branch/);
+  assert.ok(html.indexOf('data-session="s2"') < html.indexOf("spawned · Quartz"), "child header follows spawning turn");
+  assert.match(html, /\+ agents \$0\.500/);
+  assert.match(html, /1 turns · \$2\.000/, "parent header excludes child session cost");
+  assert.equal((html.match(/class="run-row"/g) || []).length, 1, "deeper runs stay collapsed");
+  ui.run('state.expanded.push("run:" + keyOf(records[2]) + ":0"); renderTable()');
+  assert.equal((ui.html().match(/class="run-row"/g) || []).length, 2);
+  assert.equal(ui.run("state.view.length"), 4, "display rows never enter event totals or delete/export selection");
+  ui.run("state.group = false; renderTable()");
+  assert.doesNotMatch(ui.html(), /class="group"/);
+  assert.match(ui.html(), /↳ agent/);
+  assert.equal((ui.html().match(/class="run-row"/g) || []).length, 2, "run expansion survives grouping toggle");
+});
+
+test("viewer run cards subtract every own share, escape text, and tolerate omitted groups", () => {
+  const e = { ...RECORDS[0], usage: { input: 100, output: 40, cacheCreate: 10, cacheRead: 20 }, cost: { total: 1 },
+    subagents: [{ agentType: "<planner>", description: '<img src=x onerror="bad()">', background: true,
+      usage: { input: 20, output: 10, cacheCreate: 2, cacheRead: 3 }, cost: { total: 0.2 },
+      subagents: [{ usage: { input: 10, output: 5, cacheCreate: 1, cacheRead: 2 }, cost: { total: 0.1 } }] }] };
+  const ui = viewerUi([e]);
+  const html = ui.run("subagentSection(records[0])");
+  assert.match(html, /<dt>input<\/dt><dd>70<\/dd>/);
+  assert.match(html, /<dt>output<\/dt><dd>25<\/dd>/);
+  assert.match(html, /<dt>cache write<\/dt><dd>7<\/dd>/);
+  assert.match(html, /<dt>cache read<\/dt><dd>15<\/dd>/);
+  assert.match(html, /\$0\.700/);
+  assert.match(html, /class="run-children"/);
+  assert.match(html, /&lt;planner&gt;/);
+  assert.match(html, /&lt;img/);
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /background/);
+  assert.match(html, /<dt>duration<\/dt><dd>—<\/dd>/);
+  ui.run("delete records[0].subagents[0].cost; delete records[0].subagents[0].usage");
+  assert.match(ui.run("subagentSection(records[0])"), /<dt>cost<\/dt><dd>—<\/dd>/);
+  assert.equal(ui.run('sumRuns(records[0], "cost", "total")'), null);
+});
+
+test("viewer session labels honor precedence and mark only generated titles", () => {
+  const ui = viewerUi([]);
+  assert.equal(ui.run('sessionLabel({ sessionName: "<name>", sessionTitle: "title", slug: "slug" })'), "&lt;name&gt;");
+  assert.match(ui.run('sessionLabel({ sessionTitle: "title", slug: "slug" })'), /class="generated-title" title="generated title">title<\/em>/);
+  assert.equal(ui.run('sessionLabel({ slug: "slug", sessionId: "1234567890" })'), "slug");
+  assert.equal(ui.run('sessionLabel({ sessionId: "1234567890" })'), "12345678");
+});
+
+test("viewer filtered children fall back to session nesting or orphan tags within their provider", () => {
+  const ui = viewerUi(RECORDS);
+  ui.run("delete records[1].spawnedAgents; state.expanded = []; renderTable()");
+  assert.match(ui.html(), /spawned · Quartz/, "missing spawn turn nests directly in the parent session");
+  assert.match(ui.html(), /branched from original/);
+  ui.run("state.view = [records[2], { ...records[1], provider: 'claude' }]; renderTable()");
+  assert.match(ui.html(), /agent of s2/, "another provider's session cannot become the parent");
+});
+
+test("viewer CSV exports event rows with session name and recursive run totals", async () => {
+  const ui = viewerUi(RECORDS);
+  ui.run('download = (name, text) => { globalThis.csv = text; }; toast = () => {};');
+  await ui.run('exportRecords("csv")');
+  const lines = ui.run("csv").split("\r\n");
+  assert.equal(lines.length, RECORDS.length + 1);
+  const columns = lines[0].split(",");
+  const values = lines[1].split(",");
+  assert.equal(values[columns.indexOf("sessionName")], RECORDS[0].sessionName);
+  assert.equal(Number(values[columns.indexOf("subagentRuns")]), 2);
+  assert.ok(Math.abs(Number(values[columns.indexOf("subagentCost")]) - 0.3) < 1e-10);
+});
+
+test("viewer preview search includes session titles and nested runs while server search is unavailable", () => {
+  const ui = viewerUi(RECORDS);
+  ui.run("renderStats = () => {}; renderCharts = () => {}; persist = () => {};");
+  for (const query of ["constellation", "generated orbit", "lighthouse"]) {
+    ui.run(`state.filters.search = ${JSON.stringify(query)}; apply()`);
+    assert.equal(ui.run("state.view.length"), 1);
+    assert.equal(ui.run("state.view[0].sessionId"), "s1");
+  }
 });
 
 test("/api/search matches text past the preview cut-off", async () => {

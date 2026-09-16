@@ -18,7 +18,8 @@
 // exactly like the hook path.
 import { getProvider, detectInstalled } from "./providers/index.mjs";
 import { ingestTranscript } from "./lib/ingest.mjs";
-import { markRepaired, repairDue } from "./lib/scan-state.mjs";
+import { markRepaired, repairDue, claimScan, recordScanResult } from "./lib/scan-state.mjs";
+import { backupCandidateStores, cleanUpCopies } from "./lib/copies.mjs";
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(name);
@@ -45,6 +46,11 @@ function help() {
   re-sync while the turn's tokens are unchanged; pass --reprice to recompute
   them at today's rates, or --relabel to refresh only their provenance and
   leave the amounts as recorded.
+
+  After an upgrade that owes a repair, the first sync reads each agent's whole
+  history once. For Claude it then removes turns older versions stored twice —
+  in another folder's store, or under a branch — after backing up every file it
+  changes, and lists any folder left holding no rows.
 `);
 }
 
@@ -98,7 +104,7 @@ async function main() {
     process.env.AI_USAGE_REPRICE = "1";
     console.log("  repricing: stored costs will be recomputed at today's rates");
   }
-    if (relabel) {
+  if (relabel) {
     process.env.AI_USAGE_RELABEL = "1";
     console.log("  relabelling: cost provenance refreshed, amounts left as recorded");
   }
@@ -120,42 +126,80 @@ async function main() {
       console.log(`  ${p.id}: needs Node >= 22.5 for node:sqlite (you have ${process.versions.node}) — skipped`);
       continue;
     }
-    // A repair owed after an upgrade reads this provider's whole history once,
-    // whatever window was asked for. The dashboard runs this at start, and on a
-    // --local or autoSweep:false machine nothing else would.
-    const repair = repairDue(p.id);
-    if (repair !== null) console.log(`  ${p.id}: reading full history once, to repair stored rows`);
-    const since = repair === null ? sinceMs : 0;
-    let found = [];
-    let storeOk = true;
-    if (typeof p.discoverTranscriptsStatus === "function") {
-      const result = await p.discoverTranscriptsStatus({ sinceMs: since });
-      found = result.transcripts || [];
-      storeOk = (result.status || "ok") === "ok";
-    } else {
-      found = await p.discoverTranscripts({ sinceMs: since });
+    const leaseId = await claimScan(p.id);
+    if (!leaseId) {
+      console.log(`  ${p.id}: scan already running; skipped`);
+      continue;
     }
-    let files = 0;
-    let turns = 0;
-    let failed = false;
-    for (const t of found) {
-      try {
-        const n = await ingestTranscript(p, t);
-        if (n > 0) {
-          files++;
-          turns += n;
-        }
-      } catch (err) {
-        // One still being written is read again by its hook; anything else is not.
-        if (!(err && err.transcriptMoved)) failed = true;
+    try {
+      // A repair owed after an upgrade reads this provider's whole history once,
+      // whatever window was asked for. The dashboard runs this at start, and on a
+      // --local or autoSweep:false machine nothing else would.
+      const repair = repairDue(p.id);
+      if (repair !== null) console.log(`  ${p.id}: reading full history once, to repair stored rows`);
+      const since = repair === null ? sinceMs : 0;
+      let found = [];
+      let storeOk = true;
+      if (typeof p.discoverTranscriptsStatus === "function") {
+        const result = await p.discoverTranscriptsStatus({ sinceMs: since });
+        found = result.transcripts || [];
+        storeOk = (result.status || "ok") === "ok";
+      } else {
+        found = await p.discoverTranscripts({ sinceMs: since });
       }
+      let backup = null;
+      if (repair !== null && p.id === "claude") {
+        try {
+          backup = await backupCandidateStores({ transcripts: found });
+        } catch (err) {
+          console.error(`  ${p.id}: backup failed; repair remains owed: ${err.message}`);
+          continue;
+        }
+      }
+      let files = 0;
+      let turns = 0;
+      let failed = false;
+      for (const t of found) {
+        try {
+          const n = await ingestTranscript(p, t);
+          if (n > 0) {
+            files++;
+            turns += n;
+          }
+        } catch (err) {
+          // One still being written is read again by its hook; anything else is not.
+          if (!(err && err.transcriptMoved)) failed = true;
+        }
+      }
+      console.log(`  ${p.id}: ${found.length} transcript(s) scanned, ${turns} turn(s) from ${files} session(s) imported`);
+      // Settles the repair only for where this run wrote: the projects, or one
+      // aggregate directory.
+      if (repair !== null && storeOk && !failed) {
+        let settled = true;
+        if (p.id === "claude") {
+          // Every session is now whole in its own store, so what older versions
+          // stored twice can go.
+          try {
+            const report = await cleanUpCopies({ transcripts: found, backup });
+            const removed = report.copiesRemoved + report.branchCopiesRemoved;
+            if (removed) {
+              console.log(`  ${p.id}: removed ${removed} turn(s) stored twice; the files as they were are in ${report.backup}`);
+              for (const store of report.emptyStores) console.log(process.env.AI_USAGE_DIR
+                ? `    store holds no rows; its aggregate file can be deleted: ${store}`
+                : `    store holds no rows; its .ai-usage folder can be deleted: ${store}`);
+            }
+          } catch {
+            settled = false;
+          }
+        }
+        if (settled) {
+          try { await markRepaired(p.id, repair); } catch {}
+        }
+      }
+    } finally {
+      // Explicit windows do not advance the automatic sweep's watermark.
+      await recordScanResult(p.id, { leaseId, completed: false });
     }
-    // Settles the repair only for where this run wrote: the projects, or one
-    // aggregate directory.
-    if (repair !== null && storeOk && !failed) {
-      try { await markRepaired(p.id, repair); } catch {}
-    }
-    console.log(`  ${p.id}: ${found.length} transcript(s) scanned, ${turns} turn(s) from ${files} session(s) imported`);
   }
 }
 

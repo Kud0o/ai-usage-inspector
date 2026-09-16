@@ -8,6 +8,7 @@ import { ingest, ingestTranscript } from "./lib/ingest.mjs";
 import { globalConfigPath } from "./lib/config.mjs";
 import { getProvider, detectInstalled } from "./providers/index.mjs";
 import { scanWindow, recordScanResult, claimScan, readScanState } from "./lib/scan-state.mjs";
+import { backupCandidateStores, cleanUpCopies } from "./lib/copies.mjs";
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -98,6 +99,7 @@ export async function rescan(provider, norm, leaseId = null) {
       found = await provider.discoverTranscripts({ sinceMs: effectiveSince });
     }
     if (status !== "ok") repaired = false;
+    const backup = repairing && provider.id === "claude" ? await backupCandidateStores({ transcripts: found }) : null;
     let allIngested = true;
     for (const transcript of found) {
       try {
@@ -112,6 +114,15 @@ export async function rescan(provider, norm, leaseId = null) {
       }
     }
     completed = allIngested && status === "ok";
+    // With every Claude session now whole in its own store, what older versions
+    // stored twice can go, once, as part of the repair.
+    if (repaired && provider.id === "claude") {
+      try {
+        await cleanUpCopies({ transcripts: found, backup });
+      } catch {
+        repaired = false;
+      }
+    }
   } catch (err) {
     status = (err && err.scanStatus) || status;
     detail = (err && err.message) || detail;

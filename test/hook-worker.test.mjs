@@ -1,3 +1,4 @@
+import "../test-support/isolate.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -7,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { runLauncher } from "../src/record.mjs";
 import { drainSpool, rescan, sweepProviders, shouldSweepNow, msSinceLastScan } from "../src/worker.mjs";
 import { REPAIR_EPOCH, claimScan, recordInstall, recordScanResult, repairDue } from "../src/lib/scan-state.mjs";
+import { buildTurns } from "../src/providers/claude/transcript.mjs";
 
 // Point scan bookkeeping at a throwaway file: these tests must never touch the
 // real ~/.ai-usage-inspector/scan-state.json.
@@ -392,4 +394,83 @@ test("a repair survives a transcript that moved, but not one that failed", async
   await rescan({ id: "broken", discoverTranscripts: () => [{ transcriptPath: "x" }], buildTurns: () => { throw new Error("boom"); } }, {});
   assert.equal(repairDue("moving"), null);
   assert.equal(repairDue("broken"), REPAIR_EPOCH);
+});
+
+function claudeRepair(t) {
+  const dir = withScanState(t);
+  const home = path.join(dir, "home");
+  const project = path.join(dir, "project");
+  const sub = path.join(project, "web");
+  fs.mkdirSync(home);
+  fs.mkdirSync(sub, { recursive: true });
+  const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
+  const savedUsage = process.env.AI_USAGE_DIR;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  delete process.env.AI_USAGE_DIR;
+  t.after(() => {
+    if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    if (savedProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedProfile;
+    if (savedUsage === undefined) delete process.env.AI_USAGE_DIR; else process.env.AI_USAGE_DIR = savedUsage;
+  });
+  const sessionId = "11111111-2222-4333-8444-555555555555";
+  const id = "22222222-3333-4444-8555-666666666666";
+  const transcriptPath = path.join(home, `${sessionId}.jsonl`);
+  writeJsonl(transcriptPath, [
+    { type: "user", uuid: id, sessionId, cwd: project, timestamp: "2026-08-01T10:00:00.000Z", message: { role: "user", content: "build it" } },
+    { type: "assistant", uuid: "a1", sessionId, cwd: project, timestamp: "2026-08-01T10:00:05.000Z", message: { id: "m1", role: "assistant", model: "claude-sonnet-4-5", stop_reason: "end_turn", content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "cd web && npm run build" } }], usage: { input_tokens: 10, output_tokens: 1 } } },
+    { type: "user", uuid: "r1", sessionId, cwd: sub, timestamp: "2026-08-01T10:00:09.000Z", toolUseResult: {}, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } },
+  ]);
+  const copyFile = path.join(sub, ".ai-usage", "usage.ndjson");
+  writeJsonl(copyFile, [{ provider: "claude", sessionId, id, cwd: project, ts: "2026-08-01T10:00:00.000Z" }]);
+  const rows = (file) => fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map(JSON.parse);
+  const ownTurns = () => rows(path.join(project, ".ai-usage", "usage.ndjson")).map((r) => [r.provider, r.sessionId, r.id]);
+  return {
+    provider: { id: "claude", discoverTranscripts: () => [{ transcriptPath }], buildTurns },
+    backupDir: path.join(home, ".ai-usage-inspector", "backups"),
+    copyFile, rows, ownTurns, expected: [["claude", sessionId, id]],
+  };
+}
+
+test("a Claude repair scan removes a copy left in another folder", async (t) => {
+  const fixture = claudeRepair(t);
+  await recordInstall({ upgrading: true, providerIds: ["claude"] });
+  await rescan(fixture.provider, {});
+  assert.deepEqual(fixture.ownTurns(), fixture.expected, "the session is whole in its own store");
+  assert.deepEqual(fixture.rows(fixture.copyFile), [], "the copy is gone");
+  const backups = fs.readdirSync(fixture.backupDir, { withFileTypes: true });
+  assert.equal(backups.length, 1);
+  assert.ok(backups[0].isDirectory(), "the copy was backed up first");
+  assert.equal(repairDue("claude"), null);
+});
+
+test("a Claude repair scan whose backup fails stays owed and ingests nothing", async (t) => {
+  const fixture = claudeRepair(t);
+  // A file blocks backup-directory creation on Windows and POSIX, regardless of permissions.
+  fs.mkdirSync(path.dirname(fixture.backupDir), { recursive: true });
+  fs.writeFileSync(fixture.backupDir, "blocked");
+  const copy = fs.readFileSync(fixture.copyFile);
+  await recordInstall({ upgrading: true, providerIds: ["claude"] });
+  let parsed = 0;
+  await rescan({ ...fixture.provider, buildTurns: (...args) => { parsed++; return fixture.provider.buildTurns(...args); } }, {});
+  assert.equal(parsed, 0, "backup failure must precede even the repair read");
+  assert.deepEqual(fs.readFileSync(fixture.copyFile), copy, "a failed backup leaves the copy intact");
+  assert.equal(repairDue("claude"), REPAIR_EPOCH);
+});
+
+test("a Claude repair backs up candidate bytes before reading any transcript", async (t) => {
+  const fixture = claudeRepair(t);
+  const before = fs.readFileSync(fixture.copyFile, "utf8");
+  let backedUp = false;
+  await recordInstall({ upgrading: true, providerIds: ["claude"] });
+  await rescan({ ...fixture.provider, buildTurns: (...args) => {
+    const dirs = fs.existsSync(fixture.backupDir) ? fs.readdirSync(fixture.backupDir) : [];
+    for (const dir of dirs) {
+      const manifest = JSON.parse(fs.readFileSync(path.join(fixture.backupDir, dir, "manifest.json")));
+      backedUp ||= manifest.files.some((f) => f.source === fixture.copyFile && fs.readFileSync(f.backup, "utf8") === before);
+    }
+    return fixture.provider.buildTurns(...args);
+  } }, {});
+  assert.equal(backedUp, true);
 });

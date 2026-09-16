@@ -87,6 +87,7 @@ export async function buildTurns(composerRef, opts = {}) {
   const cwd = opts.cwd || (composerRef && composerRef.cwd) || null;
   const createdTs = isoOrNull(composer && composer.createdAt);
   const updatedTs = isoOrNull(composer && composer.lastUpdatedAt) || createdTs;
+  const sessionName = typeof composer?.name === "string" && composer.name.trim() ? composer.name : null;
 
   // Segment at user bubbles; attach following assistant bubbles.
   const turns = [];
@@ -115,6 +116,7 @@ export async function buildTurns(composerRef, opts = {}) {
   return turns.map((t, i) =>
     finalizeTurn(t, {
       composerId,
+      sessionName,
       cwd,
       model,
       index: i,
@@ -181,6 +183,8 @@ function finalizeTurn(t, ctx) {
     id: `${ctx.composerId}:${ctx.index}`,
     provider: "cursor",
     sessionId: ctx.composerId,
+    sessionName: ctx.sessionName,
+    sessionTitle: null,
     cwd: ctx.cwd,
     slug: null,
     gitBranch: null,

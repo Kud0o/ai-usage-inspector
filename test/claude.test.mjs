@@ -1,3 +1,4 @@
+import "../test-support/isolate.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -9,6 +10,22 @@ function writeJsonl(file, records) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, records.map((r) => JSON.stringify(r)).join("\n") + "\n");
 }
+
+test("each session in a transcript keeps its own latest name and title", (t) => {
+  const s = session(t);
+  writeJsonl(s.file, [
+    { type: "custom-title", customTitle: "File name" },
+    { type: "ai-title", aiTitle: "File title" },
+    user("2026-09-01T10:00:00Z", "first", { sessionId: undefined }),
+    { type: "custom-title", sessionId: "other", customTitle: "Other name" },
+    { type: "ai-title", sessionId: "other", aiTitle: "Other title" },
+    user("2026-09-01T10:01:00Z", "second", { sessionId: "other" }),
+    { type: "custom-title", sessionId: "sess-1", customTitle: "Renamed file" },
+  ]);
+  assert.deepEqual(buildTurns(s.file).map((r) => [r.sessionId, r.sessionName, r.sessionTitle]), [
+    ["sess-1", "Renamed file", "File title"], ["other", "Other name", "Other title"],
+  ]);
+});
 
 // <dir>/<session>.jsonl  +  <dir>/<session>/subagents/*.jsonl
 function session(t, name = "sess-1") {
@@ -210,4 +227,169 @@ test("a prompt replayed after compaction opens no second turn", (t) => {
   assert.equal(turns.length, 1, "the replay is not a turn");
   assert.equal(turns[0].usage.input, 100 + 50, "main and subagent tokens stay on the real turn");
   assert.equal(turns[0].counts.subagentCalls, 1);
+});
+
+const agentCall = (id, input = {}) => ({ type: "tool_use", id, name: "Agent", input: { description: "scan files", subagent_type: "Explore", prompt: "go", ...input } });
+const callResult = (ts, toolUseId, toolUseResult) => ({
+  type: "user",
+  uuid: `r-${toolUseId}`,
+  timestamp: ts,
+  toolUseResult,
+  message: { content: [{ type: "tool_result", tool_use_id: toolUseId, content: "done" }] },
+});
+const runStart = (agentId, ts) => ({ type: "user", agentId, promptId: "p1", isSidechain: true, timestamp: ts, message: { content: "go" } });
+const sidecar = (s, agentId, meta) => fs.writeFileSync(path.join(s.subDir, `agent-${agentId}.meta.json`), JSON.stringify(meta));
+
+// A slash command writes its command line, its output and the expanded prompt as
+// three entries of one prompt. Each opened a turn, and each was handed the
+// prompt's whole subagent usage, so one run was counted three times.
+test("a subagent run belongs to the turn whose call launched it, and is counted once", (t) => {
+  const s = session(t);
+  writeJsonl(s.file, [
+    user("2026-08-10T10:00:00.000Z", "<command-name>/review</command-name>", { uuid: "u1", promptId: "p1" }),
+    user("2026-08-10T10:00:00.100Z", "<local-command-stdout>ok</local-command-stdout>", { uuid: "u2", promptId: "p1" }),
+    user("2026-08-10T10:00:01.000Z", "review the diff", { uuid: "u3", promptId: "p1" }),
+    asst("2026-08-10T10:00:02.000Z", "m1", [agentCall("toolu_1")], usage(100, 10)),
+    callResult("2026-08-10T10:00:09.000Z", "toolu_1", { status: "completed", agentId: "a1" }),
+    // A later entry of the same prompt that also did work: without the sidecar's
+    // link, this is the turn a run would have gone to.
+    user("2026-08-10T10:00:10.000Z", "<task-notification>done</task-notification>", { uuid: "u4", promptId: "p1" }),
+    asst("2026-08-10T10:00:11.000Z", "m2", [{ type: "text", text: "noted" }], usage(5, 1)),
+  ]);
+  writeJsonl(path.join(s.subDir, "agent-a1.jsonl"), [
+    runStart("a1", "2026-08-10T10:00:03.000Z"),
+    asst("2026-08-10T10:00:04.000Z", "s1", [{ type: "text", text: "found" }], usage(50, 5)),
+    asst("2026-08-10T10:00:08.000Z", "s2", [{ type: "tool_use", id: "t-read", name: "Read", input: {} }], usage(60, 6)),
+  ]);
+  sidecar(s, "a1", { agentType: "Explore", description: "scan files", toolUseId: "toolu_1", spawnDepth: 1 });
+
+  const turns = buildTurns(s.file);
+  assert.equal(turns.length, 4);
+  assert.equal(turns.reduce((n, x) => n + x.usage.input, 0), 100 + 5 + 50 + 60, "the run's tokens counted once");
+  assert.deepEqual(turns.filter((x) => x.subagents).map((x) => x.id), ["u3"], "only the turn that made the call");
+  const owner = turns.find((x) => x.id === "u3");
+  assert.equal(owner.counts.subagentCalls, 1);
+  const [run] = owner.subagents;
+  assert.equal(run.agentId, "a1");
+  assert.equal(run.agentType, "Explore");
+  assert.equal(run.description, "scan files");
+  assert.equal(run.status, "completed");
+  assert.equal(run.background, false);
+  assert.equal(run.usage.input, 110, "a run carries its own share");
+  assert.equal(run.counts.apiCalls, 2);
+  assert.equal(run.counts.toolCalls, 1);
+  assert.equal(run.durationMs, 5000);
+  assert.ok(run.cost.total > 0);
+});
+
+test("without a sidecar, a run goes to the last turn of its prompt that did any work", (t) => {
+  const s = session(t);
+  writeJsonl(s.file, [
+    user("2026-08-10T10:00:00.000Z", "<command-name>/review</command-name>", { uuid: "u1", promptId: "p1" }),
+    user("2026-08-10T10:00:00.100Z", "<local-command-stdout>ok</local-command-stdout>", { uuid: "u2", promptId: "p1" }),
+    user("2026-08-10T10:00:01.000Z", "review the diff", { uuid: "u3", promptId: "p1" }),
+    asst("2026-08-10T10:00:02.000Z", "m1", [{ type: "text", text: "main" }], usage(100, 10)),
+  ]);
+  writeJsonl(path.join(s.subDir, "old-run.jsonl"), [
+    runStart("a1", "2026-08-10T10:00:03.000Z"),
+    asst("2026-08-10T10:00:04.000Z", "s1", [{ type: "text", text: "found" }], usage(50, 5)),
+  ]);
+
+  const turns = buildTurns(s.file);
+  assert.equal(turns.reduce((n, x) => n + x.usage.input, 0), 150);
+  assert.deepEqual(turns.filter((x) => x.subagents).map((x) => x.id), ["u3"]);
+});
+
+test("a run launched by another run nests beneath it", (t) => {
+  const s = session(t);
+  writeJsonl(s.file, [
+    user("2026-08-10T10:00:00.000Z", "go deep", { uuid: "u1", promptId: "p1" }),
+    asst("2026-08-10T10:00:01.000Z", "m1", [agentCall("toolu_1")], usage(100, 10)),
+  ]);
+  writeJsonl(path.join(s.subDir, "agent-a1.jsonl"), [
+    runStart("a1", "2026-08-10T10:00:02.000Z"),
+    asst("2026-08-10T10:00:03.000Z", "s1", [agentCall("toolu_2", { subagent_type: "general-purpose" })], usage(50, 5)),
+  ]);
+  sidecar(s, "a1", { agentType: "Explore", toolUseId: "toolu_1", spawnDepth: 1 });
+  writeJsonl(path.join(s.subDir, "agent-a2.jsonl"), [
+    runStart("a2", "2026-08-10T10:00:04.000Z"),
+    asst("2026-08-10T10:00:05.000Z", "s2", [{ type: "text", text: "leaf" }], usage(30, 3)),
+  ]);
+  sidecar(s, "a2", { agentType: "general-purpose", toolUseId: "toolu_2", spawnDepth: 2 });
+
+  const [turn] = buildTurns(s.file);
+  assert.equal(turn.subagents.length, 1);
+  assert.equal(turn.subagents[0].agentId, "a1");
+  assert.deepEqual(turn.subagents[0].subagents.map((r) => r.agentId), ["a2"]);
+  assert.equal(turn.subagents[0].usage.input, 50, "a parent run's share excludes its children");
+  assert.equal(turn.counts.subagentCalls, 2);
+  assert.equal(turn.usage.input, 100 + 50 + 30, "the turn counts the whole tree once");
+});
+
+test("a run started in the background says so", (t) => {
+  const s = session(t);
+  writeJsonl(s.file, [
+    user("2026-08-10T10:00:00.000Z", "in the background", { uuid: "u1", promptId: "p1" }),
+    asst("2026-08-10T10:00:01.000Z", "m1", [agentCall("toolu_1", { run_in_background: true })], usage(100, 10)),
+    callResult("2026-08-10T10:00:01.500Z", "toolu_1", { status: "async_launched", isAsync: true, agentId: "a1" }),
+  ]);
+  writeJsonl(path.join(s.subDir, "agent-a1.jsonl"), [
+    runStart("a1", "2026-08-10T10:00:02.000Z"),
+    asst("2026-08-10T10:00:30.000Z", "s1", [{ type: "text", text: "later" }], usage(50, 5)),
+  ]);
+  sidecar(s, "a1", { agentType: "Explore", toolUseId: "toolu_1", spawnDepth: 1 });
+
+  const [run] = buildTurns(s.file)[0].subagents;
+  assert.equal(run.background, true);
+  assert.equal(run.status, "async_launched");
+  assert.equal(run.usage.input, 50, "its work is read from its own file");
+});
+
+test("every turn carries the session's current name and generated title", (t) => {
+  const s = session(t);
+  writeJsonl(s.file, [
+    { type: "ai-title", aiTitle: "Fix the login flow", sessionId: "sess-1" },
+    { type: "custom-title", customTitle: "first name", sessionId: "sess-1" },
+    user("2026-08-10T10:00:00.000Z", "one"),
+    asst("2026-08-10T10:00:01.000Z", "m1", [{ type: "text", text: "ok" }], usage(10, 1)),
+    { type: "custom-title", customTitle: "renamed", sessionId: "sess-1" },
+    user("2026-08-10T10:01:00.000Z", "two"),
+    asst("2026-08-10T10:01:01.000Z", "m2", [{ type: "text", text: "ok" }], usage(10, 1)),
+  ]);
+  const turns = buildTurns(s.file);
+  assert.deepEqual(turns.map((x) => x.sessionName), ["renamed", "renamed"], "the last name is current, for every turn");
+  assert.deepEqual(turns.map((x) => x.sessionTitle), ["Fix the login flow", "Fix the login flow"]);
+
+  const plain = session(t, "sess-2");
+  writeJsonl(plain.file, [user("2026-08-10T10:00:00.000Z", "one"), asst("2026-08-10T10:00:01.000Z", "m1", [], usage(1, 1))]);
+  const [unnamed] = buildTurns(plain.file);
+  assert.equal(unnamed.sessionName, null);
+  assert.equal(unnamed.sessionTitle, null);
+});
+
+// A branch or fork opens with entries written when it was made, then the history
+// it copied from its original, whose timestamps are older.
+test("turns a branch copied from an earlier session are marked as copies", (t) => {
+  const s = session(t);
+  writeJsonl(s.file, [
+    { type: "custom-title", customTitle: "fork", sessionId: "sess-1" },
+    { type: "queue-operation", operation: "enqueue", timestamp: "2026-08-10T12:00:00.000Z", sessionId: "sess-1" },
+    user("2026-08-10T10:00:00.000Z", "copied prompt", { uuid: "u1" }),
+    asst("2026-08-10T10:00:05.000Z", "m1", [{ type: "text", text: "ok" }], usage(10, 1)),
+    user("2026-08-10T12:00:01.000Z", "the branch's own prompt", { uuid: "u2" }),
+    asst("2026-08-10T12:00:05.000Z", "m2", [{ type: "text", text: "ok" }], usage(10, 1)),
+  ]);
+  const turns = buildTurns(s.file);
+  assert.equal(turns[0].copied, true);
+  assert.equal(turns[1].copied, undefined);
+
+  // An original whose first prompt is stamped a few seconds before its first entry
+  // is clock skew between entries written together, not a copy.
+  const original = session(t, "sess-2");
+  writeJsonl(original.file, [
+    { type: "queue-operation", operation: "enqueue", timestamp: "2026-08-10T10:00:03.000Z", sessionId: "sess-2" },
+    user("2026-08-10T10:00:00.000Z", "first", { uuid: "u3", sessionId: "sess-2" }),
+    asst("2026-08-10T10:00:05.000Z", "m3", [{ type: "text", text: "ok" }], usage(10, 1)),
+  ]);
+  assert.equal(buildTurns(original.file)[0].copied, undefined);
 });

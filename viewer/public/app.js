@@ -12,6 +12,7 @@ const state = {
   sort: { key: "ts", dir: -1 },
   filters: { search: "", provider: "", platform: "", workspace: "", model: "", mode: "", effort: "", since: "", ctx: 0 },
   group: true,
+  expanded: [],
   fields: {},                     // this project's stored-field flags
   enabled: true,                  // is this project tracked
   budgetMonthly: null,            // optional USD monthly budget (ui.budgetMonthly)
@@ -111,13 +112,14 @@ async function exportRecords(kind) {
     if (!Array.isArray(full) || !full.length) toast("full text unavailable — exported previews");
     download(`ai-usage-${stamp}.json`, JSON.stringify(out, null, 2), "application/json");
   } else {
-    const cols = ["ts", "provider", "platform", "workspace", "sessionId", "model", "permissionMode", "promptChars", "responseChars", "input", "output", "reasoning", "cacheRead", "cacheWrite", "costTotal", "costSource", "estimated", "estimatedRate", "durationMs", "contextFillPct"];
+    const cols = ["ts", "provider", "platform", "workspace", "sessionId", "model", "permissionMode", "promptChars", "responseChars", "input", "output", "reasoning", "cacheRead", "cacheWrite", "costTotal", "costSource", "estimated", "estimatedRate", "durationMs", "contextFillPct", "sessionName", "subagentRuns", "subagentCost"];
     const line = (e) => [
       e.ts, PROV(e), e.entrypoint || "", e.workspace, e.sessionId, e.model, e.permissionMode,
       e.promptChars, e.responseChars,
       T_IN(e), T_OUT(e), (e.usage && e.usage.reasoning) || 0, (e.usage && e.usage.cacheRead) || 0, (e.usage && e.usage.cacheCreate) || 0,
       COST(e), (e.cost && e.cost.source) || "", COST_ESTIMATED(e) ? 1 : 0,
       e.cost && e.cost.estimatedRate ? 1 : 0, e.durationMs || 0, e.contextFillPct || 0,
+      e.sessionName, e.counts?.subagentCalls, sumRuns(e, "cost", "total"),
     ].map(csvCell).join(",");
     const csv = [cols.join(","), ...rows.map(line)].join("\r\n");
     download(`ai-usage-${stamp}.csv`, csv, "text/csv");
@@ -161,6 +163,7 @@ async function loadConfig() {
   if (ui.filters) state.filters = { ...state.filters, ...ui.filters };
   if (ui.sort && ui.sort.key) state.sort = ui.sort;
   if (typeof ui.group === "boolean") state.group = ui.group;
+  if (Array.isArray(ui.expanded)) state.expanded = ui.expanded.filter((key) => typeof key === "string");
   state.budgetMonthly = typeof ui.budgetMonthly === "number" && ui.budgetMonthly > 0 ? ui.budgetMonthly : null;
   state.fields = cfg.fields || {};
   state.enabled = !cfg.tracking || cfg.tracking.enabled !== false;
@@ -198,10 +201,22 @@ let saveTimer;
 function persist() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
+    const live = new Set();
+    for (const e of state.view) {
+      live.add("session:" + sessionKey(e));
+      live.add(turnTreeKey(e));
+      const visit = (runs, prefix = []) => runs.forEach((run, i) => {
+        const runPath = [...prefix, i];
+        live.add("run:" + keyOf(e) + ":" + runPath.join("."));
+        visit(runsOf(run), runPath);
+      });
+      visit(runsOf(e));
+    }
+    state.expanded = [...new Set(state.expanded)].filter((key) => live.has(key)).slice(-500);
     fetch("/api/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ui: { filters: state.filters, sort: state.sort, group: state.group } }),
+      body: JSON.stringify({ ui: { filters: state.filters, sort: state.sort, group: state.group, expanded: state.expanded } }),
     }).catch(() => {});
   }, 400);
 }
@@ -301,7 +316,8 @@ function apply() {
       if (state.searchKeys) {
         if (!state.searchKeys.has(keyOf(e))) return false;
       } else {
-        const hay = ((e.promptPreview || "") + " " + (e.responsePreview || "") + " " + (e.slug || "") + " " + (e.workspace || "")).toLowerCase();
+        const hay = [e.promptPreview, e.responsePreview, e.slug, e.workspace, e.sessionName, e.sessionTitle,
+          e.agent?.nickname, ...allRuns(e).flatMap((r) => [r.agentType, r.description])].join(" ").toLowerCase();
         if (!hay.includes(q)) return false;
       }
     }
@@ -622,51 +638,144 @@ function ctxBar(pct) {
   return `<span class="ctxbar"><span class="track"><span class="fill ${cls}" style="width:${Math.min(100, pct)}%"></span></span><b class="mono">${(pct || 0).toFixed(0)}%</b></span>`;
 }
 
-function rowHtml(e) {
+const runsOf = (e) => Array.isArray(e.subagents) ? e.subagents : [];
+function allRuns(e) {
+  return runsOf(e).flatMap((run) => [run, ...allRuns(run)]);
+}
+function sumRuns(e, group, key) {
+  if (!Array.isArray(e.subagents)) return e.counts?.subagentCalls > 0 ? null : 0;
+  const runs = allRuns(e);
+  return runs.some((r) => r[group]?.[key] == null) ? null : runs.reduce((n, r) => n + r[group][key], 0);
+}
+const valueHtml = (value, fmt = String) => esc(value == null ? "—" : fmt(value));
+const sessionKey = (e, sid = e.sessionId) => JSON.stringify([PROV(e), sid == null ? "" : String(sid)]);
+function sessionHead(items) {
+  const head = { ...items[0] };
+  for (const key of ["sessionName", "sessionTitle", "slug", "branchOf", "parentSessionId", "agent"]) {
+    head[key] = items.find((e) => e[key])?.[key];
+  }
+  return head;
+}
+function sessionLabel(e) {
+  const label = e.sessionName || e.sessionTitle || e.slug || String(e.sessionId || "").slice(0, 8);
+  return !e.sessionName && e.sessionTitle
+    ? `<em class="generated-title" title="generated title">${esc(label)}</em>` : esc(label);
+}
+function loadedSessionLabel(e, sid) {
+  const items = state.all.filter((row) => sessionKey(row) === sessionKey(e, sid));
+  return items.length ? sessionLabel(sessionHead(items)) : esc(String(sid || "").slice(0, 8));
+}
+const turnTreeKey = (e) => "turn:" + keyOf(e);
+// state.expanded holds the keys toggled away from their default: a session group
+// starts open, so its turns show as before; runs and nested sessions start closed.
+const isExpanded = (key) => state.expanded.includes(key) !== key.startsWith("session:");
+function expander(key, label) {
+  const open = isExpanded(key);
+  return `<button type="button" class="tree-toggle" data-tree="${esc(key)}" aria-expanded="${esc(open)}" aria-label="${esc(label)}"><span aria-hidden="true">${open ? "▾" : "▸"}</span></button>`;
+}
+function runBadges(run) {
+  return `<span class="tag">${valueHtml(run.status)}</span>${run.background ? ' <span class="tag">background</span>' : ""}`;
+}
+function rowHtml(e, depth = 0, children = false) {
   const chip = has("skills") && e.skills && e.skills.length
     ? `<span class="skill-chip" title="skills: ${esc(e.skills.join(", "))}">▸ ${e.skills.length}</span> ` : "";
   const auto = e.synthetic
     ? `<span class="skill-chip" title="Auto-continued after a context compaction — not a prompt anyone typed">⟳</span> `
     : "";
   const prov = e.provider || "claude";
-  return `<tr class="row" data-id="${esc(e.id)}" data-provider="${esc(prov)}" data-session="${esc(e.sessionId == null ? "" : e.sessionId)}">
-    <td class="mono muted col-when">${fmtWhen(e.ts)}</td>
+  const runs = has("subagents") ? allRuns(e) : [];
+  const toggle = runs.length || children ? expander(turnTreeKey(e), "Agents for turn " + e.id) : '<span class="tree-spacer"></span>';
+  const agents = runs.length ? `<span class="tag">${esc(fmtInt(runs.length))} agents</span> ` : "";
+  return `<tr class="row" data-id="${esc(e.id)}" data-provider="${esc(prov)}" data-session="${esc(e.sessionId == null ? "" : e.sessionId)}" style="--tree-depth:${esc(depth)}">
+    <td class="mono muted col-when"><div class="tree-cell">${toggle}${fmtWhen(e.ts)}</div></td>
     <td class="col-provider"><span class="tag prov-${esc(prov)}">${esc(prov)}</span></td>
     <td class="ws col-workspace">${esc(e.workspace)}</td>
     <td class="mono col-model">${esc(shortModel(e.model))}</td>
     <td class="col-mode"><span class="tag ${esc(e.permissionMode)}">${esc(e.permissionMode)}</span></td>
-    <td class="num col-in">${fmtTok(T_IN(e))}</td>
-    <td class="num col-out">${fmtTok(T_OUT(e))}</td>
+    <td class="num col-in">${valueHtml(e.usage?.input, fmtTok)}</td>
+    <td class="num col-out">${valueHtml(e.usage?.output, fmtTok)}</td>
     <td class="num col-context">${ctxBar(e.contextFillPct)}</td>
-    <td class="num cost-cell col-cost">${COST_ESTIMATED(e) ? `<span class="est-mark" title="${esc(estReason(e))}">≈</span>` : ""}${fmtUsd(COST(e))}</td>
-    <td class="prompt-cell col-prompt">${auto}${chip}${esc(e.promptPreview)}</td>
+    <td class="num cost-cell col-cost">${COST_ESTIMATED(e) ? `<span class="est-mark" title="${esc(estReason(e))}">≈</span>` : ""}${valueHtml(e.cost?.total, fmtUsd)}</td>
+    <td class="prompt-cell col-prompt">${!state.group && e.parentSessionId ? '<span class="tag">↳ agent</span> ' : ""}${agents}${auto}${chip}${esc(e.promptPreview)}</td>
   </tr>`;
+}
+
+function runRows(e, runs, depth, path = []) {
+  return runs.map((run, i) => {
+    const runPath = [...path, i];
+    const key = "run:" + keyOf(e) + ":" + runPath.join(".");
+    const children = runsOf(run);
+    const toggle = children.length ? expander(key, "Runs launched by " + (run.agentType || "agent")) : '<span class="tree-spacer"></span>';
+    return `<tr class="run-row" data-id="${esc(e.id)}" data-provider="${esc(PROV(e))}" data-session="${esc(e.sessionId)}" style="--tree-depth:${esc(depth)}">
+      <td class="mono muted col-when"><div class="tree-cell">${toggle}<span title="Run duration">${valueHtml(run.durationMs, fmtDur)}</span></div></td>
+      <td class="col-provider"><button type="button" class="run-open" title="Open parent turn">${valueHtml(run.agentType)}</button></td>
+      <td class="col-workspace muted">${runBadges(run)}</td>
+      <td class="mono col-model">${valueHtml(run.model, shortModel)}</td>
+      <td class="col-mode muted">—</td>
+      <td class="num col-in">${valueHtml(run.usage?.input, fmtTok)}</td>
+      <td class="num col-out">${valueHtml(run.usage?.output, fmtTok)}</td>
+      <td class="col-context muted num">—</td>
+      <td class="num cost-cell col-cost">${valueHtml(run.cost?.total, fmtUsd)}</td>
+      <td class="prompt-cell col-prompt" title="${esc(run.description)}">${valueHtml(run.description)}</td>
+    </tr>${children.length && isExpanded(key) ? runRows(e, children, depth + 1, runPath) : ""}`;
+  }).join("");
+}
+function turnRows(e, depth = 0, children = [], renderGroup) {
+  return rowHtml(e, depth, children.length > 0) + (isExpanded(turnTreeKey(e))
+    ? (has("subagents") ? runRows(e, runsOf(e), depth + 1) : "") + children.map((g) => renderGroup(g, depth + 1)).join("") : "");
 }
 
 function renderTable() {
   const rows = sorted();
   $("#empty").hidden = rows.length > 0;
   const body = $("#rows");
-  if (!state.group) { body.innerHTML = rows.map(rowHtml).join(""); markSort(); return; }
+  if (!state.group) { body.innerHTML = rows.map((e) => turnRows(e)).join(""); markSort(); return; }
 
   // group by session, keep current sort order of first appearance
   const groups = new Map();
   for (const e of rows) {
-    if (!groups.has(e.sessionId)) groups.set(e.sessionId, []);
-    groups.get(e.sessionId).push(e);
+    const key = sessionKey(e);
+    if (!groups.has(key)) groups.set(key, { key, items: [], children: [], parent: null });
+    groups.get(key).items.push(e);
   }
-  let html = "";
-  for (const [sid, items] of groups) {
-    const head = items[0];
-    const cost = items.reduce((a, e) => a + COST(e), 0);
-    const costPart = has("cost") ? `${fmtUsd(cost)} · ` : "";
-    html += `<tr class="group"><td colspan="99">
-      <b>${esc(head.workspace)}</b> · ${esc(head.slug || sid.slice(0, 8))}
-      <span class="gstats">${items.length} turns · ${costPart}session ${esc(sid.slice(0, 8))}</span>
-    </td></tr>`;
-    html += items.map(rowHtml).join("");
+  for (const g of groups.values()) g.head = sessionHead(g.items);
+  for (const g of groups.values()) {
+    const e = g.head;
+    const sid = PROV(e) === "codex" ? e.parentSessionId : PROV(e) === "claude" ? e.branchOf : null;
+    const parent = sid && groups.get(sessionKey(e, sid));
+    if (!parent) continue;
+    // A malformed relationship must not hide an entire cycle of sessions.
+    let ancestor = parent;
+    while (ancestor && ancestor !== g) ancestor = ancestor.parent;
+    if (ancestor) continue;
+    g.parent = parent;
+    g.childAgent = PROV(e) === "codex";
+    g.turn = g.childAgent ? parent.items.find((row) => row.spawnedAgents?.includes(e.sessionId)) : null;
+    parent.children.push(g);
   }
-  body.innerHTML = html;
+  const agentItems = (g) => g.children.filter((child) => child.childAgent).flatMap((child) => [...child.items, ...agentItems(child)]);
+  const costTotal = (items) => items.some((e) => e.cost?.total == null) ? null : items.reduce((n, e) => n + e.cost.total, 0);
+  const renderGroup = (g, depth = 0) => {
+    const e = g.head, key = "session:" + g.key;
+    const child = PROV(e) === "codex" && e.parentSessionId;
+    const label = child ? `${esc(e.agent?.kind || "spawned")} · ${e.agent?.nickname ? esc(e.agent.nickname) : sessionLabel(e)}`
+      : `${g.parent ? "branch · " : ""}${sessionLabel(e)}`;
+    const orphan = !g.parent && (child || e.branchOf);
+    const related = agentItems(g);
+    let html = `<tr class="group" style="--tree-depth:${esc(depth)}"><td colspan="10"><div class="tree-cell">
+      ${expander(key, "Session " + (e.sessionName || e.sessionTitle || e.slug || e.sessionId))}
+      <b>${esc(e.workspace)}</b> · <span class="session-label">${label}</span>
+      ${orphan ? `<span class="tag">${child ? "agent of" : "branched from"} ${esc(String(child || e.branchOf).slice(0, 8))}</span>` : ""}
+      <span class="gstats">${esc(fmtInt(g.items.length))} turns · ${has("cost") ? `${valueHtml(costTotal(g.items), fmtUsd)} · ` : ""}session ${esc(String(e.sessionId || "").slice(0, 8))}</span>
+      ${has("cost") && related.length ? `<span class="tag">+ agents ${valueHtml(costTotal(related), fmtUsd)}</span>` : ""}
+    </div></td></tr>`;
+    if (isExpanded(key)) {
+      html += g.items.map((row) => turnRows(row, depth + 1, g.children.filter((child) => child.turn === row), renderGroup)).join("");
+      html += g.children.filter((child) => !child.turn).map((child) => renderGroup(child, depth + 1)).join("");
+    }
+    return html;
+  };
+  body.innerHTML = [...groups.values()].filter((g) => !g.parent).map((g) => renderGroup(g)).join("");
   markSort();
 }
 
@@ -747,6 +856,32 @@ function detailBlock(kind, label, chars, text) {
 }
 
 // ---------- drawer ----------
+function runMetrics(e, main = false) {
+  const metrics = [
+    ["input", e.usage?.input, fmtInt], ["output", e.usage?.output, fmtInt],
+    ["cache write", e.usage?.cacheCreate, fmtInt], ["cache read", e.usage?.cacheRead, fmtInt],
+    ["cost", e.cost?.total, fmtUsd],
+  ];
+  if (!main) metrics.push(["duration", e.durationMs, fmtDur], ["api calls", e.counts?.apiCalls, fmtInt], ["tool calls", e.counts?.toolCalls, fmtInt]);
+  return `<dl class="run-metrics">${metrics.map(([label, value, fmt]) => `<div><dt>${esc(label)}</dt><dd>${valueHtml(value, fmt)}</dd></div>`).join("")}</dl>`;
+}
+function subagentSection(e) {
+  if (!has("subagents") || !runsOf(e).length) return "";
+  const main = { usage: {}, cost: {} };
+  for (const [group, keys] of [["usage", ["input", "output", "cacheCreate", "cacheRead"]], ["cost", ["total"]]]) {
+    for (const key of keys) {
+      const total = e[group]?.[key], agents = sumRuns(e, group, key);
+      main[group][key] = total == null || agents == null ? null : Math.max(0, total - agents);
+    }
+  }
+  const cards = (runs) => runs.map((run) => `<article class="run-card">
+    <div class="run-heading"><b>${valueHtml(run.agentType)}</b>${runBadges(run)}</div>
+    <p>${valueHtml(run.description)}</p><div class="muted mono">${valueHtml(run.model)}</div>
+    ${runMetrics(run)}${runsOf(run).length ? `<div class="run-children">${cards(runsOf(run))}</div>` : ""}
+  </article>`).join("");
+  return `<section class="block"><div class="bh"><span>subagents</span><span>${esc(fmtInt(allRuns(e).length))} runs</span></div>
+    <div class="main-thread"><b>main thread</b>${runMetrics(main, true)}</div>${cards(runsOf(e))}</section>`;
+}
 async function openDrawer(id, provider, session) {
   const drawer = $("#drawer");
   drawer.hidden = false;
@@ -767,6 +902,13 @@ async function openDrawer(id, provider, session) {
   if (e.entrypoint) meta.push(`<span title="platform the prompt was sent from">⌂ ${esc(e.entrypoint)}</span>`);
   if (e.cliVersion) meta.push(`<span>v${esc(e.cliVersion)}</span>`);
   if (e.serviceTier || e.speed) meta.push(`<span>${esc(e.serviceTier || "")}/${esc(e.speed || "")}</span>`);
+  if (e.branchOf) meta.push(`<span>branched from ${loadedSessionLabel(e, e.branchOf)}</span>`);
+  if (e.agent) {
+    meta.push(`<span>${valueHtml(e.agent.kind)} · ${valueHtml(e.agent.nickname)}</span>`,
+      `<span>role ${valueHtml(e.agent.role)}</span>`, `<span>path ${valueHtml(e.agent.path)}</span>`,
+      `<span>depth ${valueHtml(e.agent.depth, fmtInt)}</span>`,
+      `<span>agent of ${e.parentSessionId ? loadedSessionLabel(e, e.parentSessionId) : "—"}</span>`);
+  }
   // dgrid cells, each gated on its field group + presence
   const cells = [];
   if (has("cost") && e.cost) cells.push(`<div><div class="k">cost</div><div class="v accent">${fmtUsd(c.total)}</div></div>`);
@@ -800,10 +942,11 @@ total  ${fmtUsd(c.total)}
 source ${esc(costSource)}</pre></div>` : "";
   $("#drawer-panel").innerHTML = `
     <div class="dhead"><span class="deyebrow">prompt detail</span><span class="dhead-actions"><button class="btn danger ddel" data-del="${esc(e.id)}" data-provider="${esc(PROV(e))}" data-session="${esc(e.sessionId)}">delete</button><button class="btn ghost dclose" data-close>✕ close</button></span></div>
-    <h2>${esc(e.workspace)} <span class="muted" style="font-family:var(--mono);font-size:13px">/ ${esc(e.slug || "")}</span></h2>
+    <h2>${esc(e.workspace)} <span class="drawer-session">/ ${sessionLabel(sessionHead([e, ...state.all.filter((row) => sessionKey(row) === sessionKey(e))]))}</span></h2>
     <div class="dmeta">${meta.join("")}</div>
     ${has("skills") && e.skills && e.skills.length ? `<div class="dskills"><span class="dskills-k">skills</span>${e.skills.map((s) => `<span class="skill-tag">${esc(s)}</span>`).join("")}</div>` : ""}
     ${cells.length ? `<div class="dgrid">${cells.join("")}</div>` : ""}
+    ${subagentSection(e)}
     ${textBlock("prompt", "prompt", e.promptChars, e.prompt)}
     ${textBlock("response", "response", e.responseChars, e.response)}
     ${costBreakdown}`;
@@ -825,7 +968,8 @@ const FIELD_META = [
   ["timing", "timing", "duration + first-response latency"],
   ["skills", "skills", "skills invoked per prompt"],
   ["counts", "tool counts", "api / subagent / tool / thinking counts"],
-  ["meta", "metadata", "git branch, cli version, slug, tier, effort"],
+  ["subagents", "subagent runs", "each run's type, description, tokens, cost and time"],
+  ["meta", "metadata", "session names, git branch, cli version, slug, tier, effort"],
 ];
 function renderSettings() {
   const panel = $("#settings-panel");
@@ -930,7 +1074,16 @@ function bind() {
     })
   );
   $("#rows").addEventListener("click", (e) => {
-    const tr = e.target.closest("tr.row"); if (tr) openDrawer(tr.dataset.id, tr.dataset.provider, tr.dataset.session);
+    const toggle = e.target.closest("[data-tree]");
+    if (toggle) {
+      const key = toggle.dataset.tree;
+      state.expanded = state.expanded.includes(key) ? state.expanded.filter((k) => k !== key) : [...state.expanded, key];
+      renderTable();
+      persist();
+      [...document.querySelectorAll("#rows [data-tree]")].find((button) => button.dataset.tree === key)?.focus();
+      return;
+    }
+    const tr = e.target.closest("tr.row, tr.run-row"); if (tr) openDrawer(tr.dataset.id, tr.dataset.provider, tr.dataset.session);
   });
   $("#drawer").addEventListener("click", async (e) => {
     if (e.target.dataset.close !== undefined) return closeDrawer();

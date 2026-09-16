@@ -97,6 +97,7 @@ export async function buildTurns(ref, opts = {}) {
 
   const cwd = (ref && ref.cwd) || opts.cwd || (session && session.directory) || null;
   const sessionModel = cleanModel(session && session.model);
+  const sessionName = typeof session?.title === "string" && session.title.trim() ? session.title : null;
 
   // Segment at user messages; attach following assistant messages.
   const turns = [];
@@ -144,14 +145,14 @@ export async function buildTurns(ref, opts = {}) {
           ts: t.ts,
           endTs: t.endTs,
         },
-        { sessionId, cwd, index: i },
+        { sessionId, sessionName, cwd, index: i },
       ),
     );
   }
 
   // Any missing assistant usage makes per-turn accounting incomplete. Do not
   // invent an allocation: emit one authoritative session rollup instead.
-  return [sessionRecord(session, inputs, { sessionId, cwd })];
+  return [sessionRecord(session, inputs, { sessionId, sessionName, cwd })];
 }
 
 const promptFor = (inputs, i) => (inputs[i] && inputs[i].prompt) || (inputs[0] && inputs[0].prompt) || "";
@@ -177,6 +178,7 @@ function finalizeTurn(t, ctx) {
   return record({
     id: `${ctx.sessionId}:${ctx.index}`,
     sessionId: ctx.sessionId,
+    sessionName: ctx.sessionName,
     cwd: ctx.cwd,
     model: t.model || null,
     prompt: t.prompt || "",
@@ -211,6 +213,7 @@ function sessionRecord(session, inputs, ctx) {
   return record({
     id: `${ctx.sessionId}:0`,
     sessionId: ctx.sessionId,
+    sessionName: ctx.sessionName,
     cwd: ctx.cwd,
     model: cleanModel(s.model),
     prompt: (inputs[0] && inputs[0].prompt) || s.title || "",
@@ -233,6 +236,8 @@ function record(r) {
     id: r.id,
     provider: "opencode",
     sessionId: r.sessionId,
+    sessionName: r.sessionName,
+    sessionTitle: null,
     cwd: r.cwd,
     slug: null,
     gitBranch: null,

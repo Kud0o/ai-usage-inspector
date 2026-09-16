@@ -1,3 +1,4 @@
+import "../test-support/isolate.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -66,6 +67,26 @@ const provider = () => import("../src/providers/cursor/index.mjs");
 const composer = (bubbles, meta = {}) => ({
   meta: { createdAt: 1_700_000_000_000, lastUpdatedAt: 1_700_000_060_000, ...meta },
   bubbles,
+});
+
+test("Cursor composer names stamp every turn and missing or invalid names are null", needsSqlite, async (t) => {
+  const names = ["Synthetic composer", "", "  ", null, 42, undefined];
+  const bubbles = [
+    { bubbleId: "u1", type: 1, text: "first" },
+    { bubbleId: "a1", type: 2, text: "answer", tokenUsage: { inputTokens: 100, outputTokens: 10 } },
+    { bubbleId: "u2", type: 1, text: "second" },
+    { bubbleId: "a2", type: 2, text: "answer", tokenUsage: { inputTokens: 200, outputTokens: 20 } },
+  ];
+  await fixture(t, { composers: Object.fromEntries(names.map((name, i) => [`name-${i}`, composer(bubbles, { name })])) });
+  const p = await provider();
+  for (const [i, name] of names.entries()) {
+    const turns = await p.buildTurns({ composerId: `name-${i}` });
+    assert.equal(turns.length, 2);
+    for (const turn of turns) {
+      assert.equal(turn.sessionName, typeof name === "string" && name.trim() ? name : null);
+      assert.equal(turn.sessionTitle, null);
+    }
+  }
 });
 
 test("exact per-bubble token usage is used and not marked estimated", needsSqlite, async (t) => {

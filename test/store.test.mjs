@@ -1,3 +1,4 @@
+import "../test-support/isolate.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -19,6 +20,78 @@ function validRecords(file) {
       try { return [JSON.parse(line)]; } catch { return []; }
     });
 }
+
+test("unchanged usage preserves computed turn and recursive run costs by agent identity", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-run-cost-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "usage.ndjson");
+  const run = (agentId, total, subagents = []) => ({ agentId, usage: { input: 10 }, cost: { total, source: "priced" }, subagents });
+  const old = { provider: "claude", sessionId: "s", id: "x", usage: { input: 100 }, cost: { total: 1, source: "priced" },
+    subagents: [run("a", .2, [run("nested", .1)]), run("b", .3)] };
+  await upsertSession(file, "s", [old]);
+  const fresh = structuredClone(old);
+  fresh.cost.total = 10;
+  fresh.subagents = [run("b", 3), run("a", 2, [run("nested", 1)]), run("new", 4)];
+  await upsertSession(file, "s", [fresh]);
+  const saved = validRecords(file)[0];
+  assert.equal(saved.cost.total, 1);
+  assert.deepEqual(saved.subagents.map((r) => r.cost.total), [.3, .2, 4]);
+  assert.equal(saved.subagents[1].subagents[0].cost.total, .1);
+  fresh.usage.input++;
+  await upsertSession(file, "s", [fresh]);
+  assert.deepEqual(validRecords(file)[0].subagents, fresh.subagents);
+});
+
+test("relabeling an unchanged turn amount also preserves its runs' recorded costs", async (t) => {
+  const file = usageFile(t);
+  const cost = { input: 1, output: 0, cacheWrite: 0, cacheRead: 0, total: 1, source: "priced" };
+  const old = { provider: "claude", sessionId: "s", id: "x", usage: { input: 10 }, cost,
+    subagents: [{ agentId: "a", usage: { input: 5 }, cost: { total: .2, source: "priced" } }] };
+  await upsertSession(file, "s", [old]);
+  const fresh = structuredClone(old);
+  fresh.cost.source = "estimated";
+  fresh.subagents[0].cost.total = 2;
+  await upsertSession(file, "s", [fresh]);
+  assert.equal(validRecords(file)[0].cost.source, "estimated");
+  assert.equal(validRecords(file)[0].subagents[0].cost.total, .2);
+});
+
+test("an unmarked early fork never displaces the richer shared turn in either read order or collapse", async (t) => {
+  const { collapseStoredCopies } = await import("../src/lib/store.mjs");
+  const { buildTurns } = await import("../src/providers/claude/transcript.mjs");
+  const file = usageFile(t);
+  const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const stamp = (seconds) => `2026-07-01T10:00:${seconds}.000Z`;
+  const prompt = (sessionId, n, seconds) => ({ type: "user", sessionId, uuid: id(n), promptId: "p" + n,
+    timestamp: stamp(seconds), message: { content: "prompt" } });
+  const assistant = (input) => ({ type: "assistant", timestamp: stamp("01"),
+    message: { id: "m", model: "claude-sonnet-4-5", content: [{ type: "text", text: "answer" }], usage: { input_tokens: input } } });
+  const write = (target, rows) => {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, rows.map(JSON.stringify).join("\n") + "\n");
+  };
+  const originalFile = path.join(path.dirname(file), "O.jsonl");
+  const branchFile = path.join(path.dirname(file), "B.jsonl");
+  write(originalFile, [prompt("O", 1, "00"), assistant(10), prompt("O", 3, "40")]);
+  write(branchFile, [{ type: "system", timestamp: stamp("20") }, prompt("B", 1, "00"), assistant(10), prompt("B", 2, "30")]);
+  write(path.join(path.dirname(file), "O", "subagents", "agent-a.jsonl"), [
+    { type: "user", promptId: "p1", isSidechain: true, timestamp: stamp("02"), message: { content: "work" } }, assistant(90),
+  ]);
+  const original = buildTurns(originalFile), branch = buildTurns(branchFile);
+  assert.equal(original[0].subagents.length, 1);
+  assert.equal(branch[0].copied, undefined, "a fork within sixty seconds is unmarked");
+  for (const batches of [[original, branch], [branch, original]]) {
+    fs.writeFileSync(file, "");
+    for (const batch of batches) await upsertSession(file, batch[0].sessionId, batch);
+    const shared = validRecords(file).filter((r) => r.id === id(1));
+    assert.equal(shared.length, 1);
+    assert.equal(shared[0].usage.input, 100);
+    write(file, batches.flat());
+    await collapseStoredCopies(file);
+    assert.equal(validRecords(file).filter((r) => r.id === id(1)).length, 1);
+    assert.equal(validRecords(file).find((r) => r.id === id(1)).usage.input, 100);
+  }
+});
 
 test("store uses unique temps, serializes concurrent upserts, and preserves malformed lines", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-store-"));

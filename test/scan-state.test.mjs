@@ -1,3 +1,4 @@
+import "../test-support/isolate.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -151,4 +152,14 @@ test("one aggregate directory spelled two ways settles one repair on Windows", {
   await markRepaired("cursor", REPAIR_EPOCH, { file });
   process.env.AI_USAGE_DIR = dir.toLowerCase();
   assert.equal(repairDue("cursor", { file }), null);
+});
+
+// 2.6.0 changes where rows live and how branches and subagent runs count, so an
+// install that already repaired at the previous epoch owes one more full read.
+test("an upgrade from an install repaired at an earlier epoch asks again", async (t) => {
+  const file = tmpState(t);
+  fs.writeFileSync(file, JSON.stringify({ schema: 1, providers: {}, installedRepairEpoch: REPAIR_EPOCH - 1 }));
+  assert.equal(await recordInstall({ file, upgrading: true, providerIds: ["claude"] }), true);
+  assert.equal(repairDue("claude", { file }), REPAIR_EPOCH);
+  assert.ok(REPAIR_EPOCH >= 2);
 });

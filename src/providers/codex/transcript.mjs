@@ -14,9 +14,40 @@
 // (tool loops). Older flat formats (no `payload` wrapper) are tolerated.
 import fs from "node:fs";
 import path from "node:path";
+import { HOME } from "../../lib/paths.mjs";
 import { costOf, contextMax } from "./pricing.mjs";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// The name a user gave a thread lives in Codex's session index, not the rollout.
+// A thread renamed twice has two lines; the latest one is its name. One torn
+// line must not hide every other thread's name.
+function sessionName(sessionId) {
+  let text;
+  try {
+    text = fs.readFileSync(path.join(process.env.CODEX_HOME || path.join(HOME, ".codex"), "session_index.jsonl"), "utf8");
+  } catch {
+    return null;
+  }
+  let latest = -Infinity;
+  let name = null;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!entry || entry.id !== sessionId) continue;
+    const updated = Date.parse(entry.updated_at);
+    if (Number.isFinite(updated) && updated >= latest) {
+      latest = updated;
+      name = typeof entry.thread_name === "string" && entry.thread_name.trim() ? entry.thread_name : null;
+    }
+  }
+  return name;
+}
 
 /**
  * The ids a canonical rollout filename encodes, read the way codex-rs reads them
@@ -191,7 +222,21 @@ export function buildTurns(rolloutPath, opts = {}) {
   let meta = {};
   for (const c of recs) if (isSessionMeta(c)) { meta = c.body; break; }
   const sessionId = opts.sessionId || meta.id || meta.session_id || null;
-  const cwd = opts.cwd || meta.cwd || null;
+  const nameFromIndex = sessionName(sessionId);
+  const subagent = meta.source && typeof meta.source === "object" ? meta.source.subagent : null;
+  const spawn = subagent && subagent.thread_spawn;
+  const parentSessionId = meta.parent_thread_id || (spawn && spawn.parent_thread_id);
+  const hierarchy = parentSessionId ? {
+    parentSessionId,
+    agent: {
+      kind: subagent && subagent.other === "guardian" ? "guardian" : "spawned",
+      nickname: meta.agent_nickname ?? spawn?.agent_nickname ?? null,
+      path: meta.agent_path ?? spawn?.agent_path ?? null,
+      role: meta.agent_role ?? spawn?.agent_role ?? null,
+      depth: spawn?.depth ?? null,
+    },
+  } : {};
+  const cwd = meta.cwd || opts.cwd || null;
   const sessionModel =
     opts.model || meta.model || (meta.turn_context && meta.turn_context.model) || "unknown";
   const cliVersion = meta.cli_version || meta.version || null;
@@ -221,6 +266,7 @@ export function buildTurns(rolloutPath, opts = {}) {
   // dashboard turns. Fall back to response_item/user for older rollouts.
   const hasUserEvents = recs.some(isUserEvent);
   const catalog = skillCatalog(recs);
+  const spawnCalls = new Set();
 
   const openTurn = (c) => {
     cur = {
@@ -233,6 +279,7 @@ export function buildTurns(rolloutPath, opts = {}) {
       model: currentModel,
       effort: currentEffort,
       skillSet: explicitSkills(userText(c), catalog),
+      spawnedAgents: new Set(),
       startTotal: { ...runningTotal },
       lastCtxInput: 0,
       ctxWindow: 0,
@@ -265,6 +312,18 @@ export function buildTurns(rolloutPath, opts = {}) {
     if (!cur) continue; // skip anything before the first user prompt
     if (c.ts) cur.endTs = c.ts;
     collectToolSkills(c, catalog, cur.skillSet);
+    if (c.sub === "function_call" && /(^|\.)spawn_agent$/.test(c.body.name || "") && c.body.call_id) {
+      spawnCalls.add(c.body.call_id);
+    }
+    // The completion item names the child; the envelope's thread_id is the parent.
+    if (c.top === "event_msg" && c.sub === "item_completed") {
+      const item = c.body.item;
+      if (item?.type === "SubAgentActivity" && item.kind === "started"
+        && spawnCalls.has(item.id) && UUID_RE.test(item.agent_thread_id)) {
+        const turn = turns.find((t) => t.turnId && t.turnId === c.body.turn_id) || cur;
+        turn.spawnedAgents.add(item.agent_thread_id);
+      }
+    }
 
     if (isAssistantMessage(c)) {
       cur.response += contentText(c.body.content);
@@ -295,6 +354,8 @@ export function buildTurns(rolloutPath, opts = {}) {
     .map((t, i) =>
       finalizeTurn(t, {
         sessionId,
+        sessionName: nameFromIndex,
+        hierarchy,
         cwd,
         cliVersion,
         index: i,
@@ -342,6 +403,10 @@ function finalizeTurn(t, ctx) {
     ...(qualified ? { legacyId: baseId } : {}),
     provider: "codex",
     sessionId: ctx.sessionId,
+    sessionName: ctx.sessionName,
+    sessionTitle: null,
+    ...ctx.hierarchy,
+    ...(t.spawnedAgents.size ? { spawnedAgents: [...t.spawnedAgents] } : {}),
     cwd: ctx.cwd,
     slug: null,
     gitBranch: null,
