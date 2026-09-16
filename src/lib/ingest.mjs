@@ -12,7 +12,32 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Bump when the bundled viewer changes so existing projects refresh their copy
 // on the next prompt (after the user re-installs the app via npx).
-export const VIEWER_VERSION = "20";
+// 21: bundles written by a sweep run from a checkout are missing the settings
+// module and cannot start; every bundle is rewritten once to repair them.
+export const VIEWER_VERSION = "21";
+
+// A project gets viewer/ and nothing else — no src/ tree beside it — so the
+// modules the bundled dashboard imports are copied in next to it, under the
+// names it looks for. One list, used by the installer when it builds the app and
+// by ensureBundle when it writes a project's copy, so a bundle is never missing
+// a module because of which tree it was written from.
+export const VIEWER_SIDECARS = [
+  ["lib/config.mjs", "config.mjs"],
+  ["lib/store.mjs", "store.mjs"],
+  ["providers/claude/remote-pricing.mjs", "remote-pricing.mjs"],
+  ["providers/codex/remote-pricing.mjs", "remote-pricing-codex.mjs"],
+  ["providers/cursor/remote-pricing.mjs", "remote-pricing-cursor.mjs"],
+];
+
+/** Put those modules beside a viewer copy. Existing files are left alone. */
+export function copyViewerSidecars(viewerDir, srcRoot = path.join(__dirname, "..")) {
+  for (const [from, name] of VIEWER_SIDECARS) {
+    const target = path.join(viewerDir, name);
+    if (fs.existsSync(target)) continue;
+    const source = path.join(srcRoot, ...from.split("/"));
+    if (fs.existsSync(source)) fs.copyFileSync(source, target);
+  }
+}
 
 // The file a user double-clicks to see their dashboard, so nobody has to open a
 // terminal and remember a path. It is deliberately thin: it only runs
@@ -81,6 +106,11 @@ function ensureBundle(cwd) {
     if (fs.existsSync(viewerSrc) && stale) {
       fs.rmSync(viewerDst, { recursive: true, force: true });
       fs.cpSync(viewerSrc, viewerDst, { recursive: true });
+      // An installed app carries these already; a sweep run straight from a
+      // checkout copies that checkout's viewer/, which carries none of them, and
+      // every bundle it wrote would die on an import before it could listen.
+      // Whatever tree this came from, the bundle leaves here able to run.
+      copyViewerSidecars(viewerDst);
       fs.writeFileSync(verFile, VIEWER_VERSION + "\n");
     }
     const cfgFile = path.join(base, "config.json");

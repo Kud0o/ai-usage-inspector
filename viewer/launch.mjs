@@ -24,7 +24,8 @@ import { coordinateStartup, readRuntime, runtimePaths } from "./runtime.mjs";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(HERE, "..");            // <project>/.ai-usage
 const SERVER = path.join(HERE, "server.mjs");
-const { runtimeFile: RUNTIME_FILE, lockFile: START_LOCK } = runtimePaths(DATA_DIR);
+const { runtimeFile: RUNTIME_FILE, lockFile: START_LOCK, dir: RUNTIME_DIR } = runtimePaths(DATA_DIR);
+const LOG_FILE = path.join(RUNTIME_DIR, "viewer-start.log");
 const READY_TIMEOUT_MS = 20_000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -84,16 +85,40 @@ export async function openBrowser(url, { platform = process.platform, spawnImpl 
   return false;
 }
 
+/** The tail of what the server printed, for a start that never finished. */
+export function lastLines(file, count) {
+  let text = "";
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return [];
+  }
+  const lines = text.split(/\r?\n/).map((l) => l.trimEnd()).filter(Boolean);
+  return lines.slice(-count);
+}
+
 async function startServer() {
   const nonce = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  // Keep whatever the server says on its way out. Discarding it turned a plain
+  // error — a missing file, a port it could not take — into twenty seconds of
+  // waiting and no reason at all. The file is truncated on each start, so it
+  // holds this attempt only, and the server never sees a pipe that could fill.
+  let log = null;
+  try {
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    log = fs.openSync(LOG_FILE, "w");
+  } catch {}
   const child = spawn(process.execPath, [SERVER], {
     cwd: path.resolve(DATA_DIR, ".."),
     detached: true,
-    stdio: "ignore",
+    stdio: log === null ? "ignore" : ["ignore", log, log],
     windowsHide: true,
     env: { ...process.env, AI_USAGE_INSTANCE: nonce },
   });
   child.unref();
+  if (log !== null) {
+    try { fs.closeSync(log); } catch {}
+  }
 
   // Wait for the server to say where it landed, then confirm it answers. A
   // fixed sleep would either open a dead page or waste time on a fast machine.
@@ -127,8 +152,9 @@ async function main() {
   }
 
   if (!runtime) {
-    console.error("\n  The dashboard did not start in time.");
-    console.error("  Run it directly to see why:");
+    console.error("\n  The dashboard did not start.");
+    for (const line of lastLines(LOG_FILE, 12)) console.error(`    ${line}`);
+    console.error("\n  Run it directly to see more:");
     console.error(`    node "${SERVER}"\n`);
     process.exitCode = 1;
     return;

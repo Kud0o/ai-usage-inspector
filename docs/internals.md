@@ -445,8 +445,17 @@ Its paths are relative to itself, so moving or renaming the project keeps it wor
 `node` being resolvable from the GUI process's `PATH`; otherwise the shell shows a command-not-found
 message and no dashboard opens (the Windows shim pauses on that error).
 
+A project gets `viewer/` and nothing else — no `src/` tree beside it — so the modules the bundled
+server imports are copied in next to it, under the names it looks for: `config.mjs`, `store.mjs`, and
+the three per-provider pricing refreshers. `VIEWER_SIDECARS` in `src/lib/ingest.mjs` is that list, and
+both the installer (building the app) and `ensureBundle` (writing a project's copy) use it, so a
+bundle cannot be missing a module because of which tree wrote it. A sweep run straight from a
+checkout used to produce bundles that died on an import before they could listen.
+
 The launcher takes an atomic per-project startup lock, then spawns the server detached with
-`windowsHide` and passes it an instance nonce. The server records that nonce, its port, pid, and
+`windowsHide` and passes it an instance nonce. Its output goes to `viewer-start.log` in that runtime
+directory, and a start that never finishes prints the tail of it: without that, a plain error — a
+missing module, a port it could not take — surfaced only as twenty seconds of waiting. The server records that nonce, its port, pid, and
 absolute data path in an OS-temporary runtime directory keyed by a hash of the canonical project
 path. Keeping coordination machine-local prevents a synced project's state from one machine being
 mistaken for another's. A crashed launcher's lock becomes stale and can be reclaimed; contenders

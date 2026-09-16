@@ -5,6 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { spawn } from "node:child_process";
+import { ensureBundleForTest } from "../src/lib/ingest.mjs";
 import { openBrowser } from "../viewer/launch.mjs";
 import { coordinateStartup, ensureRuntimeDir, refuseReason, runtimeDirUsable, runtimePaths } from "../viewer/runtime.mjs";
 
@@ -238,4 +240,52 @@ test("the runtime base is checked, not only the project directory", { skip: proc
   ensureRuntimeDir(leaf);
   assert.equal(fs.statSync(base).mode & 0o777, 0o700, "an open base of ours is tightened");
   assert.equal(fs.statSync(leaf).mode & 0o777, 0o700);
+});
+
+// The bundle a project gets must run on its own. A sweep run from a checkout
+// copies that checkout's viewer/, which carries no settings module, and every
+// dashboard it wrote then died on an import before it could listen — twenty
+// seconds of waiting, and nothing said why.
+test("the bundle a project is given starts and serves, whatever tree wrote it", async (t) => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-bundle-"));
+  const paths = runtimePaths(path.join(project, ".ai-usage"));
+  const previous = process.env.AI_USAGE_DIR;
+  delete process.env.AI_USAGE_DIR;
+  let server = null;
+  // One teardown, in order: the server holds the project as its working
+  // directory, and Windows refuses to remove a directory while it does.
+  t.after(async () => {
+    if (previous !== undefined) process.env.AI_USAGE_DIR = previous;
+    if (server && server.exitCode === null) {
+      server.kill();
+      await new Promise((resolve) => server.once("exit", resolve));
+    }
+    for (const dir of [project, paths.dir]) {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+    }
+  });
+  ensureBundleForTest(project);
+  const bundle = path.join(project, ".ai-usage", "viewer");
+  assert.ok(fs.existsSync(path.join(bundle, "config.mjs")), "the settings module travels with the bundle");
+
+  // Start it the way the launcher does, from a copy that has no src/ beside it.
+  server = spawn(process.execPath, [path.join(bundle, "server.mjs"), "--no-sync", "--no-pricing-refresh"], {
+    cwd: project,
+    env: { ...process.env, AI_USAGE_INSTANCE: "bundle-test", PORT: "0" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  server.stdout.on("data", (d) => { output += d; });
+  server.stderr.on("data", (d) => { output += d; });
+  const deadline = Date.now() + 20_000;
+  let runtime = null;
+  while (Date.now() < deadline && !runtime) {
+    await pause(100);
+    try { runtime = JSON.parse(fs.readFileSync(paths.runtimeFile, "utf8")); } catch {}
+    if (server.exitCode !== null) break;
+  }
+  assert.ok(runtime && runtime.port, `the bundled dashboard never listened:\n${output}`);
+  const res = await fetch(`http://127.0.0.1:${runtime.port}/api/status`);
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).app, "ai-usage-inspector");
 });

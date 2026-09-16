@@ -26,7 +26,7 @@ import os from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { getProvider, listProviders, detectInstalled } from "./src/providers/index.mjs";
-import { launcherName } from "./src/lib/ingest.mjs";
+import { copyViewerSidecars, launcherName } from "./src/lib/ingest.mjs";
 import { recordInstall } from "./src/lib/scan-state.mjs";
 
 const REPO = path.dirname(fileURLToPath(import.meta.url));
@@ -124,24 +124,11 @@ function copyApp() {
   fs.mkdirSync(APP, { recursive: true });
   fs.cpSync(path.join(REPO, "src"), path.join(APP, "src"), { recursive: true });
   fs.cpSync(path.join(REPO, "viewer"), path.join(APP, "viewer"), { recursive: true });
-  // The per-project bundle ships viewer/ only (no src/). Copy the self-contained
-  // modules the bundled server imports next to the viewer (config/store + the Claude
-  // pricing refresher). ensureBundle copies the whole viewer/ dir into each
-  // project, so these ride along automatically.
-  fs.cpSync(path.join(REPO, "src", "lib", "config.mjs"), path.join(APP, "viewer", "config.mjs"));
-  fs.cpSync(path.join(REPO, "src", "lib", "store.mjs"), path.join(APP, "viewer", "store.mjs"));
-  fs.cpSync(
-    path.join(REPO, "src", "providers", "claude", "remote-pricing.mjs"),
-    path.join(APP, "viewer", "remote-pricing.mjs"),
-  );
-  fs.cpSync(
-    path.join(REPO, "src", "providers", "codex", "remote-pricing.mjs"),
-    path.join(APP, "viewer", "remote-pricing-codex.mjs"),
-  );
-  fs.cpSync(
-    path.join(REPO, "src", "providers", "cursor", "remote-pricing.mjs"),
-    path.join(APP, "viewer", "remote-pricing-cursor.mjs"),
-  );
+  // The per-project bundle ships viewer/ only (no src/), so the modules the
+  // bundled server imports are copied next to the viewer. ensureBundle copies the
+  // whole viewer/ dir into each project, so these ride along automatically — and
+  // puts them there itself when the tree it runs from has none.
+  copyViewerSidecars(path.join(APP, "viewer"), path.join(REPO, "src"));
   return upgrading;
 }
 
