@@ -562,6 +562,63 @@ function panZoom(keys, zoom, offset) {
   const start = Math.max(0, Math.min(keys.length - width, keys.indexOf(shown[0]) + Math.round(offset)));
   return zoomFromIndices(keys, start, start + width - 1);
 }
+function overviewMetricLabel() {
+  return has("tokens") ? "Daily tokens" : has("cost") ? "Daily cost" : "Daily turns";
+}
+function overviewNoteText(axis, grain) {
+  const coverage = axis === "calendar" ? "Every calendar day, including days with no use" : "Only days with use \u00b7 gaps removed";
+  const grouping = grain === "week" ? "grouped by week (Mon\u2013Sun)" : grain === "month" ? "grouped by month" : "shown by day";
+  return `${coverage} \u00b7 ${grouping}`;
+}
+function overviewSelectionText(all, shown, axis) {
+  if (!all.length || !shown.length) return "";
+  const days = shown.length;
+  const unit = axis === "active" ? (days === 1 ? "active day" : "active days") : (days === 1 ? "day" : "days");
+  return `Showing ${fmtDay(shown[0])} \u2013 ${fmtDay(shown[shown.length - 1])} \u00b7 ${fmtInt(days)} ${unit}`;
+}
+// Square-root heights keep a quiet day visible beside a spike; linear scaling
+// would collapse it to a sub-pixel sliver. A small nonzero floor guarantees at
+// least a hairline even for the quietest day with recorded use.
+function overviewBarHeight(value, max) {
+  if (!(value > 0) || !(max > 0)) return 0;
+  return Math.max(1.5, Math.sqrt(value / max) * 28);
+}
+function overviewIndexAt(allKeys, ratio) {
+  if (!allKeys.length) return 0;
+  return Math.max(0, Math.min(allKeys.length - 1, Math.floor(ratio * allKeys.length)));
+}
+// Native arrows move one day; PageUp/PageDown move one week so keyboard users
+// can cross a month without dozens of presses. Home/End jump to the ends.
+function overviewHandleKey(value, key, maxIndex) {
+  if (key === "Home") return 0;
+  if (key === "End") return maxIndex;
+  if (key === "PageUp") return Math.max(0, Math.min(maxIndex, value - 7));
+  if (key === "PageDown") return Math.max(0, Math.min(maxIndex, value + 7));
+  if (key === "ArrowLeft" || key === "ArrowUp") return Math.max(0, Math.min(maxIndex, value - 1));
+  if (key === "ArrowRight" || key === "ArrowDown") return Math.max(0, Math.min(maxIndex, value + 1));
+  return null;
+}
+// Clicking the dimmed strip outside the window moves the whole window there,
+// keeping its width; a click inside the window leaves it where it is.
+function overviewClickZoom(allKeys, zoom, ratio) {
+  const shown = daysInZoom(allKeys, zoom), width = shown.length;
+  if (!allKeys.length || width >= allKeys.length || width < 1) return zoomFromIndices(allKeys, 0, allKeys.length - 1);
+  const center = overviewIndexAt(allKeys, ratio);
+  if (allKeys[center] >= shown[0] && allKeys[center] <= shown[shown.length - 1]) return zoom;
+  let start = Math.round(center - (width - 1) / 2);
+  start = Math.max(0, Math.min(allKeys.length - width, start));
+  return zoomFromIndices(allKeys, start, start + width - 1);
+}
+// Dragging the highlighted window pans it by the dragged distance, clamped so
+// the window keeps its width at both edges.
+function overviewDragZoom(allKeys, zoom, fromRatio, toRatio) {
+  if (!zoom) return null;
+  const shown = daysInZoom(allKeys, zoom), width = shown.length;
+  if (width >= allKeys.length) return null;
+  const delta = Math.round((toRatio - fromRatio) * allKeys.length);
+  const start = Math.max(0, Math.min(allKeys.length - width, allKeys.indexOf(shown[0]) + delta));
+  return zoomFromIndices(allKeys, start, start + width - 1);
+}
 function chartControls(all, shown, grain) {
   const select = (name, options, selected) => `<label>${name === "axis" ? "Time axis" : "Group by"}<select data-chart-option="${name}">${options.map(([value, label]) => `<option value="${value}"${value === selected ? " selected" : ""}>${label}</option>`).join("")}</select></label>`;
   const metric = has("tokens") ? "tok" : has("cost") ? "cost" : "n";
@@ -569,12 +626,18 @@ function chartControls(all, shown, grain) {
   // At most 240 overview columns, each preserving its bin's peak.
   const stride = Math.max(1, Math.ceil(all.length / 240)), peaks = [];
   for (let i = 0; i < all.length; i += stride) peaks.push(all.slice(i, i + stride).reduce((m, k) => Math.max(m, CHART_DAYS.days[k][metric]), 0));
-  const bars = peaks.map((value, i) => `<rect x="${i * 100 / peaks.length}" y="${30 - value / max * 28}" width="${100 / peaks.length}" height="${value / max * 28}"/>`).join("");
+  const bars = peaks.map((value, i) => { const h = overviewBarHeight(value, max); return `<rect x="${i * 100 / peaks.length}" y="${30 - h}" width="${100 / peaks.length}" height="${h}"/>`; }).join("");
   const start = Math.max(0, all.indexOf(shown[0])), end = Math.max(0, all.indexOf(shown[shown.length - 1]));
-  return `<div class="card span2 chart-controls"><div class="chart-heading"><div><h2>Usage patterns</h2><p>Explore the filtered turns. Chart views leave totals and the table intact.</p></div><div class="chart-options">${select("axis", [["calendar", "Calendar days"], ["active", "Active days"]], state.chartView.axis)}${select("grain", [["auto", `Auto · ${grain}`], ["day", "Day"], ["week", "Week"], ["month", "Month"]], state.chartView.grain)}</div></div>
-    ${all.length ? `<div class="chart-overview"><svg viewBox="0 0 100 32" preserveAspectRatio="none" aria-label="Full range overview: ${metric === "tok" ? "tokens" : metric === "cost" ? "cost" : "turns"}" role="img">${bars}<rect class="overview-window" x="${start / all.length * 100}" y="0" width="${(end - start + 1) / all.length * 100}" height="32"/></svg></div>
-    <div class="overview-controls"><label>From<input data-overview="from" aria-label="Overview start day" aria-valuetext="${esc(fmtDay(all[start]))}" type="range" min="0" max="${all.length - 1}" value="${start}"></label><label>To<input data-overview="to" aria-label="Overview end day" aria-valuetext="${esc(fmtDay(all[end]))}" type="range" min="0" max="${all.length - 1}" value="${end}"></label><button class="btn ghost" data-pan="-1" ${state.zoom ? "" : "disabled"} aria-label="Pan earlier">←</button><button class="btn ghost" data-pan="1" ${state.zoom ? "" : "disabled"} aria-label="Pan later">→</button></div>` : ""}
-    <p class="chart-note">${state.chartView.axis === "calendar" ? "Calendar spacing · empty days included" : "Active days only · gaps collapsed"} · ${grain === "week" ? "Monday weeks" : grain === "month" ? "Calendar months" : "Daily totals"} · recorded dates</p></div>`;
+  const label = overviewMetricLabel();
+  const left = start / all.length * 100, width = (end - start + 1) / all.length * 100;
+  return `<div class="card span2 chart-controls"><div class="chart-heading"><div><h2>Usage patterns</h2><p>Explore the filtered turns. Chart views leave totals and the table intact.</p></div><div class="chart-options">${select("axis", [["calendar", "Every day"], ["active", "Days with use only"]], state.chartView.axis)}${select("grain", [["auto", `Automatic (${grain})`], ["day", "Day"], ["week", "Week (Mon\u2013Sun)"], ["month", "Month"]], state.chartView.grain)}</div></div>
+    ${all.length ? `<div class="chart-overview"><div class="overview-top"><span class="overview-metric">${esc(label)}</span><span class="overview-scale" title="Square-root scale keeps quiet days visible">Square-root scale</span></div>
+    <div class="overview-strip" data-overview-strip><svg viewBox="0 0 100 32" preserveAspectRatio="none" role="img" aria-label="${esc(label)} overview, square-root scale">${bars}</svg><div class="overview-window" data-overview-window style="left:${left}%;width:${width}%"></div><input class="overview-handle" data-overview="from" role="slider" aria-label="Chart window start" aria-valuemin="0" aria-valuemax="${all.length - 1}" aria-valuenow="${start}" aria-valuetext="${esc(fmtDay(all[start]))}" type="range" min="0" max="${all.length - 1}" value="${start}" step="1"><input class="overview-handle" data-overview="to" role="slider" aria-label="Chart window end" aria-valuemin="0" aria-valuemax="${all.length - 1}" aria-valuenow="${end}" aria-valuetext="${esc(fmtDay(all[end]))}" type="range" min="0" max="${all.length - 1}" value="${end}" step="1"></div>
+    <div class="overview-ends" aria-hidden="true"><span>${esc(fmtDay(all[0]))}</span><span>${esc(fmtDay(all[all.length - 1]))}</span></div>
+    <div class="overview-status"><span class="overview-selection">${esc(overviewSelectionText(all, shown, state.chartView.axis))}</span>${state.zoom ? `<button type="button" class="btn ghost" data-zoom="reset">Show all</button><button type="button" class="btn ghost" data-zoom="filter">Filter to this range</button>` : `<span class="overview-hint">Drag a handle to zoom \u00b7 drag the window to pan \u00b7 click the strip to move it</span>`}</div>
+    ${state.zoom ? `<div class="overview-pan"><button type="button" class="btn ghost" data-pan="-1" aria-label="Show earlier dates">\u2190 Earlier</button><button type="button" class="btn ghost" data-pan="1" aria-label="Show later dates">Later \u2192</button></div>` : ""}
+    <p class="overview-scope">Charts only \u00b7 totals and table use the date filter</p></div>` : ""}
+    <p class="chart-note">${esc(overviewNoteText(state.chartView.axis, grain))}</p></div>`;
 }
 let chartModels = Object.create(null), sharedDateTicks = [];
 function prepareChartData(periods, grain, providers) {
@@ -813,9 +876,9 @@ function zoomBar(allKeys, shown) {
     return `<div class="chart-zoom"><span class="hint">Drag to zoom · hover or tap to read</span>${help}</div>`;
   }
   return `<div class="chart-zoom">
-    <span class="range">${esc(fmtDay(shown[0]))} → ${esc(fmtDay(shown[shown.length - 1]))} · ${fmtInt(shown.length)} ${state.chartView.axis === "active" ? "active " : ""}${shown.length === 1 ? "day" : "days"}</span>
-    <button type="button" class="btn ghost" data-zoom="filter">filter to this range</button>
-    <button type="button" class="btn ghost" data-zoom="reset">show every day</button>
+    <span class="range">${esc(overviewSelectionText(allKeys, shown, state.chartView.axis))}</span>
+    <button type="button" class="btn ghost" data-zoom="filter">Filter to this range</button>
+    <button type="button" class="btn ghost" data-zoom="reset">Show all</button>
     ${help}
   </div>`;
 }
@@ -961,13 +1024,59 @@ function wireCharts() {
     renderCharts();
     [...query("[data-chart-option]")].find((node) => node.dataset.chartOption === select.dataset.chartOption)?.focus();
   });
-  for (const slider of query("[data-overview]")) slider.addEventListener("change", () => {
-    const all = CHART_DAYS.allKeys, keys = CHART_DAYS.keys;
-    const from = slider.dataset.overview === "from" ? Math.min(Number(slider.value), all.indexOf(keys[keys.length - 1])) : all.indexOf(keys[0]);
-    const to = slider.dataset.overview === "to" ? Math.max(Number(slider.value), all.indexOf(keys[0])) : all.indexOf(keys[keys.length - 1]);
-    state.zoom = zoomFromIndices(all, from, to); renderCharts();
-    [...query("[data-overview]")].find((node) => node.dataset.overview === slider.dataset.overview)?.focus();
-  });
+  for (const slider of query("[data-overview]")) {
+    const applySlider = () => {
+      const all = CHART_DAYS.allKeys, keys = CHART_DAYS.keys;
+      const from = slider.dataset.overview === "from" ? Math.min(Number(slider.value), all.indexOf(keys[keys.length - 1])) : all.indexOf(keys[0]);
+      const to = slider.dataset.overview === "to" ? Math.max(Number(slider.value), all.indexOf(keys[0])) : all.indexOf(keys[keys.length - 1]);
+      state.zoom = zoomFromIndices(all, from, to); renderCharts();
+      [...query("[data-overview]")].find((node) => node.dataset.overview === slider.dataset.overview)?.focus?.();
+    };
+    slider.addEventListener("change", applySlider);
+    // Native arrows/Home/End already move one day or to the ends; PageUp and
+    // PageDown are widened to a full week so keyboard users cross months fast.
+    slider.addEventListener("keydown", (event) => {
+      const maxIndex = CHART_DAYS.allKeys.length - 1;
+      if (maxIndex < 0) return;
+      const current = Number(slider.value);
+      const next = overviewHandleKey(current, event.key, maxIndex);
+      if (next == null) return;
+      event.preventDefault();
+      if (next === current) return;
+      slider.value = String(next);
+      applySlider();
+    });
+  }
+  // The strip behind the handles: a click on the dimmed area moves the whole
+  // window there, and a press-drag inside the window pans it. Handle thumbs
+  // keep their own pointer handling, so presses starting on them are ignored.
+  for (const strip of query("[data-overview-strip]")) {
+    const ratioOf = (event) => {
+      const box = typeof strip.getBoundingClientRect === "function" ? strip.getBoundingClientRect() : null;
+      if (!box || !box.width) return null;
+      return Math.max(0, Math.min(1, (event.clientX - box.left) / box.width));
+    };
+    strip.addEventListener("pointerdown", (event) => {
+      if (event.target && event.target !== strip && event.target.dataset && event.target.dataset.overview) return;
+      const ratio = ratioOf(event);
+      if (ratio == null) return;
+      strip.dataset.pressRatio = String(ratio);
+    });
+    strip.addEventListener("pointerup", (event) => {
+      if (strip.dataset.pressRatio == null) return;
+      const from = Number(strip.dataset.pressRatio);
+      delete strip.dataset.pressRatio;
+      const ratio = ratioOf(event);
+      if (ratio == null) return;
+      const all = CHART_DAYS.allKeys;
+      if (!all.length || !state.zoom) return;
+      const startIdx = all.indexOf(CHART_DAYS.keys[0]), endIdx = all.indexOf(CHART_DAYS.keys[CHART_DAYS.keys.length - 1]);
+      const upIdx = overviewIndexAt(all, ratio), downIdx = overviewIndexAt(all, from);
+      const inside = (i) => i >= startIdx && i <= endIdx;
+      const next = inside(upIdx) && inside(downIdx) ? overviewDragZoom(all, state.zoom, from, ratio) : overviewClickZoom(all, state.zoom, ratio);
+      if (next && (next.from !== state.zoom.from || next.to !== state.zoom.to)) { state.zoom = next; renderCharts(); }
+    });
+  }
   for (const button of query("[data-pan]")) button.addEventListener("click", () => {
     state.zoom = panZoom(CHART_DAYS.allKeys, state.zoom, Number(button.dataset.pan) * Math.max(1, Math.floor(CHART_DAYS.keys.length / 2)));
     renderCharts();

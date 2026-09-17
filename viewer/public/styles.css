@@ -537,12 +537,25 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 13px; color: var(--muted); text-transform
 .chart-options { display: flex; gap: 12px; flex-shrink: 0; }
 .chart-options label { display: grid; gap: 5px; font: 10px var(--mono); color: var(--muted); }
 .chart-options select { color: var(--text); background: var(--ink-2); border: 1px solid var(--line-2); border-radius: 5px; padding: 8px; font: 12px var(--mono); }
-.chart-overview { padding-top: 8px; border-top: 1px solid var(--line); }
-.chart-overview svg { height: 38px; fill: var(--faint); }
-.chart-overview .overview-window { fill: var(--accent); fill-opacity: .15; stroke: var(--accent); stroke-width: 1; vector-effect: non-scaling-stroke; }
-.overview-controls { display: flex; gap: 14px; align-items: center; margin: 8px 0; }
-.overview-controls label { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; font: 10px var(--mono); color: var(--muted); }
-.overview-controls input { width: 100%; min-width: 0; accent-color: var(--accent); }
+.chart-overview { padding-top: 8px; border-top: 1px solid var(--line); min-width: 0; }
+.overview-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 2px 0 6px; font: 10px var(--mono); color: var(--muted); }
+.overview-metric { color: var(--text); font-size: 11px; letter-spacing: .04em; }
+.overview-scale { opacity: .8; white-space: nowrap; }
+.overview-strip { position: relative; height: 46px; max-width: 100%; touch-action: pan-y; }
+.overview-strip svg { position: absolute; inset: 0; width: 100%; height: 100%; fill: var(--faint); }
+.overview-window { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--accent) 18%, transparent); border-left: 1px solid var(--accent); border-right: 1px solid var(--accent); pointer-events: none; }
+.overview-handle { position: absolute; inset: 0; width: 100%; margin: 0; padding: 0; background: transparent; accent-color: var(--accent); -webkit-appearance: none; appearance: none; pointer-events: none; min-width: 0; }
+.overview-handle::-webkit-slider-runnable-track { background: transparent; height: 100%; }
+.overview-handle::-webkit-slider-thumb { pointer-events: auto; -webkit-appearance: none; appearance: none; width: 14px; height: 100%; margin: 0; border-radius: 4px; border: 1px solid var(--accent); background: var(--panel); cursor: ew-resize; }
+.overview-handle::-moz-range-track { background: transparent; height: 100%; }
+.overview-handle::-moz-range-thumb { pointer-events: auto; width: 12px; height: 100%; border-radius: 4px; border: 1px solid var(--accent); background: var(--panel); cursor: ew-resize; }
+.overview-ends { display: flex; justify-content: space-between; gap: 12px; margin-top: 4px; font: 10px var(--mono); color: var(--muted); min-width: 0; }
+.overview-ends span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.overview-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0 0; min-width: 0; }
+.overview-selection { color: var(--text); font: 11px var(--mono); min-width: 0; overflow-wrap: anywhere; }
+.overview-hint { color: var(--muted); font-size: 11px; min-width: 0; }
+.overview-pan { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.overview-scope { color: var(--muted); font-size: 11px; margin: 6px 0 0; }
 .chart-frame { display: grid; grid-template-columns: 66px minmax(0, 1fr); padding-top: 10px; }
 .chart-y { height: 180px; display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; padding-right: 12px; font: 10px var(--mono); color: var(--muted); transform: translateY(-6px); }
 .chart svg { height: 180px; overflow: hidden; }
@@ -568,7 +581,7 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 13px; color: var(--muted); text-transform
 .chart-tip span { gap: 12px; }
 .chart-tip i { text-align: right; overflow-wrap: anywhere; }
 .chart-tip b { padding-bottom: 4px; border-bottom: 1px solid var(--line); }
-.chart:focus-visible, .chart-options select:focus-visible, .overview-controls input:focus-visible,
+.chart:focus-visible, .chart-options select:focus-visible, .overview-handle:focus-visible,
 .charts button:focus-visible, .chart-data summary:focus-visible, [data-share]:focus-visible, .hist-bucket:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 .legend [data-share] { border-radius: 4px; padding: 4px; overflow-wrap: anywhere; }
 .legend [data-share].share-active { color: var(--text); background: var(--panel-2); outline: 1px solid var(--line-2); }
@@ -609,8 +622,10 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 13px; color: var(--muted); text-transform
   .series-legend { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .series-legend button { font-size: 10px; padding: 8px 6px; flex-wrap: wrap; min-height: 44px; }
   .series-legend button b { margin-left: 0; }
-  .overview-controls { gap: 8px; }
-  .overview-controls label { flex-direction: column; align-items: stretch; }
+  .overview-top { flex-wrap: wrap; gap: 4px; }
+  .overview-ends { font-size: 9px; }
+  .overview-status { gap: 8px; }
+  .overview-pan .btn { padding: 6px 10px; }
   .chart-options select { width: 100%; }
   .chart-tip { max-width: 260px; }
 }

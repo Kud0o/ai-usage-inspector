@@ -385,7 +385,7 @@ absent field group do not render.
 ## Chart explorer
 
 The viewer's chart code stays in `viewer/public/app.js`; it adds no imports or
-dependencies. Viewer bundle version **28** propagates consistent missing context and isolated-point markers. IBM Plex
+dependencies. Viewer bundle version **29** makes the usage-patterns overview one labelled range selector with a square-root strip. IBM Plex
 Sans/Mono load through the original Google Fonts links, with local fallbacks.
 Google Fonts is the dashboard's one external network service besides pricing
 (the stylesheet can request multiple font files). SVG colours are read through
@@ -439,8 +439,18 @@ store null windows and null fill for unknown models. Isolated context observatio
 point markers even when more than 60 periods suppress markers along continuous lines.
 
 The overview keeps the full filtered range and displays at most 240 peak-preserving
-columns. Native range sliders adjust its endpoints; pan buttons and Shift+arrows
-move the window while preserving width at boundaries. Main-chart drag endpoints
+columns on a square-root scale, labelled daily tokens, daily cost or daily turns,
+so quiet days stay visible beside spikes. Two native range handles overlaid on the
+strip share one highlighted window aligned to its columns: dragging a handle moves
+one end, dragging the window pans, and clicking the dimmed strip moves the window
+there. Each handle carries slider semantics with the formatted date as its value
+text; arrows move a day, PageUp/PageDown a week, Home/End the ends. A plain
+selection line names the shown dates with a day count, full-range endpoint dates
+sit under the strip, and a Show all reset appears when zoomed. Labelled
+Earlier/Later buttons pan only when zoomed and are hidden otherwise; pan buttons
+and Shift+arrows move the window while preserving width at boundaries. A
+charts-only scope line and the filter-to-range action keep this window separate
+from the since/until date filter. Main-chart drag endpoints
 include their whole displayed periods. Wheel and keyboard zoom clamp to the full
 range. A zoom outside the filtered data is discarded; applying a range uses the
 days actually shown. Tokens carry the shared reset/filter controls, falling back

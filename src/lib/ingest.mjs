@@ -22,7 +22,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 26: faster shared chart models, token small multiples, context peaks and saved chart preferences.
 // 27: opencode subagent sessions nest under their parent like codex's do.
 // 28: consistent unknown context and visible isolated context observations.
-export const VIEWER_VERSION = "28";
+// 29: usage-patterns overview as one labelled range selector with square-root strip.
+export const VIEWER_VERSION = "29";
 
 // A project gets viewer/ and nothing else — no src/ tree beside it — so the
 // modules the bundled dashboard imports are copied in next to it, under the

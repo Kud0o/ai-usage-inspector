@@ -781,8 +781,8 @@ test("chart filter button applies the shown dates of a clipped weekly window", (
 test("chart overview and select listeners change only the chart view", () => {
   const ui = chartUi(onDays(DAYS));
   ui.run(`renderCharts();
-    globalThis.slider={dataset:{overview:"from"},value:"10",addEventListener(t,fn){this.change=fn},focus(){}};
-    globalThis.select={dataset:{chartOption:"grain"},value:"month",addEventListener(t,fn){this.change=fn},focus(){}};
+    globalThis.slider={dataset:{overview:"from"},value:"10",addEventListener(t,fn){this[t]=fn},focus(){}};
+    globalThis.select={dataset:{chartOption:"grain"},value:"month",addEventListener(t,fn){this[t]=fn},focus(){}};
     document.querySelectorAll=s=>s==="#charts [data-overview]"?[slider]:s==="#charts [data-chart-option]"?[select]:[];
     wireCharts(); slider.change(); select.change();`);
   assert.equal(ui.run('state.zoom.from'), DAYS[10]);
@@ -1055,4 +1055,171 @@ test("token panels use independent scales and visible coordinates for small magn
     const y = Number(panel.match(/class="token-area" d="M[\d.]+,([\d.]+)/)[1]);
     assert.ok(y < 40, `the first value should use most of its panel height: ${y}`);
   }
+});
+
+// ---- usage-patterns overview redesign (v29) ----
+
+test("overview shows the visible range as plain dates with a day count and full-range endpoints", () => {
+  const ui = chartUi(onDays(DAYS));
+  ui.run('renderCharts()');
+  const html = chartHTML(ui);
+  const text = ui.run('overviewSelectionText(CHART_DAYS.allKeys, CHART_DAYS.keys, state.chartView.axis)');
+  assert.match(text, /^Showing /);
+  assert.ok(text.includes(ui.run('fmtDay(CHART_DAYS.keys[0])')), "same date formatter as the charts");
+  assert.ok(text.includes(ui.run('fmtDay(CHART_DAYS.keys[CHART_DAYS.keys.length-1])')));
+  assert.match(text, /30 days/);
+  assert.ok(html.includes(text), "selection text is visible in the card");
+  assert.ok(html.includes(ui.run('fmtDay(CHART_DAYS.allKeys[0])')), "full-range start sits under the strip");
+  assert.ok(html.includes(ui.run('fmtDay(CHART_DAYS.allKeys[CHART_DAYS.allKeys.length-1])')), "full-range end sits under the strip");
+  ui.run(`state.zoom = { from: "${DAYS[10]}", to: "${DAYS[14]}" }; renderCharts()`);
+  assert.match(ui.run('overviewSelectionText(CHART_DAYS.allKeys, CHART_DAYS.keys, state.chartView.axis)'), /5 days/);
+  assert.match(chartHTML(ui), /Showing .*5 days/);
+});
+
+test("overview handles expose slider semantics with the formatted date as their value", () => {
+  const ui = chartUi(onDays(DAYS));
+  ui.run(`state.zoom = { from: "${DAYS[5]}", to: "${DAYS[20]}" }; renderCharts()`);
+  const html = chartHTML(ui);
+  for (const which of ["from", "to"]) {
+    assert.match(html, new RegExp(`data-overview="${which}"[^>]*role="slider"`), `${which} handle is a slider`);
+    assert.match(html, new RegExp(`data-overview="${which}"[^>]*aria-valuemin="0"`));
+    assert.match(html, new RegExp(`data-overview="${which}"[^>]*aria-valuemax="29"`));
+  }
+  assert.ok(html.includes(`aria-valuenow="5"`), "start index is exposed");
+  assert.ok(html.includes(`aria-valuenow="20"`), "end index is exposed");
+  assert.ok(html.includes(ui.run(`fmtDay("${DAYS[5]}")`)), "start date is visible to assistive tech");
+  assert.ok(html.includes(ui.run(`fmtDay("${DAYS[20]}")`)), "end date is visible to assistive tech");
+});
+
+test("overview keyboard steps move a day, a week, or jump to the ends", () => {
+  const ui = chartUi([]);
+  assert.equal(ui.run('overviewHandleKey(10, "ArrowRight", 29)'), 11);
+  assert.equal(ui.run('overviewHandleKey(10, "ArrowLeft", 29)'), 9);
+  assert.equal(ui.run('overviewHandleKey(10, "PageDown", 29)'), 17);
+  assert.equal(ui.run('overviewHandleKey(10, "PageUp", 29)'), 3);
+  assert.equal(ui.run('overviewHandleKey(10, "Home", 29)'), 0);
+  assert.equal(ui.run('overviewHandleKey(10, "End", 29)'), 29);
+  assert.equal(ui.run('overviewHandleKey(0, "ArrowLeft", 29)'), 0, "clamped at the start");
+  assert.equal(ui.run('overviewHandleKey(29, "PageDown", 29)'), 29, "clamped at the end");
+  assert.equal(ui.run('overviewHandleKey(10, "Tab", 29)'), null);
+});
+
+test("overview handle keyboard input re-zooms the charts", () => {
+  const ui = chartUi(onDays(DAYS));
+  ui.run(`renderCharts();
+    globalThis.slider={dataset:{overview:"from"},value:"10",handlers:{},addEventListener(t,fn){this.handlers[t]=fn},focus(){}};
+    globalThis.strips=[]; document.querySelectorAll=s=>s==="#charts [data-overview]"?[slider]:[];
+    wireCharts();`);
+  ui.run('slider.handlers.keydown({ key: "ArrowRight", preventDefault(){} })');
+  assert.equal(ui.run('state.zoom.from'), DAYS[11]);
+  ui.run('slider.value = "11"; slider.handlers.keydown({ key: "PageUp", preventDefault(){} })');
+  assert.equal(ui.run('state.zoom.from'), DAYS[4]);
+  ui.run('slider.value = "4"; slider.handlers.keydown({ key: "Home", preventDefault(){} })');
+  assert.equal(ui.run('state.zoom'), null, "moving the start to the first day with the end at the edge is no zoom");
+});
+
+test("overview click-to-move and window drag map to state.zoom", () => {
+  const ui = chartUi(onDays(DAYS));
+  ui.run(`globalThis.days = ${JSON.stringify(DAYS)};`);
+  ui.run('globalThis.zoom = { from: days[10], to: days[14] }');
+  const moved = ui.run('overviewClickZoom(days, zoom, 27 / 30)');
+  assert.deepEqual({ ...moved }, { from: DAYS[25], to: DAYS[29] }, "clicking the dimmed strip moves the whole window there");
+  assert.equal(ui.run('overviewClickZoom(days, zoom, 12 / 30)'), ui.run('zoom'), "a click inside the window leaves it alone");
+  const dragged = ui.run('overviewDragZoom(days, zoom, 10 / 30, 15 / 30)');
+  assert.deepEqual({ ...dragged }, { from: DAYS[15], to: DAYS[19] }, "dragging the window pans it");
+  assert.deepEqual({ ...ui.run('overviewDragZoom(days, zoom, 10 / 30, -10 / 30)') }, { from: DAYS[0], to: DAYS[4] }, "pans clamp without losing width");
+  assert.equal(ui.run('overviewDragZoom(days, null, 0.1, 0.4)'), null, "nothing to drag when nothing is zoomed");
+});
+
+test("overview Show all resets, and pan buttons only appear labelled when zoomed", () => {
+  const ui = chartUi(onDays(DAYS));
+  ui.run('renderCharts()');
+  assert.doesNotMatch(chartHTML(ui), /data-pan/, "no pan buttons until something is zoomed");
+  assert.doesNotMatch(chartHTML(ui), /Show all/, "no reset until something is zoomed");
+  ui.run(`state.zoom = { from: "${DAYS[10]}", to: "${DAYS[14]}" }; renderCharts()`);
+  const html = chartHTML(ui);
+  assert.match(html, /data-pan="-1"[^>]*>.*Earlier/, "earlier pan button is labelled");
+  assert.match(html, /data-pan="1"[^>]*>Later/, "later pan button is labelled");
+  assert.match(html, /data-zoom="reset"[^>]*>Show all/);
+  ui.run(`globalThis.reset={dataset:{zoom:"reset"},addEventListener(t,fn){this.click=fn}};
+    document.querySelectorAll=s=>s==="#charts [data-zoom]"?[reset]:s==="#charts .chart"?[]:[];
+    wireCharts(); reset.click();`);
+  assert.equal(ui.run('state.zoom'), null, "Show all returns to every day");
+});
+
+test("overview strip names its metric and keeps quiet days visible on a square-root scale", () => {
+  const ui = chartUi(onDays(DAYS));
+  ui.run('renderCharts()');
+  assert.match(chartHTML(ui), /Daily tokens/);
+  assert.match(chartHTML(ui), /Square-root scale/);
+  ui.run('state.fields = { tokens: false }; renderCharts()');
+  assert.match(chartHTML(ui), /Daily cost/);
+  ui.run('state.fields = { tokens: false, cost: false }; renderCharts()');
+  assert.match(chartHTML(ui), /Daily turns/);
+  ui.run('state.fields = {}; renderCharts()');
+  assert.ok(ui.run('overviewBarHeight(1, 10000)') >= 1.5, "a quiet day keeps a hairline");
+  assert.ok(ui.run('overviewBarHeight(1, 10000)') > ui.run('1 / 10000 * 28'), "square-root beats linear for small values");
+  assert.equal(ui.run('overviewBarHeight(0, 100)'), 0, "empty days stay empty");
+  assert.equal(ui.run('overviewBarHeight(100, 100)'), 28, "the peak still fills the strip");
+  const svg = chartHTML(ui).match(/class="overview-strip"[^>]*>([\s\S]*?)<\/svg>/)[1];
+  for (const m of svg.matchAll(/height="([\d.]+)"/g)) assert.ok(Number(m[1]) >= 1.5, "every recorded day is visible in the strip");
+});
+
+test("overview note reads plainly per axis and grain", () => {
+  const ui = chartUi(onDays(DAYS));
+  assert.match(ui.run('overviewNoteText("calendar", "day")'), /Every calendar day, including days with no use/);
+  assert.match(ui.run('overviewNoteText("calendar", "week")'), /grouped by week \(Mon\u2013Sun\)/);
+  assert.match(ui.run('overviewNoteText("calendar", "month")'), /grouped by month/);
+  assert.match(ui.run('overviewNoteText("active", "day")'), /Only days with use/);
+  ui.run('state.chartView.axis = "active"; state.chartView.grain = "week"; renderCharts()');
+  const html = chartHTML(ui);
+  assert.match(html, /Only days with use/);
+  assert.match(html, /grouped by week/);
+  assert.doesNotMatch(html, /Calendar spacing/);
+});
+
+test("overview scope is charts-only and Time axis and Group by stay plain", () => {
+  const ui = chartUi(onDays(DAYS));
+  ui.run('renderCharts()');
+  const html = chartHTML(ui);
+  assert.match(html, /Charts only/);
+  assert.match(html, /totals and table use the date filter/);
+  assert.match(html, /Time axis/);
+  assert.match(html, /Group by/);
+  assert.match(html, /Every day/);
+  assert.match(html, /Days with use only/);
+  assert.match(html, /Automatic \(day\)/);
+  assert.match(html, /Week \(Mon\u2013Sun\)/);
+  assert.doesNotMatch(html, /Filter to this range/, "no filter action until a window is zoomed");
+  ui.run(`state.zoom = { from: "${DAYS[10]}", to: "${DAYS[14]}" }; renderCharts()`);
+  assert.match(chartHTML(ui), /Filter to this range/, "the zoomed window can become the date filter");
+});
+
+test("every overview action leaves stats, table and the date filter alone", () => {
+  const ui = chartUi(onDays(DAYS));
+  ui.run('renderStats(); renderTable(); renderCharts()');
+  const stats = ui.run('document.querySelector("#stats").innerHTML'), table = ui.html();
+  const snap = ui.run('JSON.stringify({ view: state.view.length, since: state.filters.since, until: state.filters.until })');
+  ui.run(`globalThis.from={dataset:{overview:"from"},value:"8",handlers:{},addEventListener(t,fn){this.handlers[t]=fn},focus(){}};
+    globalThis.to={dataset:{overview:"to"},value:"20",handlers:{},addEventListener(t,fn){this.handlers[t]=fn},focus(){}};
+    globalThis.earlier={dataset:{pan:"-1"},handlers:{},addEventListener(t,fn){this.handlers[t]=fn},focus(){}};
+    globalThis.showAll={dataset:{zoom:"reset"},handlers:{},addEventListener(t,fn){this.handlers[t]=fn}};
+    document.querySelectorAll=s=>s==="#charts [data-overview]"?[from,to]:s==="#charts [data-pan]"?[earlier]:s==="#charts [data-zoom]"?[showAll]:s==="#charts [data-overview-strip]"?[]:s==="#charts [data-chart-option]"?[]:[];
+    wireCharts(); from.handlers.change(); to.handlers.change();`);
+  assert.equal(ui.run('state.view.length'), 30);
+  assert.equal(ui.run('JSON.stringify({ view: state.view.length, since: state.filters.since, until: state.filters.until })'), snap);
+  assert.equal(ui.run('document.querySelector("#stats").innerHTML'), stats);
+  assert.equal(ui.html(), table);
+  ui.run('from.value = "9"; from.handlers.keydown({ key: "ArrowRight", preventDefault(){} })');
+  ui.run('state.zoom = overviewClickZoom(CHART_DAYS.allKeys, state.zoom, 0.9)');
+  ui.run('state.zoom = overviewDragZoom(CHART_DAYS.allKeys, state.zoom, 0.2, 0.4)');
+  ui.run('state.zoom = panZoom(CHART_DAYS.allKeys, state.zoom, 3); renderCharts()');
+  assert.equal(ui.run('state.view.length'), 30);
+  assert.equal(ui.run('JSON.stringify({ view: state.view.length, since: state.filters.since, until: state.filters.until })'), snap);
+  assert.equal(ui.run('document.querySelector("#stats").innerHTML'), stats);
+  assert.equal(ui.html(), table);
+  ui.run('showAll.handlers.click()');
+  assert.equal(ui.run('state.zoom'), null);
+  assert.equal(ui.run('document.querySelector("#stats").innerHTML'), stats);
+  assert.equal(ui.html(), table);
 });
