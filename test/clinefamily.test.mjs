@@ -72,3 +72,16 @@ test("Cline-family skips tasks with no usable api_req usage", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test("Kilo stores null context window and fill when the model window is unknown", () => {
+  const dir = makeTask([
+    { ts: 1000, type: "say", say: "text", text: "hello" },
+    { ts: 1001, ...apiReq({ tokensIn: 42, tokensOut: 1, cost: .01 }) },
+  ], [{ role: "user", content: [{ type: "text", text: "<environment_details><model>unknown-model</model></environment_details>" }] }]);
+  try {
+    const [row] = kilo.buildTurns({ taskId: "unknown", dir }, {});
+    assert.equal(row.contextTokens, 42);
+    assert.equal(row.contextMax, null); assert.equal(row.contextFillPct, null);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

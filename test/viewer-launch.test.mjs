@@ -269,14 +269,15 @@ test("the bundle a project is given starts and serves, whatever tree wrote it", 
   assert.ok(fs.existsSync(path.join(bundle, "config.mjs")), "the settings module travels with the bundle");
 
   // Start it the way the launcher does, from a copy that has no src/ beside it.
-  server = spawn(process.execPath, [path.join(bundle, "server.mjs"), "--no-sync", "--no-pricing-refresh"], {
-    cwd: project,
-    env: { ...process.env, AI_USAGE_INSTANCE: "bundle-test", PORT: "0" },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let output = "";
-  server.stdout.on("data", (d) => { output += d; });
-  server.stderr.on("data", (d) => { output += d; });
+  // File output works in Windows sandboxes that refuse child-process pipes.
+  const logFile = path.join(project, "bundle.log"), log = fs.openSync(logFile, "w");
+  try {
+    server = spawn(process.execPath, [path.join(bundle, "server.mjs"), "--no-sync", "--no-pricing-refresh"], {
+      cwd: project,
+      env: { ...process.env, AI_USAGE_INSTANCE: "bundle-test", PORT: "0" },
+      stdio: ["ignore", log, log],
+    });
+  } finally { fs.closeSync(log); }
   const deadline = Date.now() + 20_000;
   let runtime = null;
   while (Date.now() < deadline && !runtime) {
@@ -284,7 +285,7 @@ test("the bundle a project is given starts and serves, whatever tree wrote it", 
     try { runtime = JSON.parse(fs.readFileSync(paths.runtimeFile, "utf8")); } catch {}
     if (server.exitCode !== null) break;
   }
-  assert.ok(runtime && runtime.port, `the bundled dashboard never listened:\n${output}`);
+  assert.ok(runtime && runtime.port, `the bundled dashboard never listened:\n${fs.readFileSync(logFile, "utf8")}`);
   const res = await fetch(`http://127.0.0.1:${runtime.port}/api/status`);
   assert.equal(res.status, 200);
   assert.equal((await res.json()).app, "ai-usage-inspector");

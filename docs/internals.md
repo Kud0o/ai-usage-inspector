@@ -134,8 +134,11 @@ found. A locked database, a schema the reader does not recognise, or a single fa
 leaves it where it was — and the scan status (`ok`, `locked`, `unsupported-schema`,
 `missing`) is recorded, so stale capture is visible rather than looking like an idle day.
 
-An upgrade across a change in how turns are identified or costed also records a repair for each
-agent the installer finds. Until that agent's history has been read in full once, its window
+An upgrade across a change in how turns are identified or costed records a repair for the
+detected providers affected by any crossed epoch. Missing epoch entries mean every provider;
+epoch 4 targets OpenCode, and epoch 5 targets OpenCode, Cline, Roo Code and Kilo Code.
+Older pending repairs remain owed; a fresh install or a provider first detected after upgrade
+does not acquire a repair just from detection. Until that agent's history has been read in full once, its window
 starts at the beginning. Only a pass that reached every transcript it listed settles the repair —
 save transcripts that moved while being read, which belong to a live session its hook reads
 again. `sync.mjs` honours the same repair, so machines that never sweep (`--local`,
@@ -307,19 +310,31 @@ One assistant message can cover several model requests, each ending in a `step-f
 with its own token breakdown. Usage and cost are summed across the turn, but **context fill
 uses the largest single request**, not the sum, and the turn's window comes from OpenCode's
 cached model catalogue (`<XDG_CACHE_HOME|~/.cache>/opencode/models.json`), keyed by
-provider + model id; a model that catalogue cannot size stores `null` `contextMax` and
-`contextFillPct`, never a `0` that reads like a real measurement.
+exact provider + model id. On a miss, Claude model ids use the repository's
+`knownContextMax` table; everything else has a null window. Another provider's catalogue
+entry and broad model-family guesses are never used. Unknown windows store `null`
+`contextMax` and `contextFillPct`, never a `0` that reads like a real measurement.
+The peak's tokens, provider and model stay together: only the first request or a strictly
+larger request replaces it. Missing peak identifiers fall back to the session, never another
+request. API-call counts count `step-finish` parts when present (even zero-token parts),
+otherwise one per assistant message. Usage completeness is checked against assistant
+message count independently of the number of requests.
 
 A subagent OpenCode spawns is a child session whose `parent_id` names the parent. Every turn
 of such a session carries `parentSessionId` and `agent` (kind subagent, nickname from the
-session's agent field, depth counting the parent chain). In the parent session, the turn whose
+session's agent field, depth counting the parent chain, stopping at a repeated session or 64 links). In the parent session, the turn whose
 `task` tool call launched the child carries `spawnedAgents`, which is how the dashboard nests
 the child under the turn that launched it; the child's own numbers are left exactly as
 recorded. Sessions OpenCode never names keep `sessionName` `null` so the UI falls back to the
 session id — the placeholder titles "New session - <ts>" and "Child session - <ts>" are not
 shown as names. When a session is cut off mid-turn (its run is still live or crashed before
-writing a final response), the whole session becomes one `session-rollup` row that still fills
-in the counts and the first user prompt so the run is not silently empty.
+writing a final response), parsing yields one `session-rollup` with counts and the first user
+prompt. Under the usage-store lock, this rollup is rejected if OpenCode per-turn rows already
+exist for that session. Those rows and their deletion tombstones stay intact, and the read
+counts as done: the scan mark advances and a repair can settle. When the turn completes the
+session changes and is read again whole; a session that crashed mid-turn keeps its completed
+turns and never re-opens later sweeps. Sessions with only rollup history continue updating
+their rollup normally.
 
 **Cline / Roo Code / Kilo Code** — one lineage sharing one on-disk format, so
 [`src/providers/clinefamily/`](../src/providers/clinefamily/) covers all three. Tokens and
@@ -370,7 +385,7 @@ absent field group do not render.
 ## Chart explorer
 
 The viewer's chart code stays in `viewer/public/app.js`; it adds no imports or
-dependencies. Viewer bundle version **26** propagates the redesign. IBM Plex
+dependencies. Viewer bundle version **28** propagates consistent missing context and isolated-point markers. IBM Plex
 Sans/Mono load through the original Google Fonts links, with local fallbacks.
 Google Fonts is the dashboard's one external network service besides pricing
 (the stylesheet can request multiple font files). SVG colours are read through
@@ -416,7 +431,12 @@ observation-weighted mean and a dashed peak line, with separate legend toggles a
 both values in readouts. Its headline is the observed mean over the shown range.
 It excludes missing values, breaks lines over empty periods, and expands beyond
 100% if an observation exceeds capacity. Missing context also
-does not enter the histogram's lowest bucket.
+does not enter the histogram's lowest bucket. One shared observation predicate requires a
+finite fill percentage and a positive context window across charts, histogram, stats, table,
+drawer and the minimum-context filter. A measured 0% remains zero; absent observations
+show as an em dash in stats/table and an empty CSV cell. Cline-family records likewise
+store null windows and null fill for unknown models. Isolated context observations retain
+point markers even when more than 60 periods suppress markers along continuous lines.
 
 The overview keeps the full filtered range and displays at most 240 peak-preserving
 columns. Native range sliders adjust its endpoints; pan buttons and Shift+arrows
@@ -704,10 +724,10 @@ for the whole pool.
   `folder` is read.
 - **OpenCode model catalogue ages until the process re-indexes.** The context window comes from
   `opencode/models.json`, read once per path per parse run, so a model installed after the run
-  began is sized by name heuristics or left `null` until the next run picks the file up.
-- **An OpenCode run that is still live cannot separate turns.** A session cut off mid-response
-  becomes one `session-rollup` row holding the running totals, so a live or crashed run is not
-  split into guessed turns.
+  began uses the known Claude table, if applicable, or stays `null` until the next run picks the file up.
+- **An OpenCode turn cut off after earlier complete turns is not recorded.** The completed
+  turns stay as stored; the cut-off turn's usage appears only if the session later completes.
+  A session first seen incomplete has only a rollup until it can be split.
 
 The `package.json` files allowlist ships `install.mjs`, `src/`, `viewer/`, `README.md`, and
 `docs/` (plus npm's package metadata and license). The packaging regression runs

@@ -19,11 +19,12 @@ export const SCAN_STATUSES = new Set(["ok", "locked", "unsupported-schema", "mis
 // models were given under wrong rates worked out again (2.8.0).
 // 4: OpenCode rows rewritten the old way — summed context, 0 for an unknown
 // window, unlinked subagent sessions — are re-read (2.9.1).
-export const REPAIR_EPOCH = 4;
+// 5: OpenCode request counts/windows and Cline-family unknown windows (2.9.2).
+export const REPAIR_EPOCH = 5;
 
 // Which agents' stored rows each epoch's changes touch. Epochs before this map
 // existed touched every provider, so a missing entry repairs them all.
-const REPAIR_PROVIDERS_BY_EPOCH = Object.freeze({ 4: ["opencode"] });
+const REPAIR_PROVIDERS_BY_EPOCH = Object.freeze({ 4: ["opencode"], 5: ["opencode", "cline", "roo", "kilo"] });
 
 // A repair covers the rows one destination holds: each project's own files, or
 // the pooled copy in an aggregate AI_USAGE_DIR. Settling one says nothing about

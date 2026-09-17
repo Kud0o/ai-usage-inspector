@@ -21,7 +21,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 25: calendar chart explorer, stacked series, overview and accessible readouts.
 // 26: faster shared chart models, token small multiples, context peaks and saved chart preferences.
 // 27: opencode subagent sessions nest under their parent like codex's do.
-export const VIEWER_VERSION = "27";
+// 28: consistent unknown context and visible isolated context observations.
+export const VIEWER_VERSION = "28";
 
 // A project gets viewer/ and nothing else — no src/ tree beside it — so the
 // modules the bundled dashboard imports are copied in next to it, under the
@@ -200,6 +201,11 @@ async function storeTurns(turns, fallbackCwd, sessionId, precondition = null, tr
       transcriptId,
     });
     if (n === ABORT) {
+      // An OpenCode session whose turns are stored but whose newest turn has no
+      // usage yet is left as stored, and the read counts as done. When the turn
+      // completes the session changes and is read again; a session that crashed
+      // mid-turn must not hold the scan mark and the repair open forever.
+      if (group.some((r) => r.provider === "opencode" && r.quality === "session-rollup")) continue;
       const err = new Error("transcript changed before the write");
       err.scanStatus = "locked";
       err.transcriptMoved = true;

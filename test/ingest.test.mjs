@@ -275,3 +275,17 @@ test("a sweep keeps the effort level a hook recorded", async (t) => {
   await ingestTranscript(provider, { transcriptPath, opts: {} });
   assert.equal(rowsIn(dir)[0].effortLevel, "high");
 });
+
+
+test("OpenCode deferred rollup leaves stored turns and completes the read", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-rollup-ingest-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const record = { provider: "opencode", sessionId: "s", id: "s:1", cwd: dir, usage: { input: 100 } };
+  let incoming = [record];
+  const provider = { id: "opencode", buildTurns: async () => incoming };
+  const ref = { transcriptPath: { sessionId: "s" }, cwd: dir, sessionId: "s" };
+  await ingestTranscript(provider, ref);
+  incoming = [{ ...record, id: "s:0", quality: "session-rollup" }];
+  assert.equal(await ingestTranscript(provider, ref), 0, "nothing written, nothing thrown");
+  assert.deepEqual(rowsIn(dir).map((r) => r.id), ["s:1"]);
+});

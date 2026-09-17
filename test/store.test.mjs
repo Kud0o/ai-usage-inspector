@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  ABORT,
   addTombstones,
   tombstonePath,
   upsertSession,
@@ -634,4 +635,35 @@ test("a batch that names no transcript still replaces the whole session", async 
   await upsertSession(file, "t1", [codexTurn("b1")], { transcriptId: "r2" });
   await upsertSession(file, "t1", [codexTurn("c1")]);
   assert.deepEqual(validRecords(file).map((r) => r.id), ["c1"]);
+});
+
+
+test("OpenCode rollup after per-turn rows aborts even with a tombstoned first turn", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-rollup-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "usage.ndjson");
+  const row = (id, extra = {}) => ({ provider: "opencode", sessionId: "s", id, usage: { input: 100 }, cost: { total: 1, source: "provider" }, ...extra });
+  const first = row("s:0"), survivor = row("s:1");
+  await upsertSession(file, "s", [first, survivor]);
+  await addTombstones(tombstonePath(file), [first]);
+  await upsertSession(file, "s", [first, survivor]);
+  assert.deepEqual(validRecords(file).map((r) => r.id), ["s:1"]);
+  const before = fs.readFileSync(file);
+  assert.equal(await upsertSession(file, "s", [row("s:0", { quality: "session-rollup" })]), ABORT);
+  assert.deepEqual(fs.readFileSync(file), before, "aborted replacement is byte-for-byte unchanged");
+  await upsertSession(file, "s", [first, survivor, row("s:2")]);
+  assert.deepEqual(validRecords(file).map((r) => r.id), ["s:1", "s:2"], "a complete read resumes while honoring deletion");
+});
+
+test("OpenCode rollup-only sessions update and the abort is provider and session scoped", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-usage-rollup-scope-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "usage.ndjson");
+  const row = (provider, sessionId, quality, input) => ({ provider, sessionId, id: `${sessionId}:0`, quality, usage: { input } });
+  await upsertSession(file, "other", [row("opencode", "other", undefined, 5)]);
+  await upsertSession(file, "s", [row("claude", "s", undefined, 6)]);
+  await upsertSession(file, "s", [row("opencode", "s", "session-rollup", 10)]);
+  assert.equal(await upsertSession(file, "s", [row("opencode", "s", "session-rollup", 20)]), 1);
+  assert.equal(validRecords(file).find((r) => r.provider === "opencode" && r.sessionId === "s").usage.input, 20);
+  assert.equal(await upsertSession(file, "s", [row("claude", "s", "session-rollup", 30)]), 1);
 });

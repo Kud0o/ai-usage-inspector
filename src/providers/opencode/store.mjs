@@ -135,7 +135,9 @@ export async function parentChainDepth(sessionId) {
   try {
     let depth = 0;
     let id = sessionId;
-    for (;;) {
+    const visited = new Set();
+    while (depth < 64 && !visited.has(id)) {
+      visited.add(id);
       const result = await queryGet(db, "SELECT parent_id FROM session WHERE id = ?", id);
       if (result.status !== "ok" || !result.row) break;
       const parentId = result.row.parent_id;

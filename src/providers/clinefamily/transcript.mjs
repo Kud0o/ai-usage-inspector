@@ -210,18 +210,18 @@ function finalizeTurn(t, ctx) {
     usage,
     contextTokens: ctxTokens,
     contextMax: ctxMax,
-    contextFillPct: ctxMax ? Math.round((ctxTokens / ctxMax) * 1000) / 10 : 0,
+    contextFillPct: ctxMax ? Math.round((ctxTokens / ctxMax) * 1000) / 10 : null,
     counts: { apiCalls: t.apiCalls, subagentCalls: 0, toolCalls: t.toolCalls, thinkingBlocks: 0 },
     cost: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total: t.cost, source: "provider" },
     schema: 2,
   };
 }
 
-// Small context-window lookup by model substring; 0 (unknown) is fine.
+// Small context-window lookup by model substring; unknown windows stay null.
 function contextMax(model) {
   const m = String(model || "").toLowerCase();
   if (/gemini|gpt-4\.1|o[0-9]/.test(m)) return 1_000_000;
   if (/claude|sonnet|opus|haiku/.test(m)) return 200_000;
   if (/gpt-4o|gpt-4|gpt-5/.test(m)) return 128_000;
-  return 0;
+  return null;
 }

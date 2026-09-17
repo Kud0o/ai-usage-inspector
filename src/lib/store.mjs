@@ -492,6 +492,12 @@ export async function upsertSession(file, sessionId, records, {
     // Re-checked under the lock: whatever these records were parsed from may have
     // moved on while we queued for it.
     if (precondition && precondition() === false) return ABORT;
+    // A live OpenCode session can temporarily lose its per-turn allocation.
+    // Keep the completed turns (and their deletion scope) until a complete read.
+    if (provider === "opencode" && records.some((r) => r.quality === "session-rollup")
+        && existing.some((r) => providerOf(r) === provider && r.sessionId === sessionId && r.quality !== "session-rollup")) {
+      return ABORT;
+    }
     // Read while holding usage lock. Viewer writes tombstone before waiting for
     // this lock, closing delete-vs-upsert resurrection races.
     const blocked = loadTombstoneKeys(tombstonePath(file));

@@ -24,6 +24,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { readSession, parentChainDepth } from "./store.mjs";
+import { knownContextMax } from "../claude/pricing.mjs";
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
@@ -154,15 +155,13 @@ function modelsWindow(providerId, modelId) {
 }
 
 // Context-window lookup: the request's providerID+modelID in models.json first,
-// a handful of name substrings as a fallback, then null — an unknown window is
+// the known Claude table for Claude model ids, then null — an unknown window is
 // stored as null, never as a 0 that reads like a real measurement.
 function contextMax(providerId, model) {
   const fromCatalog = modelsWindow(providerId, model);
   if (fromCatalog !== null) return fromCatalog;
   const m = String(model || "").toLowerCase();
-  if (/gemini|gpt-4\.1|o[0-9]/.test(m)) return 1_000_000;
-  if (/claude|sonnet|opus|haiku/.test(m)) return 200_000;
-  if (/gpt-4o|gpt-4|gpt-5/.test(m)) return 128_000;
+  if (m.startsWith("claude-")) return knownContextMax(m);
   return null;
 }
 
@@ -189,12 +188,18 @@ function peakContext(messages, partsByMsg) {
     if (roleOf(m.data) !== "assistant") continue;
     for (const r of messageRequests(m.data, partsByMsg.get(m.id))) {
       const ctx = r.input + r.cacheRead;
-      if (peak === null || ctx > peak.ctx) {
-        peak = { ctx, provider: providerOf(m.data) || null, model: cleanModel(modelOf(m.data)) || null };
+      if (peak === null || ctx > peak.tokens) {
+        peak = { tokens: ctx, provider: providerOf(m.data) || null, model: cleanModel(modelOf(m.data)) || null };
       }
     }
   }
   return peak;
+}
+
+// Count requests independently of message-usage completeness, including zero-token steps.
+function requestCount(parts) {
+  const steps = (parts || []).filter((p) => p?.type === "step-finish").length;
+  return steps || 1;
 }
 
 // Counts a session rollup can honestly claim from the messages that exist.
@@ -204,8 +209,8 @@ function sessionCounts(messages, partsByMsg) {
   let subagentCalls = 0;
   for (const m of messages) {
     if (roleOf(m.data) !== "assistant") continue;
-    apiCalls++;
     const parts = partsByMsg.get(m.id) || [];
+    apiCalls += requestCount(parts);
     for (const p of parts) {
       if (!p || typeof p !== "object") continue;
       const t = p.type;
@@ -274,15 +279,16 @@ export async function buildTurns(ref, opts = {}) {
     if (role === "user") {
       cur = {
         prompt: text, response: "", model: null, usage: null, usageCalls: 0, cost: 0,
-        apiCalls: 0, toolCalls: tools, ts: m.ts, endTs: m.ts,
-        ctxPeak: 0, requestProvider: null, requestModel: null,
+        apiCalls: 0, assistantMessages: 0, toolCalls: tools, ts: m.ts, endTs: m.ts,
+        peak: null,
         subagentCalls: 0, spawnedAgents: new Set(),
       };
       turns.push(cur);
     } else if (role === "assistant" && cur) {
       cur.response += text;
       cur.toolCalls += tools;
-      cur.apiCalls++;
+      cur.assistantMessages++;
+      cur.apiCalls += requestCount(parts);
       cur.subagentCalls += taskCalls(parts);
       for (const child of taskChildren(parts)) cur.spawnedAgents.add(child);
       cur.endTs = m.ts || cur.endTs;
@@ -301,10 +307,8 @@ export async function buildTurns(ref, opts = {}) {
       // The real peak context is the largest single request in the turn.
       for (const r of messageRequests(m.data, parts)) {
         const ctx = r.input + r.cacheRead;
-        if (ctx > cur.ctxPeak || cur.requestProvider === null) {
-          if (ctx > cur.ctxPeak) cur.ctxPeak = ctx;
-          cur.requestProvider = providerOf(m.data) || cur.requestProvider;
-          cur.requestModel = cleanModel(modelOf(m.data)) || cur.requestModel;
+        if (cur.peak === null || ctx > cur.peak.tokens) {
+          cur.peak = { tokens: ctx, provider: providerOf(m.data) || null, model: cleanModel(modelOf(m.data)) || null };
         }
       }
     }
@@ -312,7 +316,7 @@ export async function buildTurns(ref, opts = {}) {
 
   const completeUsage =
     turns.length > 0 &&
-    turns.every((t) => t.apiCalls > 0 && t.usageCalls === t.apiCalls);
+    turns.every((t) => t.assistantMessages > 0 && t.usageCalls === t.assistantMessages);
   if (completeUsage) {
     return turns.map((t, i) =>
       finalizeTurn(
@@ -326,9 +330,9 @@ export async function buildTurns(ref, opts = {}) {
           subagentCalls: t.subagentCalls,
           toolCalls: t.toolCalls,
           spawnedAgents: [...t.spawnedAgents],
-          requestProvider: t.requestProvider || modelProvider(session && session.model),
-          requestModel: t.requestModel || sessionModel,
-          ctxPeak: t.ctxPeak,
+          requestProvider: t.peak?.provider || modelProvider(session && session.model),
+          requestModel: t.peak?.model || sessionModel,
+          ctxPeak: t.peak?.tokens ?? null,
           ts: t.ts,
           endTs: t.endTs,
         },
@@ -397,7 +401,7 @@ function sessionRecord(session, messages, partsByMsg, inputs, ctx) {
     webFetch: 0,
   };
   const peak = peakContext(messages, partsByMsg);
-  const ctxTokens = peak ? peak.ctx : null;
+  const ctxTokens = peak ? peak.tokens : null;
   const ctxMax = peak
     ? contextMax(peak.provider || modelProvider(s.model), peak.model || cleanModel(s.model))
     : null;

@@ -677,7 +677,7 @@ test("chart disabled field groups hide series readouts and text alternatives", (
 });
 
 test("chart missing context is a gap and its mean weights observations not days", () => {
-  const ui = chartUi([{ ...RECORDS[0], contextFillPct: 0 }, { ...RECORDS[1], contextFillPct: 90 }, { ...RECORDS[2], ts: "2026-08-12T12:00:00Z" }]);
+  const ui = chartUi([{ ...RECORDS[0], contextMax: 100, contextFillPct: 0 }, { ...RECORDS[1], contextMax: 100, contextFillPct: 90 }, { ...RECORDS[2], ts: "2026-08-12T12:00:00Z" }]);
   ui.run('renderCharts()');
   assert.deepEqual([...ui.run('chartSeries(CHART_DAYS.periods,"context")[0].values')], [45, null, null]);
   assert.match(chartHTML(ui), /No measurement|gaps mean no measurement/);
@@ -834,7 +834,7 @@ test("chart linked donut focus highlights only its matching slice and clears on 
 });
 
 test("chart context over capacity remains visible on an expanded scale", () => {
-  const ui = chartUi([{...RECORDS[0],contextFillPct:150}]);
+  const ui = chartUi([{...RECORDS[0],contextMax: 100, contextFillPct:150}]);
   ui.run('renderCharts()');
   const html=ui.run('timeChart(CHART_DAYS.periods,"context")');
   assert.match(html, /150%/);
@@ -930,7 +930,7 @@ test("round two token small multiples give each magnitude its own unoutlined plo
 });
 
 test("round two context headline and series use weighted mean and period peak", () => {
-  const ui=chartUi([{...RECORDS[0],ts:"2026-01-01T00:00:00Z",contextFillPct:0},{...RECORDS[1],ts:"2026-01-01T01:00:00Z",contextFillPct:90},{...RECORDS[2],ts:"2026-01-02T12:00:00Z",contextFillPct:30},{...RECORDS[0],ts:"2026-01-03T12:00:00Z"}]);
+  const ui=chartUi([{...RECORDS[0],ts:"2026-01-01T00:00:00Z",contextMax: 100, contextFillPct:0},{...RECORDS[1],ts:"2026-01-01T01:00:00Z",contextMax: 100, contextFillPct:90},{...RECORDS[2],ts:"2026-01-02T12:00:00Z",contextMax: 100, contextFillPct:30},{...RECORDS[0],ts:"2026-01-03T12:00:00Z"}]);
   ui.run('state.chartView.grain="week";renderCharts()');
   assert.equal(ui.run('CHART_DAYS.periods[0].ctxMax'),90);
   assert.equal(ui.run('chartModels.context.mean'),40);
@@ -994,4 +994,65 @@ test("round two served chart strings have no lost question-mark separators", asy
 test("round two restores the original Plex font links", async () => {
   const res=await request(port,"/");
   for(const line of ['<link rel="preconnect" href="https://fonts.googleapis.com" />','<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />','<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />']) assert.ok(res.text.includes(line));
+});
+
+
+test("context observation is shared by charts stats table drawer filters and CSV", async () => {
+  const observed = { ...RECORDS[0], subagents: [], contextTokens: 80, contextMax: 100, contextFillPct: 80 };
+  const records = [observed, { ...observed, id: "zero", contextTokens: 0, contextFillPct: 0 },
+    ...[[0, 0], [null, 90], [100, null], [100, NaN], [100, Infinity]].map(([contextMax, contextFillPct], i) => ({ ...observed, id: `unknown-${i}`, contextMax, contextFillPct }))];
+  const ui = chartUi(records);
+  ui.run("renderCharts(); renderStats(); renderTable()");
+  assert.equal(ui.run("CHART_DAYS.periods[0].ctxN"), 2);
+  assert.equal(ui.run("chartModels.context.mean"), 40);
+  assert.match(ui.run('document.querySelector("#stats").innerHTML'), /avg context[\s\S]*?40\.0<small>%/);
+  const histogram = chartHTML(ui).match(/class="histogram"[\s\S]*?<p class="chart-note">/)[0];
+  assert.equal((histogram.match(/aria-label="[^"]+context, 1 turns"/g) || []).length, 2, "only measured 0 and 80 enter histogram");
+  for (let i = 2; i < records.length; i++) {
+    assert.equal(ui.run(`contextObserved(records[${i}])`), false);
+    assert.match(ui.run(`rowHtml(records[${i}])`), /title="Context window unknown">\u2014/);
+    assert.doesNotMatch(ui.run(`runMetrics(records[${i}])`), /<dt>context<\/dt>/);
+  }
+  assert.match(ui.run("rowHtml(records[1])"), /0%/);
+  assert.match(ui.run("runMetrics(records[1])"), /<dt>context<\/dt><dd>0%/);
+  ui.run("state.filters.ctx=50; apply()");
+  assert.deepEqual([...ui.run("state.view.map(r=>r.id)")], [records[0].id]);
+  ui.run("state.filters.ctx=0; apply(); globalThis.exported=''; download=(name,text)=>{exported=text}; toast=()=>{}");
+  await ui.run('exportRecords("csv")');
+  const cells = ui.run("exported.split('\\r\\n').slice(1).map(line=>line.split(',')[19])");
+  assert.deepEqual([...cells], ["80", "0", "", "", "", "", ""]);
+  ui.run("state.view=records.slice(2); renderStats()");
+  assert.match(ui.run('document.querySelector("#stats").innerHTML'), /avg context<\/div>\s*<div class="val">\u2014<\/div>/);
+  ui.run("fetch=async()=>({json:async()=>records[2]})"); await ui.run('openDrawer("unknown-0")');
+  assert.doesNotMatch(ui.run('document.querySelector("#drawer-panel").innerHTML'), /class="k">context<\/div>/);
+  ui.run("fetch=async()=>({json:async()=>records[1]})"); await ui.run('openDrawer("zero")');
+  assert.match(ui.run('document.querySelector("#drawer-panel").innerHTML'), /class="k">context<\/div><div class="v">0\.0%/);
+});
+
+test("context sparse observations keep SVG markers beyond 60 periods", () => {
+  const ui = chartUi([
+    { ...RECORDS[0], ts: "2026-01-01T00:00:00Z" },
+    { ...RECORDS[0], ts: "2026-02-01T00:00:00Z", contextMax: 100, contextFillPct: 80 },
+    { ...RECORDS[0], ts: "2026-04-01T00:00:00Z" },
+  ]);
+  ui.run('state.chartView.grain="day"; renderCharts()');
+  assert.equal(ui.run("CHART_DAYS.periods.length"), 91);
+  const html = ui.run('timeChart(CHART_DAYS.periods,"context")');
+  const circles = [...html.matchAll(/<circle cx="([\d.]+)" cy="([\d.]+)"/g)];
+  assert.equal(circles.length, 2, "both mean and peak have visible geometry");
+  for (const circle of circles) { assert.equal(Number(circle[2]), 32); assert.ok(Math.abs(Number(circle[1]) - 31.5 / 91 * 640) < 1e-8); }
+});
+
+test("token panels use independent scales and visible coordinates for small magnitudes", () => {
+  const ui = chartUi([{ ...RECORDS[0], usage: { input: 10, output: 2, cacheCreate: 1, cacheRead: 1000000 } },
+    { ...RECORDS[1], ts: "2026-08-11T12:00:00Z", usage: { input: 8, output: 1, cacheCreate: 1, cacheRead: 800000 } }]);
+  ui.run("renderCharts()");
+  const panels = [...chartHTML(ui).matchAll(/<section class="token-panel"[\s\S]*?<\/section>/g)].map(m => m[0]);
+  assert.equal(panels.length, 4);
+  const axes = panels.map(p => p.match(/class="chart-y">([\s\S]*?)<\/div>/)[1]);
+  assert.equal(new Set(axes).size, 4, "each magnitude gets its own y-axis");
+  for (const panel of panels) {
+    const y = Number(panel.match(/class="token-area" d="M[\d.]+,([\d.]+)/)[1]);
+    assert.ok(y < 40, `the first value should use most of its panel height: ${y}`);
+  }
 });

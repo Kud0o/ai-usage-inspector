@@ -122,7 +122,7 @@ async function exportRecords(kind) {
       e.promptChars, e.responseChars,
       T_IN(e), T_OUT(e), (e.usage && e.usage.reasoning) || 0, (e.usage && e.usage.cacheRead) || 0, (e.usage && e.usage.cacheCreate) || 0,
       COST(e), (e.cost && e.cost.source) || "", COST_ESTIMATED(e) ? 1 : 0,
-      e.cost && e.cost.estimatedRate ? 1 : 0, e.durationMs || 0, e.contextFillPct || 0,
+      e.cost && e.cost.estimatedRate ? 1 : 0, e.durationMs || 0, contextObserved(e) ? e.contextFillPct : null,
       e.sessionName, e.counts?.subagentCalls, sumRuns(e, "cost", "total"),
     ].map(csvCell).join(",");
     const csv = [cols.join(","), ...rows.map(line)].join("\r\n");
@@ -135,6 +135,7 @@ async function exportRecords(kind) {
 const T_IN = (e) => (e.usage && e.usage.input) || 0;
 const T_OUT = (e) => (e.usage && e.usage.output) || 0;
 const T_TOTAL = (e) => { const u = e.usage; return u ? (u.input || 0) + (u.output || 0) + (u.cacheCreate || 0) + (u.cacheRead || 0) : 0; };
+const contextObserved = (e) => Number.isFinite(e.contextFillPct) && e.contextMax > 0;
 const COST = (e) => (e.cost && e.cost.total) || 0;
 const COST_ESTIMATED = (e) => !!(e.cost && (e.cost.estimated || e.cost.source === "estimated"));
 // Two different reasons a cost can be approximate; a Cursor row can have either.
@@ -315,7 +316,7 @@ function apply() {
     if (f.effort && e.effortLevel !== f.effort) return false;
     if (f.since && dayKey(e.ts) < f.since) return false;
     if (f.until && dayKey(e.ts) > f.until) return false;
-    if (f.ctx && (e.contextFillPct || 0) < f.ctx) return false;
+    if (f.ctx && (!contextObserved(e) || e.contextFillPct < f.ctx)) return false;
     // Text search is resolved server-side against the stored prompt/response
     // (this list only carries 280-char previews). While the hit set is still in
     // flight, fall back to matching the previews so typing stays responsive.
@@ -351,10 +352,9 @@ function renderStats() {
   const tout = v.reduce((a, e) => a + T_OUT(e), 0);
   const ttot = v.reduce((a, e) => a + T_TOTAL(e), 0);
   const cost = v.reduce((a, e) => a + COST(e), 0);
-  // Average context only over records whose model window is known (contextMax > 0);
-  // providers that don't expose the window encode 0 and would drag the mean down.
-  const ctxRecs = v.filter((e) => e.contextMax > 0);
-  const avgCtx = ctxRecs.length ? ctxRecs.reduce((a, e) => a + (e.contextFillPct || 0), 0) / ctxRecs.length : 0;
+  // Only real observations enter the mean; an unknown window is not measured zero.
+  const ctxRecs = v.filter(contextObserved);
+  const avgCtx = ctxRecs.length ? ctxRecs.reduce((a, e) => a + e.contextFillPct, 0) / ctxRecs.length : null;
   const dur = v.reduce((a, e) => a + (e.durationMs || 0), 0);
   const subs = v.reduce((a, e) => a + (e.counts ? e.counts.subagentCalls : 0), 0);
   // Only records with a real measured latency (> 0); unknown providers encode 0.
@@ -374,7 +374,7 @@ function renderStats() {
     ? `${subs} subagent calls · ${fmtInt(synthetic)} auto-continued`
     : `${subs} subagent calls`;
   cards.push({ label: "prompts", val: fmtInt(prompts), sub: promptSub, cls: "" });
-  if (has("context")) cards.push({ label: "avg context", val: avgCtx.toFixed(1) + "<small>%</small>", sub: "of window filled", cls: "amber", bar: avgCtx });
+  if (has("context")) cards.push({ label: "avg context", val: avgCtx == null ? "—" : avgCtx.toFixed(1) + "<small>%</small>", sub: "of window filled", cls: "amber", bar: avgCtx });
   if (has("timing")) cards.push({ label: "active time", val: fmtDur(dur), sub: "summed turn duration", cls: "" });
   if (has("timing") && respRecs.length) cards.push({ label: "avg first response", val: fmtDur(avgResp), sub: "prompt → first reply", cls: "" });
   cards.push({ label: "top model", val: esc(shortModel(topModel)), sub: topModel ? byModel[topModel] + " turns" : "—", cls: "" });
@@ -610,7 +610,7 @@ function chartPlot(periods, kind, series, stack, average, identity = kind) {
         const value = s.values[i];
         if (value == null) { previous = false; continue; }
         path += `${previous ? "L" : "M"}${x(i)},${y(value)} `; previous = true;
-        if (n <= 60) plot += `<circle cx="${x(i)}" cy="${y(value)}" r="2.5" fill="${s.color}"/>`;
+        if (n <= 60 || (s.values[i - 1] == null && s.values[i + 1] == null)) plot += `<circle cx="${x(i)}" cy="${y(value)}" r="2.5" fill="${s.color}"/>`;
       }
       plot += `<path data-context="${s.id}" d="${path}" fill="none" stroke="${s.color}" stroke-width="2"${s.id === "context:peak" ? ' stroke-dasharray="5 3"' : ""}/>`;
     }
@@ -654,7 +654,7 @@ function renderChartContents() {
     const m = modelNames.get(e.model), mode = e.permissionMode || "—";
     modelCount[m] = (modelCount[m] || 0) + 1; modeCount[mode] = (modeCount[mode] || 0) + 1;
     for (const skill of e.skills || []) skillCount[skill] = (skillCount[skill] || 0) + 1;
-    if (Number.isFinite(e.contextFillPct)) buckets[Math.max(0, Math.min(9, Math.floor(e.contextFillPct / 10)))]++;
+    if (contextObserved(e)) buckets[Math.max(0, Math.min(9, Math.floor(e.contextFillPct / 10)))]++;
     const agent = agentStats[p] ||= { turns: 0, prompts: 0, tok: 0, cost: 0, ms: 0 };
     agent.turns++; if (!e.synthetic) agent.prompts++;
     agent.tok += tokens; agent.cost += cost; agent.ms += e.durationMs || 0;
@@ -666,7 +666,7 @@ function renderChartContents() {
     days[k].tok += tokens; days[k].cost += cost; days[k].n++;
     for (const type of TOKEN_TYPES) days[k].types[type.key] += e.usage?.[type.key] || 0;
     days[k].providers[p] = (days[k].providers[p] || 0) + cost;
-    if (Number.isFinite(e.contextFillPct)) { days[k].ctxSum += e.contextFillPct; days[k].ctxN++; days[k].ctxMax = Math.max(days[k].ctxMax ?? 0, e.contextFillPct); }
+    if (contextObserved(e)) { days[k].ctxSum += e.contextFillPct; days[k].ctxN++; days[k].ctxMax = Math.max(days[k].ctxMax ?? 0, e.contextFillPct); }
     if (m) days[k].models[m] = (days[k].models[m] || 0) + 1;
   }
   const activeKeys = Object.keys(days).sort();
@@ -1211,7 +1211,7 @@ function rowHtml(e, depth = 0, children = false) {
     <td class="col-mode"><span class="tag ${esc(e.permissionMode)}">${esc(e.permissionMode)}</span></td>
     <td class="num col-in">${valueHtml(e.usage?.input, fmtTok)}</td>
     <td class="num col-out">${valueHtml(e.usage?.output, fmtTok)}</td>
-    <td class="num col-context">${typeof e.contextFillPct === "number" ? ctxBar(e.contextFillPct) : '<span class="muted" title="Context window unknown">—</span>'}</td>
+    <td class="num col-context">${contextObserved(e) ? ctxBar(e.contextFillPct) : '<span class="muted" title="Context window unknown">—</span>'}</td>
     <td class="num cost-cell col-cost">${COST_ESTIMATED(e) ? `<span class="est-mark" title="${esc(estReason(e))}">≈</span>` : ""}${valueHtml(e.cost?.total, fmtUsd)}</td>
     <td class="prompt-cell col-prompt">${!state.group && e.parentSessionId ? '<span class="tag">↳ agent</span> ' : ""}${agents}${auto}${chip}${esc(e.promptPreview)}</td>
   </tr>`;
@@ -1231,7 +1231,7 @@ function runRows(e, runs, depth, path = []) {
       <td class="col-mode muted">—</td>
       <td class="num col-in">${valueHtml(run.usage?.input, fmtTok)}</td>
       <td class="num col-out">${valueHtml(run.usage?.output, fmtTok)}</td>
-      <td class="num col-context" title="This run's own context window, not the main thread's">${has("context") && typeof run.contextFillPct === "number" ? ctxBar(run.contextFillPct) : '<span class="muted">—</span>'}</td>
+      <td class="num col-context" title="This run's own context window, not the main thread's">${has("context") && contextObserved(run) ? ctxBar(run.contextFillPct) : '<span class="muted">—</span>'}</td>
       <td class="num cost-cell col-cost">${valueHtml(run.cost?.total, fmtUsd)}</td>
       <td class="prompt-cell col-prompt" title="${esc(run.description)}">${valueHtml(run.description)}</td>
     </tr>${children.length && isExpanded(key) ? runRows(e, children, depth + 1, runPath) : ""}`;
@@ -1381,7 +1381,7 @@ function runMetrics(e, main = false) {
   ];
   // Each thread's own window: a run's context is not the main thread's, and the
   // main thread's is the turn's own figure, never a sum over its runs.
-  if (has("context") && typeof e.contextFillPct === "number") {
+  if (has("context") && contextObserved(e)) {
     metrics.push(["context", e, (t) => `${(t.contextFillPct || 0).toFixed(0)}% · ${fmtTok(t.contextTokens)} of ${fmtTok(t.contextMax)}`]);
   }
   if (!main) metrics.push(["duration", e.durationMs, fmtDur], ["api calls", e.counts?.apiCalls, fmtInt], ["tool calls", e.counts?.toolCalls, fmtInt]);
@@ -1434,7 +1434,7 @@ async function openDrawer(id, provider, session) {
   // dgrid cells, each gated on its field group + presence
   const cells = [];
   if (has("cost") && e.cost) cells.push(`<div><div class="k">cost</div><div class="v accent">${fmtUsd(c.total)}</div></div>`);
-  if (has("context") && e.contextFillPct != null) cells.push(`<div><div class="k">context</div><div class="v">${(e.contextFillPct||0).toFixed(1)}% <span class="muted" style="font-size:11px">${fmtTok(e.contextTokens)}/${fmtTok(e.contextMax)}</span></div></div>`);
+  if (has("context") && contextObserved(e)) cells.push(`<div><div class="k">context</div><div class="v">${(e.contextFillPct||0).toFixed(1)}% <span class="muted" style="font-size:11px">${fmtTok(e.contextTokens)}/${fmtTok(e.contextMax)}</span></div></div>`);
   if (has("timing") && e.firstResponseMs != null) cells.push(`<div><div class="k">first response</div><div class="v">${fmtDur(e.firstResponseMs)}</div></div>`);
   if (has("tokens") && e.usage) {
     cells.push(

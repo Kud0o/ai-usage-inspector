@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 
 // The OpenCode provider reads SQLite via node:sqlite (Node >= 22.5). Skip the
 // whole file on older Node so the suite stays green there, exactly as the
@@ -274,17 +275,17 @@ test("OpenCode context is the largest single request, not the summed turn", need
   const t0 = Date.parse("2026-08-20T10:00:00Z");
   const dir = makeDb({
     sessions: [{ id: "sesCtx", directory: "K:/ctx", model: "big-pickle", title: "Ctx", cost: 0.03,
-      tokens_input: 130, tokens_output: 15, tokens_reasoning: 0, tokens_cache_read: 60, tokens_cache_write: 5,
+      tokens_input: 180, tokens_output: 15, tokens_reasoning: 0, tokens_cache_read: 60, tokens_cache_write: 5,
       time_created: t0, time_updated: t0 + 1000 }],
     messages: [
       { id: "u1", session_id: "sesCtx", time_created: t0, data: { role: "user" } },
-      { id: "a1", session_id: "sesCtx", time_created: t0 + 1, data: asstP("big-pickle", 0.01, { input: 50, output: 10, cache: { read: 40, write: 5 } }, "opencode") },
+      { id: "a1", session_id: "sesCtx", time_created: t0 + 1, data: asstP("big-pickle", 0.01, { input: 100, output: 10, cache: { read: 40, write: 5 } }, "opencode") },
       { id: "a2", session_id: "sesCtx", time_created: t0 + 2, data: asstP("big-pickle", 0.02, { input: 80, output: 5, cache: { read: 20, write: 0 } }, "opencode") },
     ],
     parts: [
       textPart("u1", "sesCtx", t0, "grow the context"),
-      stepFinish("a1", "sesCtx", t0 + 1, 10, 5),
-      stepFinish("a1", "sesCtx", t0 + 1, 40, 25),
+      stepFinish("a1", "sesCtx", t0 + 1, 50, 20),
+      stepFinish("a1", "sesCtx", t0 + 1, 50, 20),
       stepFinish("a2", "sesCtx", t0 + 2, 80, 20),
     ],
   });
@@ -293,9 +294,9 @@ test("OpenCode context is the largest single request, not the summed turn", need
     await withEnv({ data: dir, cache: cacheDir(models) }, async (m) => {
       const turns = await m.buildTurns({ sessionId: "sesCtx", cwd: "K:/ctx" });
       assert.equal(turns.length, 1);
-      assert.equal(turns[0].usage.input, 130, "usage is still the turn total");
+      assert.equal(turns[0].usage.input, 180, "usage is still the turn total");
       assert.equal(turns[0].usage.cacheRead, 60);
-      assert.equal(turns[0].contextTokens, 100, "context is the largest request, not the 190-strong sum");
+      assert.equal(turns[0].contextTokens, 100, "context is the largest request, not the 240-strong sum");
       assert.equal(turns[0].contextMax, 200000);
     });
   } finally {
@@ -497,4 +498,110 @@ test("OpenCode placeholder session titles are not names", needsSqlite, async () 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+const reviewSession = (id, extra = {}) => ({
+  id, directory: os.tmpdir(), model: JSON.stringify({ id: "session-model", providerID: "fallback" }),
+  title: "Review fixture", cost: 0.03, tokens_input: 1000, tokens_output: 3,
+  tokens_reasoning: 0, tokens_cache_read: 0, tokens_cache_write: 0,
+  time_created: 1700000000000, time_updated: 1700000000100, ...extra,
+});
+const reviewMessage = (id, sid, i, data) => ({ id, session_id: sid, time_created: 1700000000000 + i, data });
+
+test("OpenCode peak identifiers stay with the first or strictly larger request in turns and rollups", needsSqlite, async (t) => {
+  const cases = [
+    { name: "missing first provider", requests: [[900, "big", null], [10, "small", "p"]], window: 8000 },
+    { name: "missing later provider", requests: [[10, "small", "p"], [900, "big", null]], window: 8000 },
+    { name: "missing peak model", requests: [[10, "small", "p"], [900, null, "q"]], window: 9000 },
+    { name: "different providers", requests: [[10, "small", "p"], [900, "big", "q"]], window: 5000 },
+    { name: "equal peaks keep first", requests: [[900, "small", "p"], [900, "big", "q"]], window: 1000 },
+    { name: "zero first request is a peak", requests: [[0, "big", null], [0, "small", "p"]], window: 8000 },
+    { name: "missing both peak ids", requests: [[10, "small", "p"], [900, null, null]], window: 7000 },
+  ];
+  const models = {
+    p: { models: { small: { limit: { context: 1000 } }, big: { limit: { context: 2000 } } } },
+    q: { models: { small: { limit: { context: 3000 } }, big: { limit: { context: 5000 } }, "session-model": { limit: { context: 9000 } } } },
+    fallback: { models: { big: { limit: { context: 8000 } }, "session-model": { limit: { context: 7000 } } } },
+  };
+  const sessions = [], messages = [];
+  for (const [i, c] of cases.entries()) for (const rollup of [false, true]) {
+    const sid = `peak-${i}-${rollup}`;
+    sessions.push(reviewSession(sid)); messages.push(reviewMessage(`${sid}-u`, sid, 0, { role: "user" }));
+    c.requests.forEach(([input, model, provider], j) => messages.push(reviewMessage(`${sid}-a${j}`, sid, j + 1,
+      asstP(model, .01, { input, output: 1 }, provider))));
+    if (rollup) messages.push(reviewMessage(`${sid}-pending`, sid, 10, { role: "assistant" }));
+  }
+  const dir = makeDb({ sessions, messages }), cache = cacheDir(models);
+  t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(cache, { recursive: true, force: true }); });
+  await withEnv({ data: dir, cache }, async (m) => {
+    for (const [i, c] of cases.entries()) for (const rollup of [false, true]) {
+      const [row] = await m.buildTurns({ sessionId: `peak-${i}-${rollup}` });
+      assert.equal(row.quality, rollup ? "session-rollup" : undefined, c.name);
+      assert.equal(row.contextTokens, Math.max(...c.requests.map(([n]) => n)), c.name);
+      assert.equal(row.contextMax, c.window, `${c.name}, rollup=${rollup}`);
+    }
+  });
+});
+
+test("OpenCode windows use exact catalogue then known Claude table and never another provider", needsSqlite, async (t) => {
+  const cases = [
+    ["claude-opus-5", "exact", 123456], ["claude-opus-5", "alias", 1000000],
+    ["claude-sonnet-4-5", "alias", 200000], ["claude-not-a-known-model", "alias", null],
+    ["gpt-5", "alias", null], ["gemini-test", "alias", null], ["o3", "alias", null],
+    ["unique-model", "alias", null], ["unique-model", "exact", 262144],
+  ];
+  const dir = makeDb({ sessions: cases.map((_, i) => reviewSession(`win-${i}`)), messages: cases.flatMap(([model, provider], i) => [
+    reviewMessage(`u${i}`, `win-${i}`, 0, { role: "user" }),
+    reviewMessage(`a${i}`, `win-${i}`, 1, asstP(model, .01, { input: 500, output: 1 }, provider)),
+  ]) });
+  const cache = cacheDir({ exact: { models: { "claude-opus-5": { limit: { context: 123456 } }, "unique-model": { limit: { context: 262144 } } } } });
+  t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(cache, { recursive: true, force: true }); });
+  await withEnv({ data: dir, cache }, async (m) => {
+    for (const [i, [model, provider, window]] of cases.entries()) {
+      const [row] = await m.buildTurns({ sessionId: `win-${i}` });
+      assert.equal(row.contextMax, window, `${provider}/${model}`);
+      if (window === null) assert.equal(row.contextFillPct, null);
+    }
+  });
+});
+
+test("OpenCode request counts include every step while completeness counts messages", needsSqlite, async (t) => {
+  const sessions = [reviewSession("complete"), reviewSession("rollup")];
+  const messages = sessions.flatMap(({ id }) => [
+    reviewMessage(`${id}-u`, id, 0, { role: "user" }),
+    reviewMessage(`${id}-a`, id, 1, asstP("x", .01, { input: 100, output: 2 }, "p")),
+    reviewMessage(`${id}-b`, id, 2, asstP("x", .02, { input: 5, output: 1 }, "p")),
+    ...(id === "rollup" ? [reviewMessage(`${id}-pending`, id, 3, { role: "assistant" })] : []),
+  ]);
+  const parts = sessions.flatMap(({ id }) => [stepFinish(`${id}-a`, id, 1, 60, 0), stepFinish(`${id}-a`, id, 2, 40, 0),
+    { message_id: `${id}-a`, session_id: id, time_created: 3, data: { type: "step-finish", tokens: { input: 0, output: 0 } } }]);
+  const dir = makeDb({ sessions, messages, parts }); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await withDataDir(dir, async (m) => {
+    const [complete] = await m.buildTurns({ sessionId: "complete" });
+    assert.equal(complete.quality, undefined); assert.equal(complete.counts.apiCalls, 4);
+    assert.equal(complete.usage.input, 105); assert.equal(complete.contextTokens, 60); assert.equal(complete.cost.total, .03);
+    const [rollup] = await m.buildTurns({ sessionId: "rollup" });
+    assert.equal(rollup.quality, "session-rollup"); assert.equal(rollup.counts.apiCalls, 5);
+  });
+});
+
+test("OpenCode cyclic ancestry terminates and long ancestry stops at 64", needsSqlite, async (t) => {
+  const sessions = [reviewSession("a", { parent_id: "b" }), reviewSession("b", { parent_id: "a" }),
+    reviewSession("self", { parent_id: "self" }),
+    ...Array.from({ length: 70 }, (_, i) => reviewSession(`chain-${i}`, { parent_id: i < 69 ? `chain-${i + 1}` : null }))];
+  const dir = makeDb({ sessions }); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const outFile = path.join(dir, "depth.stdout"), errFile = path.join(dir, "depth.stderr");
+  const out = fs.openSync(outFile, "w"), err = fs.openSync(errFile, "w");
+  let result;
+  try {
+    const module = new URL("../src/providers/opencode/transcript.mjs", import.meta.url).href;
+    const code = `import { buildTurns } from ${JSON.stringify(module)}; console.log(JSON.stringify(await Promise.all(['a','self','chain-0'].map(async sessionId => (await buildTurns({sessionId}))[0].agent.depth))));`;
+    result = spawnSync(process.execPath, ["--input-type=module", "-e", code], {
+      env: { ...process.env, XDG_DATA_HOME: dir }, timeout: 5000, stdio: ["ignore", out, err],
+    });
+  } finally { fs.closeSync(out); fs.closeSync(err); }
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, fs.readFileSync(errFile, "utf8"));
+  assert.deepEqual(JSON.parse(fs.readFileSync(outFile, "utf8")), [2, 1, 64]);
 });

@@ -7,7 +7,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { runLauncher } from "../src/record.mjs";
 import { drainSpool, rescan, sweepProviders, shouldSweepNow, msSinceLastScan } from "../src/worker.mjs";
-import { REPAIR_EPOCH, claimScan, recordInstall, recordScanResult, repairDue } from "../src/lib/scan-state.mjs";
+import { REPAIR_EPOCH, claimScan, readScanState, recordInstall, recordScanResult, repairDue } from "../src/lib/scan-state.mjs";
 import { buildTurns } from "../src/providers/claude/transcript.mjs";
 
 // Point scan bookkeeping at a throwaway file: these tests must never touch the
@@ -473,4 +473,23 @@ test("a Claude repair backs up candidate bytes before reading any transcript", a
     return fixture.provider.buildTurns(...args);
   } }, {});
   assert.equal(backedUp, true);
+});
+
+
+test("OpenCode deferred rollup keeps stored turns without holding the scan mark or the repair open", async (t) => {
+  const dir = withScanState(t);
+  let rows = [{ provider: "opencode", sessionId: "s", id: "s:1", cwd: dir, usage: { input: 100 } }];
+  const provider = { id: "opencode", buildTurns: async () => rows,
+    discoverTranscripts: async () => [{ transcriptPath: { sessionId: "s" }, cwd: dir, sessionId: "s" }] };
+  await rescan(provider, {});
+  const mark = readScanState().providers.opencode.lastSuccessfulScanMs;
+  assert.ok(mark > 0);
+  await recordInstall({ upgrading: true, providerIds: ["opencode"] });
+  rows = [{ ...rows[0], id: "s:0", quality: "session-rollup" }];
+  await rescan(provider, {});
+  // A session that crashed mid-turn stays a rollup for ever: it must not re-open every later sweep.
+  const after = readScanState().providers.opencode;
+  assert.equal(after.lastScanStatus, "ok", "not reported as locked");
+  assert.equal(after.lastScanCompleted, true, "the scan completes, so its mark advances");
+  assert.equal(repairDue("opencode"), null, "repair settles");
 });

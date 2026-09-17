@@ -158,7 +158,7 @@ test("one aggregate directory spelled two ways settles one repair on Windows", {
 // install that already repaired at an earlier epoch still owes one more full read.
 test("an upgrade from an install repaired at an earlier epoch asks again", async (t) => {
   const file = tmpState(t);
-  fs.writeFileSync(file, JSON.stringify({ schema: 1, providers: {}, installedRepairEpoch: REPAIR_EPOCH - 2 }));
+  fs.writeFileSync(file, JSON.stringify({ schema: 1, providers: {}, installedRepairEpoch: 2 }));
   assert.equal(await recordInstall({ file, upgrading: true, providerIds: ["claude"] }), true);
   assert.equal(repairDue("claude", { file }), REPAIR_EPOCH);
   assert.ok(REPAIR_EPOCH >= 2);
@@ -166,10 +166,32 @@ test("an upgrade from an install repaired at an earlier epoch asks again", async
 
 // The epoch that rewrites OpenCode rows repairs only OpenCode's history: the
 // agents that settled the previous epoch are asked for nothing new.
-test("an upgrade from an install repaired at the previous epoch asks opencode only", async (t) => {
+test("an upgrade from epoch 3 asks opencode but not unaffected providers", async (t) => {
   const file = tmpState(t);
-  fs.writeFileSync(file, JSON.stringify({ schema: 1, providers: {}, installedRepairEpoch: REPAIR_EPOCH - 1 }));
+  fs.writeFileSync(file, JSON.stringify({ schema: 1, providers: {}, installedRepairEpoch: 3 }));
   assert.equal(await recordInstall({ file, upgrading: true, providerIds: ["opencode", "claude", "codex", "cursor"] }), true);
   assert.equal(repairDue("opencode", { file }), REPAIR_EPOCH);
   for (const id of ["claude", "codex", "cursor"]) assert.equal(repairDue(id, { file }), null);
+});
+
+
+test("epoch 5 repairs OpenCode and every Cline-family provider only", async (t) => {
+  const ids = ["opencode", "cline", "roo", "kilo", "claude", "codex", "cursor"];
+  assert.equal(REPAIR_EPOCH, 5);
+  for (const installed of [2, 3, 4]) {
+    const file = tmpState(t);
+    fs.writeFileSync(file, JSON.stringify({ schema: 1, installedRepairEpoch: installed, providers: {} }));
+    assert.equal(await recordInstall({ file, upgrading: true, providerIds: ids }), true);
+    for (const id of ids) assert.equal(repairDue(id, { file }), installed === 2 || ["opencode", "cline", "roo", "kilo"].includes(id) ? 5 : null, `${installed}: ${id}`);
+  }
+});
+
+test("epoch 5 retains older debt without requesting a newly detected provider", async (t) => {
+  const file = tmpState(t);
+  fs.writeFileSync(file, JSON.stringify({ schema: 1, installedRepairEpoch: 4,
+    providers: { claude: { repairRequested: 3, repaired: { projects: 2 } } } }));
+  await recordInstall({ file, upgrading: true, providerIds: ["claude"] });
+  assert.equal(repairDue("claude", { file }), 3);
+  assert.equal(repairDue("opencode", { file }), null);
+  assert.equal(scanWindow("opencode", { file, now: 2000000000000 }).sinceMs, 2000000000000 - FIRST_SCAN_WINDOW_MS);
 });
