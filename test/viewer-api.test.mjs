@@ -1076,6 +1076,30 @@ test("overview shows the visible range as plain dates with a day count and full-
   assert.match(chartHTML(ui), /Showing .*5 days/);
 });
 
+test("overview handles are labelled with their own dates, dim the unselected days and align to column edges", () => {
+  const ui = chartUi(onDays(DAYS));
+  ui.run(`state.zoom = { from: "${DAYS[3]}", to: "${DAYS[25]}" }; renderCharts()`);
+  let html = chartHTML(ui);
+  const labels = (h) => [...h.matchAll(/class="overview-end-label ([^"]*)"[^>]*>([^<]*)</g)].map((m) => [m[1], m[2]]);
+  const from = ui.run(`fmtDay("${DAYS[3]}")`), to = ui.run(`fmtDay("${DAYS[25]}")`);
+  assert.deepEqual(labels(html).map((l) => l[1]), [from, to], "each handle shows its own date, not the full range's");
+  assert.equal((html.match(/class="overview-shade"/g) || []).length, 2, "days outside the window are dimmed on both sides");
+  assert.match(html, /data-overview-strip style="--cols:30"/, "handle ranges are sized from the column count");
+  // A window too narrow to keep two dates apart gets one label, kept inside the strip at either edge.
+  ui.run(`state.zoom = { from: "${DAYS[0]}", to: "${DAYS[4]}" }; renderCharts()`);
+  html = chartHTML(ui);
+  assert.deepEqual(labels(html), [["from", `${ui.run(`fmtDay("${DAYS[0]}")`)} – ${ui.run(`fmtDay("${DAYS[4]}")`)}`]]);
+  ui.run(`state.zoom = { from: "${DAYS[25]}", to: "${DAYS[29]}" }; renderCharts()`);
+  assert.equal(labels(chartHTML(ui))[0][0], "to", "a narrow window at the end anchors its label to the end");
+  ui.run(`state.zoom = { from: "${DAYS[13]}", to: "${DAYS[16]}" }; renderCharts()`);
+  assert.equal(labels(chartHTML(ui))[0][0], "centre");
+  // A wide window's labels grow away from it while there is room, and inward at the strip's ends.
+  ui.run(`state.zoom = { from: "${DAYS[0]}", to: "${DAYS[29]}" }; renderCharts()`);
+  assert.deepEqual(labels(chartHTML(ui)).map((l) => l[0]), ["from", "to"]);
+  ui.run(`state.zoom = { from: "${DAYS[10]}", to: "${DAYS[20]}" }; renderCharts()`);
+  assert.deepEqual(labels(chartHTML(ui)).map((l) => l[0]), ["from outward", "to outward"]);
+});
+
 test("overview handles expose slider semantics with the formatted date as their value", () => {
   const ui = chartUi(onDays(DAYS));
   ui.run(`state.zoom = { from: "${DAYS[5]}", to: "${DAYS[20]}" }; renderCharts()`);

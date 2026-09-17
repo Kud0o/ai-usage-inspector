@@ -541,16 +541,36 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 13px; color: var(--muted); text-transform
 .overview-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 2px 0 6px; font: 10px var(--mono); color: var(--muted); }
 .overview-metric { color: var(--text); font-size: 11px; letter-spacing: .04em; }
 .overview-scale { opacity: .8; white-space: nowrap; }
-.overview-strip { position: relative; height: 46px; max-width: 100%; touch-action: pan-y; }
+.overview-strip { position: relative; height: 46px; max-width: 100%; touch-action: pan-y; --thumb: 16px; margin: 0 8px; }
 .overview-strip svg { position: absolute; inset: 0; width: 100%; height: 100%; fill: var(--faint); }
-.overview-window { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--accent) 18%, transparent); border-left: 1px solid var(--accent); border-right: 1px solid var(--accent); pointer-events: none; }
-.overview-handle { position: absolute; inset: 0; width: 100%; margin: 0; padding: 0; background: transparent; accent-color: var(--accent); -webkit-appearance: none; appearance: none; pointer-events: none; min-width: 0; }
+/* The unselected days are dimmed so the chosen window reads as the selection. */
+.overview-shade { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--panel) 62%, transparent); pointer-events: none; }
+.overview-window { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--accent) 14%, transparent); border-top: 2px solid var(--accent); border-bottom: 2px solid var(--accent); box-sizing: border-box; pointer-events: none; }
+/* Each handle's range is sized so its thumb centre lands on a column edge: the start on the left edge of its
+   day, the end on the right edge of its day, exactly where the window's sides are drawn. */
+.overview-handle { position: absolute; top: -4px; bottom: -4px; height: calc(100% + 8px); margin: 0; padding: 0; background: transparent; -webkit-appearance: none; appearance: none; pointer-events: none; min-width: 0;
+  width: calc(100% * (var(--cols) - 1) / var(--cols) + var(--thumb)); }
+.overview-handle[data-overview="from"] { left: calc(var(--thumb) / -2); }
+.overview-handle[data-overview="to"] { left: calc(100% / var(--cols) - var(--thumb) / 2); }
 .overview-handle::-webkit-slider-runnable-track { background: transparent; height: 100%; }
-.overview-handle::-webkit-slider-thumb { pointer-events: auto; -webkit-appearance: none; appearance: none; width: 14px; height: 100%; margin: 0; border-radius: 4px; border: 1px solid var(--accent); background: var(--panel); cursor: ew-resize; }
 .overview-handle::-moz-range-track { background: transparent; height: 100%; }
-.overview-handle::-moz-range-thumb { pointer-events: auto; width: 12px; height: 100%; border-radius: 4px; border: 1px solid var(--accent); background: var(--panel); cursor: ew-resize; }
-.overview-ends { display: flex; justify-content: space-between; gap: 12px; margin-top: 4px; font: 10px var(--mono); color: var(--muted); min-width: 0; }
-.overview-ends span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* A solid grip with two ridges: something to take hold of, not a border. */
+.overview-handle::-webkit-slider-thumb { pointer-events: auto; -webkit-appearance: none; appearance: none; width: var(--thumb); height: 100%; margin: 0; border: 0; border-radius: 5px; cursor: ew-resize;
+  background: linear-gradient(90deg, transparent 5px, color-mix(in srgb, var(--panel) 85%, transparent) 5px 6.5px, transparent 6.5px 9.5px, color-mix(in srgb, var(--panel) 85%, transparent) 9.5px 11px, transparent 11px) center / 100% 38% no-repeat, var(--accent);
+  box-shadow: 0 1px 3px rgb(0 0 0 / .25); }
+.overview-handle::-moz-range-thumb { pointer-events: auto; width: var(--thumb); height: 100%; border: 0; border-radius: 5px; cursor: ew-resize;
+  background: linear-gradient(90deg, transparent 5px, color-mix(in srgb, var(--panel) 85%, transparent) 5px 6.5px, transparent 6.5px 9.5px, color-mix(in srgb, var(--panel) 85%, transparent) 9.5px 11px, transparent 11px) center / 100% 38% no-repeat, var(--accent);
+  box-shadow: 0 1px 3px rgb(0 0 0 / .25); }
+.overview-handle:hover::-webkit-slider-thumb, .overview-handle:active::-webkit-slider-thumb { filter: brightness(1.12); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent); }
+.overview-handle:hover::-moz-range-thumb, .overview-handle:active::-moz-range-thumb { filter: brightness(1.12); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent); }
+/* Each handle's own date sits under it, growing away from the window while there is room. */
+.overview-ends { position: relative; height: 16px; margin: 6px 8px 0; font: 10px var(--mono); color: var(--text); }
+.overview-end-label { position: absolute; top: 0; white-space: nowrap; padding: 0 2px; }
+.overview-end-label.from { transform: none; }
+.overview-end-label.from.outward { transform: translateX(-100%); }
+.overview-end-label.to { transform: translateX(-100%); }
+.overview-end-label.to.outward { transform: none; }
+.overview-end-label.centre { transform: translateX(-50%); }
 .overview-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0 0; min-width: 0; }
 .overview-selection { color: var(--text); font: 11px var(--mono); min-width: 0; overflow-wrap: anywhere; }
 .overview-hint { color: var(--muted); font-size: 11px; min-width: 0; }

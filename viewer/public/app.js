@@ -619,6 +619,17 @@ function overviewDragZoom(allKeys, zoom, fromRatio, toRatio) {
   const start = Math.max(0, Math.min(allKeys.length - width, allKeys.indexOf(shown[0]) + delta));
   return zoomFromIndices(allKeys, start, start + width - 1);
 }
+// The dates under the window's handles, in percent of the strip. Each grows away from the window while
+// there is room; a window too narrow to keep two dates apart gets one label for both, kept inside the strip.
+function overviewEndLabels(left, width, fromText, toText) {
+  const label = (cls, at, text) => `<span class="overview-end-label ${cls}" style="left:${at}%">${esc(text)}</span>`;
+  if (width < 30) {
+    const centre = left + width / 2;
+    const text = fromText === toText ? fromText : `${fromText} – ${toText}`;
+    return centre < 25 ? label("from", left, text) : centre > 75 ? label("to", left + width, text) : label("centre", centre, text);
+  }
+  return label(`from${left > 22 ? " outward" : ""}`, left, fromText) + label(`to${left + width < 78 ? " outward" : ""}`, left + width, toText);
+}
 function chartControls(all, shown, grain) {
   const select = (name, options, selected) => `<label>${name === "axis" ? "Time axis" : "Group by"}<select data-chart-option="${name}">${options.map(([value, label]) => `<option value="${value}"${value === selected ? " selected" : ""}>${label}</option>`).join("")}</select></label>`;
   const metric = has("tokens") ? "tok" : has("cost") ? "cost" : "n";
@@ -632,8 +643,8 @@ function chartControls(all, shown, grain) {
   const left = start / all.length * 100, width = (end - start + 1) / all.length * 100;
   return `<div class="card span2 chart-controls"><div class="chart-heading"><div><h2>Usage patterns</h2><p>Explore the filtered turns. Chart views leave totals and the table intact.</p></div><div class="chart-options">${select("axis", [["calendar", "Every day"], ["active", "Days with use only"]], state.chartView.axis)}${select("grain", [["auto", `Automatic (${grain})`], ["day", "Day"], ["week", "Week (Mon\u2013Sun)"], ["month", "Month"]], state.chartView.grain)}</div></div>
     ${all.length ? `<div class="chart-overview"><div class="overview-top"><span class="overview-metric">${esc(label)}</span><span class="overview-scale" title="Square-root scale keeps quiet days visible">Square-root scale</span></div>
-    <div class="overview-strip" data-overview-strip><svg viewBox="0 0 100 32" preserveAspectRatio="none" role="img" aria-label="${esc(label)} overview, square-root scale">${bars}</svg><div class="overview-window" data-overview-window style="left:${left}%;width:${width}%"></div><input class="overview-handle" data-overview="from" role="slider" aria-label="Chart window start" aria-valuemin="0" aria-valuemax="${all.length - 1}" aria-valuenow="${start}" aria-valuetext="${esc(fmtDay(all[start]))}" type="range" min="0" max="${all.length - 1}" value="${start}" step="1"><input class="overview-handle" data-overview="to" role="slider" aria-label="Chart window end" aria-valuemin="0" aria-valuemax="${all.length - 1}" aria-valuenow="${end}" aria-valuetext="${esc(fmtDay(all[end]))}" type="range" min="0" max="${all.length - 1}" value="${end}" step="1"></div>
-    <div class="overview-ends" aria-hidden="true"><span>${esc(fmtDay(all[0]))}</span><span>${esc(fmtDay(all[all.length - 1]))}</span></div>
+    <div class="overview-strip" data-overview-strip style="--cols:${all.length}"><svg viewBox="0 0 100 32" preserveAspectRatio="none" role="img" aria-label="${esc(label)} overview, square-root scale">${bars}</svg><div class="overview-shade" aria-hidden="true" style="left:0;width:${left}%"></div><div class="overview-shade" aria-hidden="true" style="left:${left + width}%;right:0"></div><div class="overview-window" data-overview-window style="left:${left}%;width:${width}%"></div><input class="overview-handle" data-overview="from" role="slider" aria-label="Chart window start" aria-valuemin="0" aria-valuemax="${all.length - 1}" aria-valuenow="${start}" aria-valuetext="${esc(fmtDay(all[start]))}" type="range" min="0" max="${all.length - 1}" value="${start}" step="1"><input class="overview-handle" data-overview="to" role="slider" aria-label="Chart window end" aria-valuemin="0" aria-valuemax="${all.length - 1}" aria-valuenow="${end}" aria-valuetext="${esc(fmtDay(all[end]))}" type="range" min="0" max="${all.length - 1}" value="${end}" step="1"></div>
+    <div class="overview-ends" aria-hidden="true">${overviewEndLabels(left, width, fmtDay(all[start]), fmtDay(all[end]))}</div>
     <div class="overview-status"><span class="overview-selection">${esc(overviewSelectionText(all, shown, state.chartView.axis))}</span>${state.zoom ? `<button type="button" class="btn ghost" data-zoom="reset">Show all</button><button type="button" class="btn ghost" data-zoom="filter">Filter to this range</button>` : `<span class="overview-hint">Drag a handle to zoom \u00b7 drag the window to pan \u00b7 click the strip to move it</span>`}</div>
     ${state.zoom ? `<div class="overview-pan"><button type="button" class="btn ghost" data-pan="-1" aria-label="Show earlier dates">\u2190 Earlier</button><button type="button" class="btn ghost" data-pan="1" aria-label="Show later dates">Later \u2192</button></div>` : ""}
     <p class="overview-scope">Charts only \u00b7 totals and table use the date filter</p></div>` : ""}

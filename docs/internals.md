@@ -385,7 +385,7 @@ absent field group do not render.
 ## Chart explorer
 
 The viewer's chart code stays in `viewer/public/app.js`; it adds no imports or
-dependencies. Viewer bundle version **29** makes the usage-patterns overview one labelled range selector with a square-root strip. IBM Plex
+dependencies. Viewer bundle version **30** makes the usage-patterns overview one labelled range selector with a square-root strip and labelled grips. IBM Plex
 Sans/Mono load through the original Google Fonts links, with local fallbacks.
 Google Fonts is the dashboard's one external network service besides pricing
 (the stylesheet can request multiple font files). SVG colours are read through
@@ -444,9 +444,13 @@ so quiet days stay visible beside spikes. Two native range handles overlaid on t
 strip share one highlighted window aligned to its columns: dragging a handle moves
 one end, dragging the window pans, and clicking the dimmed strip moves the window
 there. Each handle carries slider semantics with the formatted date as its value
-text; arrows move a day, PageUp/PageDown a week, Home/End the ends. A plain
-selection line names the shown dates with a day count, full-range endpoint dates
-sit under the strip, and a Show all reset appears when zoomed. Labelled
+text; arrows move a day, PageUp/PageDown a week, Home/End the ends. Each handle is a
+solid grip whose range is sized from the column count (`--cols`), so its thumb centre
+lands exactly on the window edge; days outside the window are dimmed. Each handle's
+date sits under it, growing away from the window while there is room, and a window
+too narrow for two dates gets one combined label kept inside the strip. A plain
+selection line names the shown dates with a day count, and a Show all reset appears
+when zoomed. Labelled
 Earlier/Later buttons pan only when zoomed and are hidden otherwise; pan buttons
 and Shift+arrows move the window while preserving width at boundaries. A
 charts-only scope line and the filter-to-range action keep this window separate
