@@ -24,7 +24,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 28: consistent unknown context and visible isolated context observations.
 // 29: usage-patterns overview as one labelled range selector with square-root strip.
 // 30: overview handles as solid grips on the window edges, each labelled with its date; unselected days dimmed.
-export const VIEWER_VERSION = "30";
+// 31: slim overview grips; the grab area stays wider than the drawn bar.
+export const VIEWER_VERSION = "31";
 
 // A project gets viewer/ and nothing else — no src/ tree beside it — so the
 // modules the bundled dashboard imports are copied in next to it, under the

@@ -554,15 +554,17 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 13px; color: var(--muted); text-transform
 .overview-handle[data-overview="to"] { left: calc(100% / var(--cols) - var(--thumb) / 2); }
 .overview-handle::-webkit-slider-runnable-track { background: transparent; height: 100%; }
 .overview-handle::-moz-range-track { background: transparent; height: 100%; }
-/* A solid grip with two ridges: something to take hold of, not a border. */
-.overview-handle::-webkit-slider-thumb { pointer-events: auto; -webkit-appearance: none; appearance: none; width: var(--thumb); height: 100%; margin: 0; border: 0; border-radius: 5px; cursor: ew-resize;
-  background: linear-gradient(90deg, transparent 5px, color-mix(in srgb, var(--panel) 85%, transparent) 5px 6.5px, transparent 6.5px 9.5px, color-mix(in srgb, var(--panel) 85%, transparent) 9.5px 11px, transparent 11px) center / 100% 38% no-repeat, var(--accent);
-  box-shadow: 0 1px 3px rgb(0 0 0 / .25); }
-.overview-handle::-moz-range-thumb { pointer-events: auto; width: var(--thumb); height: 100%; border: 0; border-radius: 5px; cursor: ew-resize;
-  background: linear-gradient(90deg, transparent 5px, color-mix(in srgb, var(--panel) 85%, transparent) 5px 6.5px, transparent 6.5px 9.5px, color-mix(in srgb, var(--panel) 85%, transparent) 9.5px 11px, transparent 11px) center / 100% 38% no-repeat, var(--accent);
-  box-shadow: 0 1px 3px rgb(0 0 0 / .25); }
-.overview-handle:hover::-webkit-slider-thumb, .overview-handle:active::-webkit-slider-thumb { filter: brightness(1.12); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent); }
-.overview-handle:hover::-moz-range-thumb, .overview-handle:active::-moz-range-thumb { filter: brightness(1.12); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent); }
+/* A slim grip on the window's edge with one ridge at its middle; the grab area stays wider than what is drawn. */
+.overview-handle::-webkit-slider-thumb { pointer-events: auto; -webkit-appearance: none; appearance: none; width: var(--thumb); height: 100%; margin: 0; cursor: ew-resize; box-sizing: border-box;
+  border: 0 solid transparent; border-width: 0 5px; border-radius: 8px; background-clip: padding-box;
+  background: linear-gradient(color-mix(in srgb, var(--panel) 90%, transparent), color-mix(in srgb, var(--panel) 90%, transparent)) center / 2px 12px no-repeat padding-box, var(--accent) padding-box;
+  filter: drop-shadow(0 1px 1.5px rgb(0 0 0 / .22)); }
+.overview-handle::-moz-range-thumb { pointer-events: auto; width: var(--thumb); height: 100%; margin: 0; cursor: ew-resize; box-sizing: border-box;
+  border: 0 solid transparent; border-width: 0 5px; border-radius: 8px; background-clip: padding-box;
+  background: linear-gradient(color-mix(in srgb, var(--panel) 90%, transparent), color-mix(in srgb, var(--panel) 90%, transparent)) center / 2px 12px no-repeat padding-box, var(--accent) padding-box;
+  filter: drop-shadow(0 1px 1.5px rgb(0 0 0 / .22)); }
+.overview-handle:hover::-webkit-slider-thumb, .overview-handle:active::-webkit-slider-thumb { filter: brightness(1.15) drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 55%, transparent)); }
+.overview-handle:hover::-moz-range-thumb, .overview-handle:active::-moz-range-thumb { filter: brightness(1.15) drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 55%, transparent)); }
 /* Each handle's own date sits under it, growing away from the window while there is room. */
 .overview-ends { position: relative; height: 16px; margin: 6px 8px 0; font: 10px var(--mono); color: var(--text); }
 .overview-end-label { position: absolute; top: 0; white-space: nowrap; padding: 0 2px; }

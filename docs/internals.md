@@ -385,7 +385,7 @@ absent field group do not render.
 ## Chart explorer
 
 The viewer's chart code stays in `viewer/public/app.js`; it adds no imports or
-dependencies. Viewer bundle version **30** makes the usage-patterns overview one labelled range selector with a square-root strip and labelled grips. IBM Plex
+dependencies. Viewer bundle version **31** makes the usage-patterns overview one labelled range selector with a square-root strip and labelled grips. IBM Plex
 Sans/Mono load through the original Google Fonts links, with local fallbacks.
 Google Fonts is the dashboard's one external network service besides pricing
 (the stylesheet can request multiple font files). SVG colours are read through
@@ -445,7 +445,7 @@ strip share one highlighted window aligned to its columns: dragging a handle mov
 one end, dragging the window pans, and clicking the dimmed strip moves the window
 there. Each handle carries slider semantics with the formatted date as its value
 text; arrows move a day, PageUp/PageDown a week, Home/End the ends. Each handle is a
-solid grip whose range is sized from the column count (`--cols`), so its thumb centre
+slim grip (a 6px bar with one ridge, inside a 16px grab area) whose range is sized from the column count (`--cols`), so its thumb centre
 lands exactly on the window edge; days outside the window are dimmed. Each handle's
 date sits under it, growing away from the window while there is room, and a window
 too narrow for two dates gets one combined label kept inside the strip. A plain
