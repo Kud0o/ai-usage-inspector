@@ -760,6 +760,24 @@ test("a plain wheel over a chart scrolls the page; Ctrl or ⌘ with the wheel zo
   assert.ok(ui.run('state.zoom'), "⌘ + wheel zooms on a Mac");
 });
 
+test("a Safari pinch zooms around where it started once the fingers lift, and never zooms the page", () => {
+  const ui = chartUi(onDays(DAYS)); ui.run('renderCharts()'); chartEvents(ui);
+  ui.run('globalThis.prevented=0; globalThis.g=(t,p)=>fire(t,{preventDefault(){prevented++},...p})');
+  ui.run('g("gesturestart",{clientX:50}); g("gestureend",{scale:1.04})');
+  assert.equal(ui.run('state.zoom'), null, "a pinch too small to mean anything is ignored");
+  ui.run('prevented=0; g("gesturestart",{clientX:90}); g("gesturechange",{scale:2})');
+  assert.equal(ui.run('prevented'), 2, "the page does not zoom");
+  assert.equal(ui.run('state.zoom'), null, "nothing redraws mid-gesture");
+  ui.run('g("gestureend",{scale:2})');
+  const inZoom = { ...ui.run('state.zoom') };
+  const shown = ui.run('daysInZoom(CHART_DAYS.allKeys, state.zoom).length');
+  assert.ok(shown >= 14 && shown <= 16, `spreading two fingers to 2x halves the window (${shown} of 30 days)`);
+  // Anchored where the pinch began (90% across): that day keeps its place, so the window sits at the right.
+  assert.ok(inZoom.from > DAYS[10] && inZoom.to >= DAYS[26], `window follows the pinch point (${inZoom.from}–${inZoom.to})`);
+  ui.run('g("gesturestart",{clientX:50}); g("gestureend",{scale:0.5})');
+  assert.ok(ui.run('daysInZoom(CHART_DAYS.allKeys, state.zoom).length') > shown, "pinching in widens the window again");
+});
+
 test("chart mouse drag selects full period endpoints and hover never redraws", () => {
   const ui = chartUi(onDays(DAYS)); ui.run('state.chartView.grain="week"; renderCharts()'); chartEvents(ui);
   ui.run('fire("mousemove",{clientX:30})');

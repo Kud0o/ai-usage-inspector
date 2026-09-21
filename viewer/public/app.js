@@ -1239,6 +1239,21 @@ function attachChart(chart) {
     state.zoom = next;
     renderCharts();
   }, { passive: false });
+  // Safari reports a trackpad pinch as gesture events carrying a scale, not as Ctrl + wheel. The pinch is
+  // applied once the fingers lift: zooming mid-gesture would redraw the chart, and Safari keeps sending the
+  // rest of the gesture to the element that was replaced. Taking gesturestart also stops the page zooming.
+  let pinchAt = 0.5;
+  chart.addEventListener("gesturestart", (event) => { event.preventDefault(); pinchAt = ratioAt(event); });
+  chart.addEventListener("gesturechange", (event) => event.preventDefault());
+  chart.addEventListener("gestureend", (event) => {
+    event.preventDefault();
+    const scale = Number(event.scale);
+    if (CHART_DAYS.allKeys.length < 3 || !(scale > 0) || Math.abs(Math.log(scale)) < 0.05) return;
+    const next = zoomByFactor(CHART_DAYS.allKeys, state.zoom, Math.min(5, Math.max(0.2, 1 / scale)), pinchAt);
+    if (next === state.zoom || (!next && !state.zoom)) return;
+    state.zoom = next;
+    renderCharts();
+  });
   // Touch pans the page vertically; horizontal drags select a chart window.
   // Mouse listeners remain for compatibility; pointer listeners handle touch/pen only.
   chart.addEventListener("pointerdown", (event) => {

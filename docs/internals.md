@@ -467,8 +467,11 @@ zoom and Escape to reset. Focus is restored after redraws. Pointer movement upda
 only overlays, with tooltip content cached for the current period. Touch/pen use
 pointer capture with vertical page scrolling allowed, and cancellation clears
 overlays. Mouse hover/drag/double-click remain supported; the wheel zooms only with
-Ctrl or ⌘ held (a trackpad pinch arrives that way too), so a plain scroll over a
-chart scrolls the page. Expandable data
+Ctrl or ⌘ held (a trackpad pinch arrives that way in Chrome, Edge and Firefox), so a
+plain scroll over a chart scrolls the page. Safari reports a pinch as gesture events
+instead; the chart takes them (so the page does not zoom) and applies the pinch's
+scale when the fingers lift, anchored where it began. Zooming mid-gesture would
+redraw the chart while Safari keeps sending the gesture to the replaced element. Expandable data
 tables provide a text alternative. Donut slice and legend highlighting stays local
 to each card; legend entries are keyboard focusable and retain their share titles.
 
