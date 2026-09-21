@@ -882,9 +882,9 @@ const comparisonFormat = new Intl.NumberFormat(undefined, { style: "percent", ma
 /** The state of a zoom, and the two things worth doing about it. */
 function zoomBar(allKeys, shown) {
   if (!allKeys.length) return "";
-  const help = `<details class="chart-help"><summary>Keyboard &amp; help</summary><p>Drag to zoom · scroll or +/− to scale · ←/→ to read · Home/End for endpoints · Shift+←/→ to pan · Escape or double-click to reset</p></details>`;
+  const help = `<details class="chart-help"><summary>Keyboard &amp; help</summary><p>Drag to zoom · Ctrl/⌘ + scroll, pinch or +/− to scale · ←/→ to read · Home/End for endpoints · Shift+←/→ to pan · Escape or double-click to reset</p></details>`;
   if (!state.zoom) {
-    return `<div class="chart-zoom"><span class="hint">Drag to zoom · hover or tap to read</span>${help}</div>`;
+    return `<div class="chart-zoom"><span class="hint">Drag or Ctrl + scroll to zoom · hover or tap to read</span>${help}</div>`;
   }
   return `<div class="chart-zoom">
     <span class="range">${esc(overviewSelectionText(allKeys, shown, state.chartView.axis))}</span>
@@ -1227,7 +1227,10 @@ function attachChart(chart) {
     renderCharts();
   });
 
+  // A plain wheel scrolls the page, as it does anywhere else; Ctrl (⌘ on a Mac) zooms, the way maps do.
+  // A trackpad pinch arrives as a wheel with ctrlKey set, so pinching zooms too.
   chart.addEventListener("wheel", (event) => {
+    if (!(event.ctrlKey || event.metaKey)) return;
     if (CHART_DAYS.allKeys.length < 3) return;
     event.preventDefault();
     const next = zoomByFactor(CHART_DAYS.allKeys, state.zoom, event.deltaY < 0 ? 0.8 : 1.25, ratioAt(event));

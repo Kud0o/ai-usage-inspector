@@ -746,6 +746,20 @@ test("chart keyboard listener updates readout without redrawing and restores foc
   assert.equal(ui.run('state.zoom'), null);
 });
 
+test("a plain wheel over a chart scrolls the page; Ctrl or ⌘ with the wheel zooms", () => {
+  const ui = chartUi(onDays(DAYS)); ui.run('renderCharts()'); chartEvents(ui);
+  ui.run('globalThis.prevented=0; globalThis.wheel=(p)=>fire("wheel",{deltaY:-100,preventDefault(){prevented++},...p})');
+  ui.run('wheel({})');
+  assert.equal(ui.run('prevented'), 0, "the page is free to scroll");
+  assert.equal(ui.run('state.zoom'), null);
+  assert.equal(ui.run('redraws'), 0);
+  ui.run('wheel({ctrlKey:true})');
+  assert.equal(ui.run('prevented'), 1, "Ctrl + wheel (and a pinch) is taken by the chart");
+  assert.ok(ui.run('state.zoom'), "and zooms it");
+  ui.run('state.zoom=null; wheel({metaKey:true})');
+  assert.ok(ui.run('state.zoom'), "⌘ + wheel zooms on a Mac");
+});
+
 test("chart mouse drag selects full period endpoints and hover never redraws", () => {
   const ui = chartUi(onDays(DAYS)); ui.run('state.chartView.grain="week"; renderCharts()'); chartEvents(ui);
   ui.run('fire("mousemove",{clientX:30})');
@@ -974,7 +988,7 @@ test("round two chart option changes persist and help keeps shortcuts disclosed"
     document.querySelectorAll=s=>s==="#charts [data-chart-option]"?[select]:[];wireCharts();select.change();`);
   assert.equal(ui.run('saves'),1);
   const hint=ui.run('zoomBar(CHART_DAYS.allKeys,CHART_DAYS.keys)');
-  assert.match(hint,/<span class="hint">Drag to zoom · hover or tap to read<\/span>/);
+  assert.match(hint,/<span class="hint">Drag or Ctrl \+ scroll to zoom · hover or tap to read<\/span>/);
   assert.match(hint,/<details class="chart-help"><summary>Keyboard &amp; help<\/summary>/);
   assert.match(hint,/Shift\+←\/→ to pan/);
 });

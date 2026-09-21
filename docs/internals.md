@@ -466,7 +466,9 @@ shortcut list. Time charts support keyboard focus, arrows/Home/End for period re
 zoom and Escape to reset. Focus is restored after redraws. Pointer movement updates
 only overlays, with tooltip content cached for the current period. Touch/pen use
 pointer capture with vertical page scrolling allowed, and cancellation clears
-overlays. Mouse hover/drag/wheel/double-click remain supported. Expandable data
+overlays. Mouse hover/drag/double-click remain supported; the wheel zooms only with
+Ctrl or ⌘ held (a trackpad pinch arrives that way too), so a plain scroll over a
+chart scrolls the page. Expandable data
 tables provide a text alternative. Donut slice and legend highlighting stays local
 to each card; legend entries are keyboard focusable and retain their share titles.
 
