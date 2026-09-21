@@ -385,7 +385,7 @@ absent field group do not render.
 ## Chart explorer
 
 The viewer's chart code stays in `viewer/public/app.js`; it adds no imports or
-dependencies. Viewer bundle version **31** makes the usage-patterns overview one labelled range selector with a square-root strip and labelled grips. IBM Plex
+dependencies. Viewer bundle version **33** makes the usage-patterns overview one labelled range selector with a square-root strip and labelled grips. IBM Plex
 Sans/Mono load through the original Google Fonts links, with local fallbacks.
 Google Fonts is the dashboard's one external network service besides pricing
 (the stylesheet can request multiple font files). SVG colours are read through
