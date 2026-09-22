@@ -208,6 +208,20 @@ test("viewer tree keeps branches, child sessions and runs attached without count
   assert.equal((ui.html().match(/class="run-row"/g) || []).length, 2, "run expansion survives grouping toggle");
 });
 
+test("a session header shows how long its turns took, and nothing when timing is off or unknown", () => {
+  const turn = (i, ms) => ({ provider: "claude", sessionId: "feat", id: `feat:${i}`, ts: `2026-08-11T09:0${i}:00.000Z`, prompt: "p", promptChars: 1,
+    response: "r", responseChars: 1, model: "claude-opus-5", usage: { input: 1, output: 1 }, cost: { total: 1, source: "priced" }, sessionName: "Checkout", durationMs: ms });
+  let ui = viewerUi([turn(0, 30 * 60_000), turn(1, 32 * 60_000)]);
+  ui.run("renderTable()");
+  assert.match(ui.html(), /2 turns · <span title="Summed turn duration">1h 2m<\/span> · \$2\.000/, "time between turns and cost");
+  ui = viewerUi([turn(0, 0), turn(1, undefined)]);
+  ui.run("renderTable()");
+  assert.doesNotMatch(ui.html(), /Summed turn duration/, "no time shown when none was recorded");
+  ui = viewerUi([turn(0, 30 * 60_000)]);
+  ui.run("state.fields = { ...state.fields, timing: false }; renderTable()");
+  assert.doesNotMatch(ui.html(), /Summed turn duration/, "hidden with the timing field group");
+});
+
 test("viewer nests an opencode subagent session under its parent and its spawning turn", () => {
   const parent = {
     provider: "opencode", sessionId: "op", id: "op:0", ts: "2026-08-11T09:00:00.000Z",

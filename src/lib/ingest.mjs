@@ -27,7 +27,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 31: slim overview grips; the grab area stays wider than the drawn bar.
 // 32: a plain wheel over a chart scrolls the page; Ctrl/⌘ + wheel or a pinch zooms.
 // 33: Safari trackpad pinch zooms the time charts.
-export const VIEWER_VERSION = "33";
+// 34: session rows show the summed duration of their turns.
+export const VIEWER_VERSION = "34";
 
 // A project gets viewer/ and nothing else — no src/ tree beside it — so the
 // modules the bundled dashboard imports are copied in next to it, under the

@@ -1409,6 +1409,8 @@ function renderTable() {
     parent.children.push(g);
   }
   const agentItems = (g) => g.children.filter((child) => child.childAgent).flatMap((child) => [...child.items, ...agentItems(child)]);
+  // How long the session's own turns took, summed like the active-time card: the figure a feature is estimated from.
+  const sessionTime = (items) => { if (!has("timing")) return ""; const ms = items.reduce((n, e) => n + (Number(e.durationMs) || 0), 0); return ms > 0 ? `<span title="Summed turn duration">${esc(fmtDur(ms))}</span> · ` : ""; };
   const costTotal = (items) => items.some((e) => e.cost?.total == null) ? null : items.reduce((n, e) => n + e.cost.total, 0);
   const renderGroup = (g, depth = 0) => {
     const e = g.head, key = "session:" + g.key;
@@ -1421,7 +1423,7 @@ function renderTable() {
       ${expander(key, "Session " + (e.sessionName || e.sessionTitle || e.slug || e.sessionId))}
       <b>${esc(e.workspace)}</b> · <span class="session-label">${label}</span>
       ${orphan ? `<span class="tag">${child ? "agent of" : "branched from"} ${esc(String(child || e.branchOf).slice(0, 8))}</span>` : ""}
-      <span class="gstats">${esc(fmtInt(g.items.length))} turns · ${has("cost") ? `${valueHtml(costTotal(g.items), fmtUsd)} · ` : ""}session ${esc(String(e.sessionId || "").slice(0, 8))}</span>
+      <span class="gstats">${esc(fmtInt(g.items.length))} turns · ${sessionTime(g.items)}${has("cost") ? `${valueHtml(costTotal(g.items), fmtUsd)} · ` : ""}session ${esc(String(e.sessionId || "").slice(0, 8))}</span>
       ${has("cost") && related.length ? `<span class="tag">+ agents ${valueHtml(costTotal(related), fmtUsd)}</span>` : ""}
     </div></td></tr>`;
     if (isExpanded(key)) {
